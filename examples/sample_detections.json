@@ -1,0 +1,101 @@
+{
+  "num_objects": 2,
+  "detection_timestamp": "2025-11-07T10:30:45.123456",
+  "objects": [
+    {
+      "object_type": "cup",
+      "object_id": "red_cup_1",
+      "affordances": [
+        "graspable",
+        "pourable",
+        "containable"
+      ],
+      "position_2d": [450, 320],
+      "position_3d": [0.125, -0.050, 0.850],
+      "bounding_box_2d": [400, 280, 500, 360],
+      "properties": {
+        "color": "red",
+        "material": "ceramic",
+        "size": "medium",
+        "state": "upright"
+      },
+      "confidence": 0.95,
+      "timestamp": 1699358445.123,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [450, 340],
+          "position_3d": [0.130, -0.045, 0.855],
+          "confidence": 0.95,
+          "reasoning": "Handle on the right side provides the most stable grasp point for drinking",
+          "alternative_points": [
+            {
+              "point": [430, 310],
+              "reason": "Top rim grasp if handle is obstructed"
+            }
+          ]
+        },
+        "pourable": {
+          "position_2d": [450, 320],
+          "position_3d": [0.125, -0.050, 0.850],
+          "confidence": 0.90,
+          "reasoning": "Top rim center for tilting and pouring motion",
+          "alternative_points": []
+        },
+        "containable": {
+          "position_2d": [430, 310],
+          "position_3d": [0.120, -0.048, 0.845],
+          "confidence": 0.88,
+          "reasoning": "Interior cavity center can hold liquids or small objects",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "bottle",
+      "object_id": "blue_bottle_1",
+      "affordances": [
+        "graspable",
+        "pourable",
+        "openable"
+      ],
+      "position_2d": [480, 520],
+      "position_3d": [0.280, -0.030, 0.800],
+      "bounding_box_2d": [430, 470, 530, 570],
+      "properties": {
+        "color": "blue",
+        "material": "plastic",
+        "size": "large"
+      },
+      "confidence": 0.92,
+      "timestamp": 1699358445.123,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [500, 520],
+          "position_3d": [0.285, -0.028, 0.805],
+          "confidence": 0.93,
+          "reasoning": "Narrow neck section provides secure grip for transport",
+          "alternative_points": [
+            {
+              "point": [480, 540],
+              "reason": "Body grip for larger grippers"
+            }
+          ]
+        },
+        "pourable": {
+          "position_2d": [480, 510],
+          "position_3d": [0.280, -0.032, 0.795],
+          "confidence": 0.88,
+          "reasoning": "Opening at top for controlled pouring",
+          "alternative_points": []
+        },
+        "openable": {
+          "position_2d": [480, 500],
+          "position_3d": [0.280, -0.035, 0.790],
+          "confidence": 0.87,
+          "reasoning": "Cap at the top needs twisting to open",
+          "alternative_points": []
+        }
+      }
+    }
+  ]
+}

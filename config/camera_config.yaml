@@ -1,0 +1,48 @@
+# Camera Configuration
+
+# Default camera type: 'realsense', 'webcam', 'custom'
+default_camera: 'webcam'
+
+# RealSense Camera Settings
+realsense:
+  resolution:
+    width: 640
+    height: 480
+  framerate: 30
+  depth_enabled: true
+  color_scheme: 'RGB8'
+
+  # Depth settings
+  depth:
+    min_distance: 0.1  # meters
+    max_distance: 10.0  # meters
+
+  # Post-processing filters
+  filters:
+    spatial_filter: true
+    temporal_filter: true
+    hole_filling: true
+
+# Webcam Settings
+webcam:
+  device_id: 0
+  resolution:
+    width: 640
+    height: 480
+  framerate: 30
+
+  # Simulated depth (for webcam without depth sensor)
+  depth_estimation:
+    enabled: false
+    method: 'monocular'  # 'monocular', 'none'
+
+# Camera calibration
+calibration:
+  auto_calibrate: true
+  calibration_file: null  # Path to calibration file if available
+
+# Frame capture settings
+capture:
+  buffer_size: 5
+  timeout_ms: 5000
+  retry_attempts: 3

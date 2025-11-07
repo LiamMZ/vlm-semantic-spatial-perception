@@ -1,0 +1,43 @@
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+PyYAML>=6.0
+
+# VLM and AI
+google-generativeai>=0.3.0
+google-genai>=0.1.0  # New GenAI SDK for Gemini Robotics
+anthropic>=0.25.0
+openai>=1.0.0
+
+# Camera support
+pyrealsense2>=2.55.0  # Intel RealSense cameras
+
+# PDDL and planning
+pddl>=0.3.0
+
+# Spatial computing
+scipy>=1.11.0
+scikit-learn>=1.3.0
+open3d>=0.18.0  # 3D visualization and point cloud processing
+
+# Utilities
+python-dotenv>=1.0.0
+loguru>=0.7.0
+tqdm>=4.66.0
+
+# Visualization
+matplotlib>=3.7.0
+plotly>=5.18.0
+
+# Optional: Object detection models
+# torch>=2.0.0
+# torchvision>=0.15.0
+# ultralytics>=8.0.0  # YOLOv8
+
+# Development
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0

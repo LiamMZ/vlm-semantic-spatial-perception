@@ -1,0 +1,55 @@
+# Gemini API Configuration
+
+# API settings
+api:
+  key_env_var: 'GEMINI_API_KEY'  # Environment variable name
+  timeout: 30  # seconds
+  max_retries: 3
+
+# Model selection
+models:
+  # Vision model for general object detection
+  vision:
+    name: 'gemini-1.5-pro'
+    temperature: 0.3
+    max_tokens: 2048
+    top_p: 0.95
+    top_k: 40
+
+  # Robotics ER model for affordance detection
+  robotics_er:
+    name: 'gemini-2.0-flash-exp'  # Update with actual robotics ER model name
+    temperature: 0.2
+    max_tokens: 4096
+    top_p: 0.9
+    structured_output: true
+
+# Request settings
+request:
+  batch_size: 1
+  rate_limit:
+    requests_per_minute: 60
+    tokens_per_minute: 30000
+
+# Image processing before API call
+image_processing:
+  resize:
+    enabled: true
+    max_dimension: 1024
+    maintain_aspect: true
+  compression:
+    enabled: true
+    quality: 90
+    format: 'JPEG'
+
+# Response parsing
+response:
+  retry_on_error: true
+  validate_json: true
+  fallback_to_text: true
+
+# Caching
+cache:
+  enabled: true
+  ttl_seconds: 300
+  max_entries: 100

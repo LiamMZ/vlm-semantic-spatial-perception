@@ -1,0 +1,561 @@
+{
+  "num_objects": 7,
+  "detection_timestamp": "2025-11-07T13:13:14.664450",
+  "objects": [
+    {
+      "object_type": "electrical cord",
+      "object_id": "white_electrical_cord",
+      "affordances": [
+        "pullable",
+        "graspable",
+        "pushable"
+      ],
+      "position_2d": [
+        450,
+        300
+      ],
+      "position_3d": [
+        -0.18386751413345337,
+        -0.041317153722047806,
+        0.8450000286102295
+      ],
+      "bounding_box_2d": [
+        0,
+        100,
+        900,
+        500
+      ],
+      "properties": {
+        "color": "white",
+        "material": "plastic",
+        "size": "long, thin",
+        "state": "draped over stove burners"
+      },
+      "confidence": 0.95,
+      "timestamp": 1762539174.965018,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [
+            600,
+            300
+          ],
+          "position_3d": [
+            -0.1590617150068283,
+            0.051480941474437714,
+            0.7310000061988831
+          ],
+          "confidence": 0.95,
+          "reasoning": "The cord's length provides multiple grasp points; the section over the lower burner is easily accessible.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "position_2d": [
+            600,
+            300
+          ],
+          "position_3d": [
+            -0.1590617150068283,
+            0.051480941474437714,
+            0.7310000061988831
+          ],
+          "confidence": 0.9,
+          "reasoning": "Pulling on any section of the cord can reposition it or potentially move connected devices.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "position_2d": [
+            600,
+            300
+          ],
+          "position_3d": [
+            -0.1590617150068283,
+            0.051480941474437714,
+            0.7310000061988831
+          ],
+          "confidence": 0.85,
+          "reasoning": "The cord can be pushed to move it off the stove surface, though it might spring back due to tension.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "plastic bottle",
+      "object_id": "blue_plastic_bottle",
+      "affordances": [
+        "supportable",
+        "closable",
+        "openable",
+        "pourable",
+        "graspable",
+        "containable",
+        "pushable"
+      ],
+      "position_2d": [
+        590,
+        625
+      ],
+      "position_3d": [
+        0.0664764940738678,
+        0.03249878063797951,
+        0.5230000019073486
+      ],
+      "bounding_box_2d": [
+        390,
+        560,
+        790,
+        695
+      ],
+      "properties": {
+        "color": "blue",
+        "material": "plastic",
+        "size": "medium",
+        "state": "upright, clamped",
+        "contents": "liquid (implied)"
+      },
+      "confidence": 0.95,
+      "timestamp": 1762539175.4349208,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [
+            590,
+            625
+          ],
+          "position_3d": [
+            0.0664764940738678,
+            0.03249878063797951,
+            0.5230000019073486
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cylindrical body of the bottle provides a suitable surface for grasping, though part of it is currently occupied by a clamp.",
+          "alternative_points": []
+        },
+        "pourable": {
+          "position_2d": [
+            400,
+            625
+          ],
+          "position_3d": [
+            0.06456990540027618,
+            -0.04504427686333656,
+            0.5080000162124634
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cap can be removed to pour the liquid contents from the bottle's opening.",
+          "alternative_points": []
+        },
+        "openable": {
+          "position_2d": [
+            400,
+            625
+          ],
+          "position_3d": [
+            0.06456990540027618,
+            -0.04504427686333656,
+            0.5080000162124634
+          ],
+          "confidence": 0.95,
+          "reasoning": "The blue cap is a screw cap designed to be twisted to open the bottle.",
+          "alternative_points": []
+        },
+        "closable": {
+          "position_2d": [
+            400,
+            625
+          ],
+          "position_3d": [
+            0.06456990540027618,
+            -0.04504427686333656,
+            0.5080000162124634
+          ],
+          "confidence": 0.95,
+          "reasoning": "The blue cap can be twisted back on to close the bottle.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "Keurig coffee machine",
+      "object_id": "black_keurig_coffee_machine",
+      "affordances": [
+        "openable",
+        "graspable",
+        "containable",
+        "operable",
+        "pushable"
+      ],
+      "position_2d": [
+        345,
+        775
+      ],
+      "position_3d": [
+        0.22094547748565674,
+        -0.10299666225910187,
+        0.7720000147819519
+      ],
+      "bounding_box_2d": [
+        180,
+        650,
+        510,
+        900
+      ],
+      "properties": {
+        "color": "black",
+        "material": "plastic",
+        "size": "medium appliance",
+        "state": "upright"
+      },
+      "confidence": 0.98,
+      "timestamp": 1762539175.4422898,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [
+            350,
+            700
+          ],
+          "position_3d": [
+            0.17296810448169708,
+            -0.10750733315944672,
+            0.8370000123977661
+          ],
+          "confidence": 0.9,
+          "reasoning": "The side of the machine offers a stable surface to grasp for repositioning or lifting.",
+          "alternative_points": []
+        },
+        "operable": {
+          "position_2d": [
+            250,
+            780
+          ],
+          "position_3d": [
+            0.1843108981847763,
+            -0.13165844976902008,
+            0.6330000162124634
+          ],
+          "confidence": 0.95,
+          "reasoning": "The top section of the machine contains the lid for inserting coffee pods and likely control buttons for starting the brewing process.",
+          "alternative_points": []
+        },
+        "openable": {
+          "position_2d": [
+            250,
+            780
+          ],
+          "position_3d": [
+            0.1843108981847763,
+            -0.13165844976902008,
+            0.6330000162124634
+          ],
+          "confidence": 0.9,
+          "reasoning": "The top lid needs to be opened to insert a coffee pod for brewing.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "glue stick",
+      "object_id": "orange_and_white_glue_stick",
+      "affordances": [
+        "openable",
+        "graspable",
+        "pushable"
+      ],
+      "position_2d": [
+        760,
+        410
+      ],
+      "position_3d": [
+        -0.06583006680011749,
+        0.12725147604942322,
+        0.6480000019073486
+      ],
+      "bounding_box_2d": [
+        700,
+        380,
+        820,
+        440
+      ],
+      "properties": {
+        "color": "orange and white",
+        "size": "small",
+        "material": "plastic",
+        "state": "lying horizontally on the stovetop"
+      },
+      "confidence": 0.95,
+      "timestamp": 1762539176.8199935,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [
+            760,
+            410
+          ],
+          "position_3d": [
+            -0.06583006680011749,
+            0.12725147604942322,
+            0.6480000019073486
+          ],
+          "confidence": 0.95,
+          "reasoning": "The cylindrical body provides a stable surface for a pinch or parallel jaw grasp.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "position_2d": [
+            760,
+            410
+          ],
+          "position_3d": [
+            -0.06583006680011749,
+            0.12725147604942322,
+            0.6480000019073486
+          ],
+          "confidence": 0.9,
+          "reasoning": "The object can be pushed along the flat stovetop surface.",
+          "alternative_points": []
+        },
+        "openable": {
+          "position_2d": [
+            710,
+            410
+          ],
+          "position_3d": [
+            -0.06796345114707947,
+            0.10476668924093246,
+            0.6690000295639038
+          ],
+          "confidence": 0.85,
+          "reasoning": "The white cap at the top end can be removed to expose the glue stick inside.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "electric stove top",
+      "object_id": "black_electric_stove_top",
+      "affordances": [
+        "supportable",
+        "cookable",
+        "cleanable"
+      ],
+      "position_2d": [
+        600,
+        250
+      ],
+      "position_3d": [
+        -0.19945105910301208,
+        0.05190349370241165,
+        0.737000048160553
+      ],
+      "bounding_box_2d": [
+        200,
+        0,
+        1000,
+        500
+      ],
+      "properties": {
+        "color": "black",
+        "material": "ceramic glass or enamel-coated metal",
+        "size": "large",
+        "state": "off (burners are not glowing red)",
+        "features": "multiple electric coil burners"
+      },
+      "confidence": 0.95,
+      "timestamp": 1762539178.1983323,
+      "interaction_points": {
+        "supportable": {
+          "position_2d": [
+            600,
+            250
+          ],
+          "position_3d": [
+            -0.19945105910301208,
+            0.05190349370241165,
+            0.737000048160553
+          ],
+          "confidence": 0.95,
+          "reasoning": "The flat surface of the stove top provides a stable area to place objects.",
+          "alternative_points": []
+        },
+        "cookable": {
+          "position_2d": [
+            600,
+            250
+          ],
+          "position_3d": [
+            -0.19945105910301208,
+            0.05190349370241165,
+            0.737000048160553
+          ],
+          "confidence": 0.9,
+          "reasoning": "The heating elements (burners) are designed for cooking food in pots or pans.",
+          "alternative_points": []
+        },
+        "cleanable": {
+          "position_2d": [
+            600,
+            250
+          ],
+          "position_3d": [
+            -0.19945105910301208,
+            0.05190349370241165,
+            0.737000048160553
+          ],
+          "confidence": 0.9,
+          "reasoning": "The smooth, non-porous surface can be wiped clean.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "C-clamp",
+      "object_id": "grey_metal_c-clamp",
+      "affordances": [
+        "supportable",
+        "turnable",
+        "graspable",
+        "closable"
+      ],
+      "position_2d": [
+        787,
+        706
+      ],
+      "position_3d": [
+        0.12972557544708252,
+        0.1335848867893219,
+        0.6130000352859497
+      ],
+      "bounding_box_2d": [
+        682,
+        529,
+        900,
+        883
+      ],
+      "properties": {
+        "color": "grey",
+        "material": "metal",
+        "size": "medium",
+        "state": "clamped, supporting a bottle against the counter edge"
+      },
+      "confidence": 0.95,
+      "timestamp": 1762539186.5961804,
+      "interaction_points": {
+        "graspable": {
+          "position_2d": [
+            750,
+            580
+          ],
+          "position_3d": [
+            0.04853477701544762,
+            0.11650451272726059,
+            0.6140000224113464
+          ],
+          "confidence": 0.95,
+          "reasoning": "The C-shaped frame provides a stable surface for grasping.",
+          "alternative_points": []
+        },
+        "turnable": {
+          "position_2d": [
+            720,
+            860
+          ],
+          "position_3d": [
+            0.2359323352575302,
+            0.10354975610971451,
+            0.628000020980835
+          ],
+          "confidence": 0.9,
+          "reasoning": "The T-handle at the end of the screw is designed for turning to adjust the clamp's tension.",
+          "alternative_points": []
+        },
+        "closable": {
+          "position_2d": [
+            720,
+            860
+          ],
+          "position_3d": [
+            0.2359323352575302,
+            0.10354975610971451,
+            0.628000020980835
+          ],
+          "confidence": 0.9,
+          "reasoning": "Turning the T-handle clockwise tightens (closes) the clamp.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_type": "countertop",
+      "object_id": "white_countertop_surface",
+      "affordances": [
+        "supportable",
+        "placeable",
+        "cleanable"
+      ],
+      "position_2d": [
+        550,
+        740
+      ],
+      "position_3d": [
+        0.18432556092739105,
+        0.022774111479520798,
+        0.7430000305175781
+      ],
+      "bounding_box_2d": [
+        100,
+        480,
+        1000,
+        1000
+      ],
+      "properties": {
+        "color": "white",
+        "material": "laminate or solid surface material",
+        "size": "large",
+        "state": "flat, horizontal"
+      },
+      "confidence": 0.95,
+      "timestamp": 1762539188.233935,
+      "interaction_points": {
+        "supportable": {
+          "position_2d": [
+            550,
+            740
+          ],
+          "position_3d": [
+            0.18432556092739105,
+            0.022774111479520798,
+            0.7430000305175781
+          ],
+          "confidence": 0.95,
+          "reasoning": "The flat, horizontal surface is designed to support various objects, as demonstrated by the Keurig machine and bottle resting on it.",
+          "alternative_points": []
+        },
+        "placeable": {
+          "position_2d": [
+            550,
+            740
+          ],
+          "position_3d": [
+            0.18432556092739105,
+            0.022774111479520798,
+            0.7430000305175781
+          ],
+          "confidence": 0.95,
+          "reasoning": "Objects can be placed anywhere on the visible surface area.",
+          "alternative_points": []
+        },
+        "cleanable": {
+          "position_2d": [
+            550,
+            740
+          ],
+          "position_3d": [
+            0.18432556092739105,
+            0.022774111479520798,
+            0.7430000305175781
+          ],
+          "confidence": 0.9,
+          "reasoning": "The entire surface area can be wiped or cleaned.",
+          "alternative_points": []
+        }
+      }
+    }
+  ]
+}

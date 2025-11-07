@@ -1,0 +1,109 @@
+# Perception System Configuration
+
+# VLM Object Detection
+vlm:
+  enabled: true
+  confidence_threshold: 0.6
+  max_objects: 30
+  min_object_size: 0.01  # minimum size in meters
+
+  # Object categories to detect
+  categories:
+    - 'furniture'
+    - 'kitchenware'
+    - 'tools'
+    - 'containers'
+    - 'electronics'
+
+  # Detection frequency
+  detection_rate: 5  # Hz
+
+# Spatial Analysis
+spatial:
+  # Coordinate system: 'camera', 'world', 'robot_base'
+  coordinate_frame: 'camera'
+
+  # Spatial relationship detection
+  relationships:
+    enabled: true
+    types:
+      - 'on'
+      - 'in'
+      - 'near'
+      - 'above'
+      - 'below'
+      - 'left_of'
+      - 'right_of'
+      - 'in_front_of'
+      - 'behind'
+
+    # Thresholds for relationships
+    thresholds:
+      near_distance: 0.3  # meters
+      contact_distance: 0.05  # meters
+
+  # 3D position estimation
+  position_estimation:
+    method: 'depth_centroid'  # 'depth_centroid', 'plane_fitting', 'point_cloud'
+    smoothing:
+      enabled: true
+      window_size: 5
+      method: 'exponential'  # 'moving_average', 'exponential', 'kalman'
+
+# Scene Graph
+scene_graph:
+  enabled: true
+  update_frequency: 2  # Hz
+  max_edges: 100
+  prune_old_edges: true
+  edge_timeout: 10  # seconds
+
+# Affordance Detection (via Gemini ER)
+affordances:
+  enabled: true
+  query_frequency: 1  # Hz (lower than detection to save API calls)
+
+  # Types of affordances to detect
+  types:
+    - 'graspable'
+    - 'pushable'
+    - 'openable'
+    - 'closeable'
+    - 'containable'
+    - 'supportable'
+
+  # Interaction points
+  interaction_points:
+    extract_grasp_points: true
+    extract_push_points: true
+    extract_contact_surfaces: true
+    min_confidence: 0.5
+
+# World Model
+world_model:
+  update_frequency: 10  # Hz
+
+  # Object tracking
+  tracking:
+    enabled: true
+    persistence_time: 5.0  # seconds - how long to keep unobserved objects
+    position_tolerance: 0.1  # meters - match threshold for object identity
+
+  # History
+  history:
+    enabled: true
+    max_length: 1000
+    save_to_disk: true
+
+# Performance
+performance:
+  max_fps: 10
+  async_processing: true
+  num_workers: 2
+
+# Logging and debugging
+debug:
+  visualize_detections: true
+  save_frames: false
+  save_interval: 10  # frames
+  log_level: 'INFO'  # 'DEBUG', 'INFO', 'WARNING', 'ERROR'
