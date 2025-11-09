@@ -114,6 +114,46 @@ python examples/test_gemini_detection.py
 
 ---
 
+### [pddl_predicate_tracking_demo.py](pddl_predicate_tracking_demo.py) - Continuous PDDL Predicate Tracking
+
+**Real-time PDDL generation with continuous object tracking and state updates.**
+
+```bash
+python examples/pddl_predicate_tracking_demo.py
+```
+
+**Interactive workflow:**
+1. **User provides task** - Natural language description (e.g., "Clean the mug and place it on the shelf")
+2. **LLM task analysis** - Semantically analyzes task to extract PDDL predicates (no keyword matching)
+3. **PDDL initialization** - Creates domain with LLM-extracted predicates BEFORE tracking
+4. **Tracker seeding** - Seeds continuous tracker with PDDL predicates from domain
+5. **Continuous tracking** - Detects objects and predicate states in real-time (10 seconds)
+6. **Live PDDL updates** - Initial state updates as new objects are detected
+7. **Goal generation** - Extracts goal state from LLM analysis
+8. **Final PDDL files** - Generates domain.pddl and problem.pddl for planning
+
+**Key features:**
+- ✅ **Interactive task input** - User defines task after startup
+- ✅ **LLM-based predicate extraction** - No keyword matching, semantic understanding
+- ✅ **PDDL-first architecture** - PDDL initialized before tracker to seed predicates
+- ✅ **Continuous updates** - PDDL state updates in real-time as objects appear
+- ✅ **Camera or simulation** - Works with RealSense camera or simulated detection
+- ✅ **Complete pipeline** - Task → LLM Analysis → PDDL Domain → Tracker → Planning
+
+**LLM extracts:**
+- Task-relevant predicates (semantic, not keyword-based)
+- Required actions for the task
+- Goal conditions and constraints
+- Object types and relationships
+
+**Use this for:**
+- Real-time perception-to-planning integration
+- Continuous world state monitoring
+- Task-specific predicate tracking
+- Dynamic PDDL generation from vision
+
+---
+
 ### [simple_demo.py](simple_demo.py) - Basic Components Demo
 
 Legacy demonstration of individual system components with mock data.
@@ -185,6 +225,7 @@ python examples/gemini_robotics_example.py
 |------|---------|-------|-----|-------------|----------|
 | **dynamic_pddl_demo.py** | Real VLM | User input | ✅ | ✅ | Full pipeline, real-world use |
 | **gemini_robotics_example.py** | Real VLM | User input | ✅ | ✅ | Testing Gemini features |
+| **pddl_predicate_tracking_demo.py** | Real/Sim | User input | ✅ | ✅ | Continuous PDDL tracking |
 | **test_gemini_detection.py** | Synthetic | None | ✅ | ✅ | Debugging, setup |
 | **simple_demo.py** | Mock data | Pre-defined | ❌ | ❌ | Learning components |
 

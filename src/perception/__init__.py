@@ -23,6 +23,7 @@ from .object_registry import (
     InteractionPoint,
     DetectedObjectRegistry
 )
+from .continuous_tracker import ContinuousObjectTracker, TrackingStats
 from .vlm_detector import VLMObjectDetector
 
 __all__ = [
@@ -38,6 +39,9 @@ __all__ = [
     "DetectedObject",
     "InteractionPoint",
     "DetectedObjectRegistry",
+    # Continuous background tracking
+    "ContinuousObjectTracker",
+    "TrackingStats",
     # World model integration
     "VLMObjectDetector",
 ]
