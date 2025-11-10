@@ -11,8 +11,11 @@ This module uses an LLM to:
 import json
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
+from pathlib import Path
 
+import numpy as np
+from PIL import Image
 import google.generativeai as genai
 
 
@@ -50,7 +53,7 @@ class LLMTaskAnalyzer:
     to the actual environment rather than relying on fixed patterns.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash-lite"):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"):
         """
         Initialize LLM task analyzer.
 
@@ -71,47 +74,79 @@ class LLMTaskAnalyzer:
     def analyze_task(
         self,
         task_description: str,
-        observed_objects: List[Dict],
-        observed_relationships: List[str],
-        timeout: float = 5.0
-    ) -> TaskAnalysis:
+        observed_objects: Optional[List[Dict]] = None,
+        observed_relationships: Optional[List[str]] = None,
+        environment_image: Optional[Union[np.ndarray, Image.Image, str, Path]] = None,
+        timeout: float = 10.0
+    ) -> Optional[TaskAnalysis]:
         """
         Analyze task in context of observed environment.
 
         Args:
             task_description: Natural language task
-            observed_objects: List of detected objects with properties
-            observed_relationships: Current spatial relationships
+            observed_objects: List of detected objects with properties (optional)
+            observed_relationships: Current spatial relationships (optional)
+            environment_image: Optional image of environment for visual context
             timeout: Max time for LLM call (seconds)
 
         Returns:
             TaskAnalysis with scene-aware task understanding
         """
+        # Handle None defaults
+        if observed_objects is None:
+            observed_objects = []
+        if observed_relationships is None:
+            observed_relationships = []
+
         # Check cache
         cache_key = self._make_cache_key(task_description, observed_objects)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        # Build prompt
-        prompt = self._build_analysis_prompt(
-            task_description, observed_objects, observed_relationships
-        )
+        # Prepare image if provided
+        pil_image = None
+        if environment_image is not None:
+            pil_image = self._prepare_image(environment_image)
+
+        # Build prompt (different for initial vs observed analysis)
+        has_observations = len(observed_objects) > 0 or pil_image is not None
+        if has_observations:
+            prompt = self._build_analysis_prompt(
+                task_description, observed_objects, observed_relationships
+            )
+        else:
+            # Initial analysis without observations - predict requirements
+            prompt = self._build_initial_analysis_prompt(task_description)
 
         # Call LLM with timeout
         start_time = time.time()
         try:
+            # Build content (text + optional image)
+            if pil_image:
+                content = [pil_image, prompt]
+            else:
+                content = prompt
+
             response = self.model.generate_content(
-                prompt,
+                content,
                 generation_config=genai.GenerationConfig(
                     temperature=0.1,  # Low for consistency
                     top_p=0.9,
-                    max_output_tokens=2048,
+                    max_output_tokens=8192,  # Increased to avoid truncation
                     response_mime_type="application/json"
                 )
             )
-
             elapsed = time.time() - start_time
             print(f"   → LLM analysis completed in {elapsed:.2f}s")
+
+            # Check if response was truncated
+            if response.candidates[0].finish_reason != 1:  # 1 = STOP (normal completion)
+                print(f"   ⚠ Warning: Response truncated (finish_reason: {response.candidates[0].finish_reason})")
+                # Try to salvage what we can by completing the JSON
+                text = response.text
+                # If it's incomplete JSON, we can't use it
+                if not text.strip().endswith('}'):
+                    raise ValueError(f"Incomplete response from LLM (finish_reason: {response.candidates[0].finish_reason})")
 
             # Parse response
             analysis = self._parse_response(response.text)
@@ -123,8 +158,44 @@ class LLMTaskAnalyzer:
 
         except Exception as e:
             print(f"   ⚠ LLM analysis failed: {e}")
-            # Return fallback analysis
-            return self._create_fallback_analysis(task_description, observed_objects)
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _build_initial_analysis_prompt(self, task: str) -> str:
+        """
+        Build prompt for INITIAL task analysis (before any observations).
+
+        This prompt asks the LLM to predict what predicates, actions, and objects
+        will likely be needed for the task, even without seeing the environment yet.
+        """
+        return f"""Analyze this robotic task and predict required PDDL components.
+
+TASK: {task}
+
+Return JSON with:
+{{
+  "action_sequence": ["step1", "step2"],
+  "goal_predicates": ["on(obj, location)"],
+  "preconditions": ["graspable(obj)"],
+  "goal_objects": ["obj_types_from_task"],
+  "tool_objects": ["tools_needed"],
+  "obstacle_objects": [],
+  "initial_predicates": ["expected_initial_states"],
+  "relevant_predicates": ["predicate_names"],
+  "required_actions": [
+    {{
+      "name": "pick",
+      "parameters": ["?obj - object"],
+      "precondition": "(and (graspable ?obj) (empty-hand))",
+      "effect": "(and (holding ?obj) (not (empty-hand)))"
+    }}
+  ],
+  "complexity": "simple",
+  "estimated_steps": 3
+}}
+
+Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
 
     def _build_analysis_prompt(
         self,
@@ -132,7 +203,7 @@ class LLMTaskAnalyzer:
         objects: List[Dict],
         relationships: List[str]
     ) -> str:
-        """Build optimized prompt for task analysis."""
+        """Build prompt for task analysis with observations."""
 
         # Format observed scene
         object_list = "\n".join([
@@ -144,15 +215,15 @@ class LLMTaskAnalyzer:
 
         relationship_list = "\n".join([f"- {rel}" for rel in relationships[:30]])
 
-        return f"""You are a robotic task planner. Analyze this task in the context of the observed scene.
+        return f"""You are a robotic task planner. Analyze this task given the observed scene.
 
 TASK: {task}
 
 OBSERVED OBJECTS:
-{object_list if object_list else "- No objects detected"}
+{object_list if object_list else "- No objects detected yet"}
 
 OBSERVED RELATIONSHIPS:
-{relationship_list if relationship_list else "- No relationships"}
+{relationship_list if relationship_list else "- No relationships observed yet"}
 
 Provide a JSON response with:
 {{
@@ -168,8 +239,8 @@ Provide a JSON response with:
     {{
       "name": "pick",
       "parameters": ["?obj - object"],
-      "precondition": "graspable(?obj) and clear(?obj)",
-      "effect": "holding(?obj)"
+      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "effect": "(and (holding ?obj) (not (empty-hand)))"
     }}
   ],
   "complexity": "simple|medium|complex",
@@ -177,11 +248,10 @@ Provide a JSON response with:
 }}
 
 Focus on:
-1. Use ONLY objects that actually exist in the scene
-2. Generate predicates that match observed affordances
-3. Create minimal, efficient action sequence
-4. Include only task-relevant predicates
-5. Be concise for speed"""
+1. Use observed objects and their actual IDs
+2. Generate predicates matching observed affordances
+3. Create action sequence using observed objects
+4. Include all task-relevant predicates"""
 
     def _parse_response(self, response_text: str) -> TaskAnalysis:
         """Parse LLM JSON response into TaskAnalysis."""
@@ -227,6 +297,17 @@ Focus on:
         """Create cache key from task and objects."""
         obj_ids = sorted([obj.get("object_id", "") for obj in objects])
         return f"{task}_{','.join(obj_ids)}"
+
+    def _prepare_image(self, image: Union[np.ndarray, Image.Image, str, Path]) -> Image.Image:
+        """Convert image to PIL Image format."""
+        if isinstance(image, (str, Path)):
+            return Image.open(image)
+        elif isinstance(image, np.ndarray):
+            return Image.fromarray(image)
+        elif isinstance(image, Image.Image):
+            return image
+        else:
+            raise ValueError(f"Unsupported image type: {type(image)}")
 
     def clear_cache(self):
         """Clear analysis cache."""

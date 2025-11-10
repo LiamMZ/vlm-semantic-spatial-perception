@@ -1,16 +1,15 @@
 """
-Object tracking system using Gemini Robotics VLM.
+Async object tracking system using Gemini Robotics VLM.
 
-This module provides object detection, affordance analysis, and interaction
-point detection for robotic manipulation tasks.
+This module provides async object detection, affordance analysis, and interaction
+point detection for robotic manipulation tasks using Google Gen AI's native async support.
 """
 
 import time
-import threading
+import asyncio
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 import io
-import concurrent.futures
 
 import numpy as np
 from PIL import Image
@@ -63,7 +62,11 @@ class ObjectTracker:
         model_name: str = "auto",
         default_temperature: float = 0.5,
         thinking_budget: int = 0,
-        max_parallel_requests: int = 5
+        max_parallel_requests: int = 5,
+        crop_target_size: int = 512,
+        enable_affordance_caching: bool = True,
+        fast_mode: bool = False,
+        pddl_predicates: Optional[List[str]] = None
     ):
         """
         Initialize object tracker.
@@ -74,10 +77,20 @@ class ObjectTracker:
             default_temperature: Generation temperature (0.0-1.0)
             thinking_budget: Token budget for extended thinking (0=disabled)
             max_parallel_requests: Max parallel VLM requests for object details
+            crop_target_size: Resize crops to this size before VLM (0=disable, default 512)
+            enable_affordance_caching: Cache affordance results for similar objects
+            fast_mode: Skip detailed interaction points, only detect affordances
+            pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
         """
         self.api_key = api_key
         self.use_new_sdk = USE_NEW_SDK
         self.max_parallel_requests = max_parallel_requests
+        self.crop_target_size = crop_target_size
+        self.enable_affordance_caching = enable_affordance_caching
+        self.fast_mode = fast_mode
+
+        # PDDL predicate tracking
+        self.pddl_predicates: List[str] = pddl_predicates or []
 
         # Auto-select best model
         if model_name == "auto":
@@ -118,7 +131,46 @@ class ObjectTracker:
         self._encoded_image_cache: Optional[bytes] = None
         self._cache_image_id: Optional[int] = None
 
-    def detect_objects(
+        # Affordance caching: object_type -> {affordances, properties}
+        self._affordance_cache: Dict[str, Dict[str, Any]] = {}
+
+    def set_pddl_predicates(self, predicates: List[str]) -> None:
+        """
+        Set the list of PDDL predicates to track for objects.
+
+        Args:
+            predicates: List of predicate names (e.g., ["clean", "dirty", "opened", "filled"])
+        """
+        self.pddl_predicates = predicates
+        print(f"ℹ PDDL predicates updated: {predicates}")
+
+    def add_pddl_predicate(self, predicate: str) -> None:
+        """
+        Add a single PDDL predicate to track.
+
+        Args:
+            predicate: Predicate name to add
+        """
+        if predicate not in self.pddl_predicates:
+            self.pddl_predicates.append(predicate)
+            print(f"ℹ Added PDDL predicate: {predicate}")
+
+    def remove_pddl_predicate(self, predicate: str) -> None:
+        """
+        Remove a PDDL predicate from tracking.
+
+        Args:
+            predicate: Predicate name to remove
+        """
+        if predicate in self.pddl_predicates:
+            self.pddl_predicates.remove(predicate)
+            print(f"ℹ Removed PDDL predicate: {predicate}")
+
+    def get_pddl_predicates(self) -> List[str]:
+        """Get the current list of tracked PDDL predicates."""
+        return self.pddl_predicates.copy()
+
+    async def detect_objects(
         self,
         color_frame: Union[np.ndarray, Image.Image],
         depth_frame: Optional[np.ndarray] = None,
@@ -126,11 +178,13 @@ class ObjectTracker:
         temperature: Optional[float] = None
     ) -> List[DetectedObject]:
         """
-        Detect all objects in scene with affordances and interaction points.
+        Detect all objects in scene with affordances and interaction points (async).
+
+        Uses Google Gen AI's native async support for true concurrent VLM requests.
 
         This is the main entry point. It:
         1. Detects all object names in the scene
-        2. For each object in parallel:
+        2. For each object concurrently using async/await:
            - Analyzes affordances
            - Detects interaction points for each affordance
         3. Updates object registry
@@ -144,13 +198,13 @@ class ObjectTracker:
         Returns:
             List of detected objects with full information
         """
-        print("🔍 Detecting objects in scene...")
+        print("🔍 Detecting objects in scene (async)...")
         start_time = time.time()
 
         # Prepare image
         pil_image = self._prepare_image(color_frame)
 
-        # Store current frame for parallel processing
+        # Store current frame for analysis
         self._current_color_frame = pil_image
         self._current_depth_frame = depth_frame
         self._current_intrinsics = camera_intrinsics
@@ -168,60 +222,60 @@ class ObjectTracker:
             self._encoded_image_cache = None
         encode_time = time.time() - encode_start
 
-        # Step 1 & 2: Stream object names and immediately dispatch workers
+        # Step 1: Stream object names and collect them
         names_start = time.time()
-        print(f"   → Detecting objects (streaming with {self.max_parallel_requests} workers)...")
+        print(f"   → Detecting objects (async streaming)...")
 
-        detected_objects = []
-        future_to_name = {}
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel_requests)
+        object_data_list = []
 
-        def on_object_detected(object_name: str):
-            """Callback when object name is detected - immediately start analysis worker"""
-            print(f"      • Found: {object_name} → dispatching worker...")
-            future = executor.submit(
-                self._analyze_single_object,
+        async def on_object_detected(object_name: str, bounding_box: Optional[List[int]]):
+            """Callback when object detected"""
+            bbox_str = f"bbox={bounding_box}" if bounding_box else "no bbox"
+            print(f"      • Found: {object_name} ({bbox_str})")
+            object_data_list.append((object_name, bounding_box))
+
+        # Use async streaming detection
+        await self._detect_object_names_streaming(pil_image, temperature, on_object_detected)
+
+        if not object_data_list:
+            print("   ⚠ No objects detected")
+            self._encoded_image_cache = None
+            return []
+
+        names_time = time.time() - names_start
+        print(f"   ✓ Detection phase complete in {names_time:.1f}s ({len(object_data_list)} objects)")
+        print(f"   → Analyzing objects concurrently (async)...")
+
+        # Step 2: Analyze all objects concurrently using asyncio.gather
+        parallel_start = time.time()
+
+        tasks = [
+            self._analyze_single_object(
                 object_name,
                 pil_image,
                 depth_frame,
                 camera_intrinsics,
-                temperature
+                temperature,
+                bounding_box
             )
-            future_to_name[future] = object_name
+            for object_name, bounding_box in object_data_list
+        ]
 
-        try:
-            # Use streaming detection with immediate worker dispatch
-            self._detect_object_names_streaming(pil_image, temperature, on_object_detected)
+        # Run all analysis tasks concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            if not future_to_name:
-                print("   ⚠ No objects detected")
-                self._encoded_image_cache = None  # Clear cache
-                executor.shutdown(wait=False)
-                return []
+        # Process results
+        detected_objects = []
+        for i, result in enumerate(results):
+            object_name = object_data_list[i][0]
+            if isinstance(result, Exception):
+                print(f"      ⚠ Failed to analyze {object_name}: {result}")
+            elif result is not None:
+                detected_objects.append(result)
+                self.registry.add_object(result)
+                print(f"      ✓ {object_name}: {len(result.affordances)} affordances, {len(result.interaction_points)} points")
 
-            names_time = time.time() - names_start
-            print(f"   ✓ Detection phase complete in {names_time:.1f}s ({len(future_to_name)} objects)")
-            print(f"   → Workers analyzing objects in parallel...")
-
-            # Collect results as workers complete
-            parallel_start = time.time()
-            for future in concurrent.futures.as_completed(future_to_name):
-                object_name = future_to_name[future]
-                try:
-                    detected_obj = future.result()
-                    if detected_obj:
-                        detected_objects.append(detected_obj)
-                        # Update registry immediately (thread-safe)
-                        self.registry.add_object(detected_obj)
-                        print(f"      ✓ {object_name}: {len(detected_obj.affordances)} affordances, {len(detected_obj.interaction_points)} points")
-                except Exception as e:
-                    print(f"      ⚠ Failed to analyze {object_name}: {e}")
-
-            parallel_time = time.time() - parallel_start
-
-        finally:
-            executor.shutdown(wait=True)
-
+        parallel_time = time.time() - parallel_start
         total_time = time.time() - start_time
 
         # Clear encoding cache
@@ -230,62 +284,74 @@ class ObjectTracker:
 
         # Performance summary
         print(f"   ✓ Detection complete in {total_time:.1f}s")
-        # `future_to_name` holds the mapping of dispatched workers to object names
-        # so use it to report how many objects reused the encoded image cache.
-        cached_count = len(future_to_name) if 'future_to_name' in locals() else 0
-        print(f"      • Image encoding: {encode_time*1000:.0f}ms (cached for {cached_count} objects)")
+        print(f"      • Image encoding: {encode_time*1000:.0f}ms")
         print(f"      • Object names: {names_time:.1f}s")
-        print(f"      • Parallel analysis: {parallel_time:.1f}s ({len(detected_objects)} objects)")
+        print(f"      • Async analysis: {parallel_time:.1f}s ({len(detected_objects)} objects)")
         if len(detected_objects) > 0:
             avg_time = parallel_time / len(detected_objects)
-            print(f"      • Average per object: {avg_time:.1f}s (effective with parallelism)")
+            print(f"      • Average per object: {avg_time:.1f}s (effective with async)")
 
         return detected_objects
 
-    def _detect_object_names_streaming(
+    async def _detect_object_names_streaming(
         self,
         image: Image.Image,
         temperature: Optional[float],
         callback
     ):
         """
-        Detect names of all objects with streaming support.
-        Calls callback for each object name as it's detected.
+        Detect names and bounding boxes with async streaming.
 
         Args:
             image: PIL Image
             temperature: Generation temperature
-            callback: Function called with (object_name) for each detected object
+            callback: Async function called with (object_name, bounding_box)
         """
         prompt = """You are a robotic vision system. Identify all distinct objects in this image.
 
-For each object, provide a descriptive name that includes identifying features (color, type, etc.).
+For each object, provide a descriptive name and bounding box.
 
-Return object names ONE PER LINE in this format:
-OBJECT: red cup
-OBJECT: blue bottle
-OBJECT: white bowl
-OBJECT: wooden table
+Return object info ONE PER LINE in this format:
+OBJECT: red cup | [400, 280, 500, 360]
+OBJECT: blue bottle | [200, 450, 550, 620]
+OBJECT: white bowl | [150, 100, 300, 250]
 END
 
 Important:
 - Include color or distinguishing features in names
 - Be specific (e.g., "red cup" not just "cup")
-- Each object on a new line with "OBJECT: " prefix
+- Bounding box format: [y1, x1, y2, x2] in 0-1000 normalized coordinates
+- Each object on a new line: "OBJECT: name | [y1, x1, y2, x2]"
 - End with "END" on its own line
 - Focus on manipulatable objects and surfaces"""
 
         try:
-            # Use streaming API if available
-            for chunk in self._generate_content_streaming(image, prompt, temperature):
-                # Parse streaming chunks for object names
+            # Use async streaming API
+            async for chunk in self._generate_content_streaming(image, prompt, temperature):
+                # Parse streaming chunks for object names and bounding boxes
                 lines = chunk.split('\n')
                 for line in lines:
                     line = line.strip()
                     if line.startswith('OBJECT:'):
-                        object_name = line[7:].strip()
-                        if object_name:
-                            callback(object_name)
+                        # Parse format: "OBJECT: name | [y1, x1, y2, x2]"
+                        content = line[7:].strip()
+                        if '|' in content:
+                            parts = content.split('|')
+                            object_name = parts[0].strip()
+                            try:
+                                import json
+                                bbox_str = parts[1].strip()
+                                bounding_box = json.loads(bbox_str)
+                                if object_name and isinstance(bounding_box, list) and len(bounding_box) == 4:
+                                    await callback(object_name, bounding_box)
+                            except:
+                                # If bbox parsing fails, use None
+                                if object_name:
+                                    await callback(object_name, None)
+                        else:
+                            # No bbox provided, use None
+                            if content:
+                                await callback(content, None)
                     elif line == 'END':
                         break
 
@@ -294,66 +360,175 @@ Important:
             # Fallback: use non-streaming batch detection
             prompt = """You are a robotic vision system. Identify all distinct objects in this image.
 
-For each object, provide a descriptive name that includes identifying features (color, type, etc.).
+For each object, provide a descriptive name and bounding box.
 
-Return ONLY a JSON list of object names:
+Return ONLY a JSON array with object info:
 {
-  "objects": ["red cup", "blue bottle", "white bowl", "wooden table"]
+  "objects": [
+    {"name": "red cup", "bbox": [400, 280, 500, 360]},
+    {"name": "blue bottle", "bbox": [200, 450, 550, 620]},
+    {"name": "white bowl", "bbox": [150, 100, 300, 250]}
+  ]
 }
 
 Important:
 - Include color or distinguishing features in names
 - Be specific (e.g., "red cup" not just "cup")
-- List all visible objects
+- Bounding box format: [y1, x1, y2, x2] in 0-1000 normalized coordinates
 - Focus on manipulatable objects and surfaces"""
 
             try:
-                response_text = self._generate_content(image, prompt, temperature)
+                response_text = await self._generate_content(image, prompt, temperature)
                 data = self._parse_json_response(response_text)
-                object_names = data.get("objects", [])
-                for name in object_names:
-                    callback(name)
+                objects_data = data.get("objects", [])
+                for obj_data in objects_data:
+                    if isinstance(obj_data, dict):
+                        name = obj_data.get("name")
+                        bbox = obj_data.get("bbox")
+                        if name:
+                            await callback(name, bbox)
+                    elif isinstance(obj_data, str):
+                        # Fallback if old format returned
+                        await callback(obj_data, None)
             except Exception as fallback_error:
                 print(f"   ⚠ Batch fallback also failed: {fallback_error}")
 
-    def _analyze_single_object(
+    async def _analyze_single_object(
         self,
         object_name: str,
         image: Image.Image,
         depth_frame: Optional[np.ndarray],
         camera_intrinsics: Optional[Any],
-        temperature: Optional[float]
+        temperature: Optional[float],
+        bounding_box: Optional[List[int]] = None
     ) -> Optional[DetectedObject]:
         """
         Analyze a single object: affordances, properties, and interaction points.
 
+        If bounding_box is provided, crops the image to that region and back-projects
+        interaction points to full image coordinates.
+
         Args:
             object_name: Name of object to analyze
-            image: RGB image
-            depth_frame: Optional depth image
+            image: RGB image (full size)
+            depth_frame: Optional depth image (full size)
             camera_intrinsics: Optional camera intrinsics
             temperature: Generation temperature
+            bounding_box: Optional bounding box [y1, x1, y2, x2] in 0-1000 normalized coords
 
         Returns:
             DetectedObject with full information
         """
-        # Build comprehensive prompt
-        prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.
+        # Crop image if bounding box provided
+        analysis_image = image
+        crop_offset = None
+
+        if bounding_box is not None:
+            # Convert normalized bbox to pixel coordinates
+            from .utils.coordinates import normalized_to_pixel
+            img_height, img_width = image.height, image.width
+
+            y1, x1, y2, x2 = bounding_box
+            # Convert each corner to pixels
+            py1, px1 = normalized_to_pixel([y1, x1], (img_height, img_width))
+            py2, px2 = normalized_to_pixel([y2, x2], (img_height, img_width))
+
+            # Ensure valid crop bounds
+            px1, px2 = max(0, min(px1, px2)), min(img_width, max(px1, px2))
+            py1, py2 = max(0, min(py1, py2)), min(img_height, max(py1, py2))
+
+            # Crop the image (PIL uses left, upper, right, lower)
+            analysis_image = image.crop((px1, py1, px2, py2))
+            crop_offset = (py1, px1, py2, px2)  # Store for back-projection
+
+            # Resize crop to target size for faster VLM processing
+            if self.crop_target_size > 0:
+                analysis_image = analysis_image.resize(
+                    (self.crop_target_size, self.crop_target_size),
+                    Image.Resampling.LANCZOS
+                )
+
+        # Check affordance cache for this object type
+        object_type_guess = object_name.split()[-1] if ' ' in object_name else object_name
+        cached_data = None
+        if self.enable_affordance_caching and object_type_guess in self._affordance_cache:
+            cached_data = self._affordance_cache[object_type_guess]
+
+        # Build prompt based on mode and cache
+        crop_note = " (This is a cropped region focusing on the object.)" if crop_offset else ""
+
+        # Build PDDL predicate section if predicates are specified
+        pddl_section = ""
+        pddl_example = ""
+        if self.pddl_predicates:
+            pddl_list = ", ".join(self.pddl_predicates)
+            pddl_section = f"""
+4. PDDL State Predicates: For each of these predicates, determine if it applies to this object:
+   - Predicates to check: {pddl_list}
+   - Return true/false for each predicate based on visual observation
+   - Examples:
+     * "clean" - object appears clean vs dirty
+     * "opened" - container/door is open vs closed
+     * "filled" - container has contents vs empty
+     * "wet" - object appears wet vs dry"""
+            pddl_example = ',\n  "pddl_state": {"clean": true, "opened": false, "filled": false}'
+
+        if self.fast_mode:
+            # Fast mode: only detect affordances and properties, no interaction points
+            prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
+
+Provide:
+1. Object position: Center point [y, x] in 0-1000 normalized coordinates
+2. Affordances: What robot actions are possible?
+   - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
+3. Properties: Color, size, material, state{pddl_section}
+
+Return JSON:
+{{
+  "object_type": "cup",
+  "position": [450, 320],
+  "affordances": ["graspable", "pourable", "containable"],
+  "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{pddl_example},
+  "confidence": 0.95
+}}
+
+All positions in 0-1000 normalized coords relative to THIS image."""
+        elif cached_data:
+            # Use cached affordances, only detect interaction points
+            prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
+
+Known affordances: {cached_data['affordances']}
+
+For EACH affordance, identify the optimal interaction point:
+
+Return JSON:
+{{
+  "object_type": "{cached_data['object_type']}",
+  "position": [450, 320],
+  "interaction_points": {{
+    "graspable": {{"position": [450, 340], "confidence": 0.95, "reasoning": "..."}},
+    "pourable": {{"position": [450, 320], "confidence": 0.90, "reasoning": "..."}}
+  }},
+  "confidence": 0.95
+}}
+
+All positions in 0-1000 normalized coords relative to THIS image."""
+        else:
+            # Full analysis
+            prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
 
 Provide detailed information:
 
-1. Object position: Center point [y, x] in 0-1000 normalized coordinates
+1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
 2. Affordances: What robot actions are possible with this object?
    - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-3. Interaction points: For EACH affordance, identify the optimal interaction point
-4. Properties: Color, size, material, state, etc.
-5. Bounding box: [y1, x1, y2, x2] in 0-1000 normalized coordinates
+3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
+4. Properties: Color, size, material, state, etc.{pddl_section}
 
 Return in JSON format:
 {{
   "object_type": "cup",
   "position": [450, 320],
-  "bounding_box": [400, 280, 500, 360],
   "affordances": ["graspable", "pourable", "containable"],
   "interaction_points": {{
     "graspable": {{
@@ -372,14 +547,15 @@ Return in JSON format:
     "material": "ceramic",
     "size": "medium",
     "state": "upright"
-  }},
+  }}{pddl_example},
   "confidence": 0.95
 }}
 
+Note: All positions are in 0-1000 normalized coordinates relative to THIS image.
 Analyze the {object_name} based on its visual appearance."""
 
         try:
-            response_text = self._generate_content(image, prompt, temperature)
+            response_text = await self._generate_content(analysis_image, prompt, temperature)
             data = self._parse_json_response(response_text)
 
             if not data:
@@ -390,15 +566,47 @@ Analyze the {object_name} based on its visual appearance."""
                 print(f"      ⚠ Unexpected list response for {object_name}, skipping")
                 return None
 
-            # Extract affordances
-            affordances = set(data.get("affordances", []))
+            # Extract affordances (use cached if available)
+            if cached_data:
+                affordances = set(cached_data["affordances"])
+            else:
+                affordances = set(data.get("affordances", []))
+
+            # Helper function to back-project coordinates from crop to full image
+            def backproject_to_full_image(crop_pos_2d: List[int]) -> List[int]:
+                """Convert position from cropped image coords to full image coords."""
+                if crop_offset is None:
+                    return crop_pos_2d  # No cropping, return as-is
+
+                from .utils.coordinates import normalized_to_pixel, pixel_to_normalized
+                crop_y, crop_x = crop_pos_2d
+                crop_height = crop_offset[2] - crop_offset[0]
+                crop_width = crop_offset[3] - crop_offset[1]
+
+                # Convert normalized coords to pixels in crop
+                pixel_y, pixel_x = normalized_to_pixel([crop_y, crop_x], (crop_height, crop_width))
+
+                # Add crop offset to get full image pixels
+                full_pixel_y = pixel_y + crop_offset[0]
+                full_pixel_x = pixel_x + crop_offset[1]
+
+                # Convert back to normalized coords in full image
+                img_height, img_width = image.height, image.width
+                full_norm_y, full_norm_x = pixel_to_normalized(
+                    [full_pixel_y, full_pixel_x],
+                    (img_height, img_width)
+                )
+
+                return [full_norm_y, full_norm_x]
 
             # Extract interaction points
             interaction_points = {}
             interaction_points_data = data.get("interaction_points", {})
 
             for affordance, point_data in interaction_points_data.items():
-                pos_2d = point_data.get("position", [500, 500])
+                pos_2d_crop = point_data.get("position", [500, 500])
+                # Back-project to full image coordinates
+                pos_2d = backproject_to_full_image(pos_2d_crop)
 
                 # Compute 3D position if depth available. Prefer explicit depth_frame
                 # passed to the worker; otherwise fall back to the cached frame on
@@ -422,7 +630,8 @@ Analyze the {object_name} based on its visual appearance."""
                 )
 
             # Extract center position
-            pos_2d = data.get("position", [500, 500])
+            pos_2d_crop = data.get("position", [500, 500])
+            pos_2d = backproject_to_full_image(pos_2d_crop)
             pos_3d = None
             use_depth = depth_frame if depth_frame is not None else self._current_depth_frame
             use_intrinsics = camera_intrinsics if camera_intrinsics is not None else self._current_intrinsics
@@ -433,6 +642,21 @@ Analyze the {object_name} based on its visual appearance."""
             object_type = data.get("object_type", object_name.split()[0])
             object_id = self._generate_object_id(object_name, object_type)
 
+            # Use bounding box from initial detection, not from detailed analysis
+            # (since detailed analysis was done on cropped image)
+            final_bbox = bounding_box if bounding_box is not None else data.get("bounding_box")
+
+            # Update affordance cache if enabled and not already cached
+            if self.enable_affordance_caching and not cached_data and affordances:
+                self._affordance_cache[object_type] = {
+                    "object_type": object_type,
+                    "affordances": list(affordances),
+                    "properties": data.get("properties", {})
+                }
+
+            # Extract PDDL state predicates if present
+            pddl_state = data.get("pddl_state", {})
+
             # Create DetectedObject
             detected_obj = DetectedObject(
                 object_type=object_type,
@@ -441,8 +665,9 @@ Analyze the {object_name} based on its visual appearance."""
                 interaction_points=interaction_points,
                 position_2d=pos_2d,
                 position_3d=pos_3d,
-                bounding_box_2d=data.get("bounding_box"),
+                bounding_box_2d=final_bbox,
                 properties=data.get("properties", {}),
+                pddl_state=pddl_state,
                 confidence=data.get("confidence", 0.5)
             )
 
@@ -525,7 +750,7 @@ Analyze the {object_name} based on its visual appearance."""
         """
         return self.registry.load_from_json(input_path)
 
-    def update_interaction_point(
+    async def update_interaction_point(
         self,
         object_id: str,
         affordance: str,
@@ -533,7 +758,7 @@ Analyze the {object_name} based on its visual appearance."""
         temperature: Optional[float] = None
     ) -> Optional[InteractionPoint]:
         """
-        Update interaction point for a specific object and affordance (thread-safe).
+        Update interaction point for a specific object and affordance (async).
 
         Useful for refining interaction points based on task context.
 
@@ -546,7 +771,7 @@ Analyze the {object_name} based on its visual appearance."""
         Returns:
             Updated InteractionPoint or None if failed
         """
-        obj = self.get_object(object_id)  # Already thread-safe
+        obj = self.get_object(object_id)
         if not obj:
             print(f"Object {object_id} not found in registry")
             return None
@@ -581,7 +806,7 @@ Return in JSON format:
 Position is [y, x] in 0-1000 normalized coordinates."""
 
         try:
-            response_text = self._generate_content(
+            response_text = await self._generate_content(
                 self._current_color_frame,
                 prompt,
                 temperature
@@ -638,33 +863,33 @@ Position is [y, x] in 0-1000 normalized coordinates."""
         else:
             raise ValueError(f"Unsupported image type: {type(image)}")
 
-    def _generate_content(
+    async def _generate_content(
         self,
         image: Image.Image,
         prompt: str,
         temperature: Optional[float]
     ) -> str:
         """
-        Generate content using streaming API and collect all chunks.
+        Generate content using async streaming API and collect all chunks.
         This is a convenience wrapper around _generate_content_streaming.
         """
         chunks = []
-        for chunk in self._generate_content_streaming(image, prompt, temperature):
+        async for chunk in self._generate_content_streaming(image, prompt, temperature):
             chunks.append(chunk)
         return ''.join(chunks)
 
-    def _generate_content_streaming(
+    async def _generate_content_streaming(
         self,
         image: Image.Image,
         prompt: str,
         temperature: Optional[float]
     ):
         """
-        Generate content with streaming support.
+        Generate content with async streaming support using client.aio.
         Yields text chunks as they arrive.
         """
         if self.use_new_sdk and self.client:
-            # Use new GenAI SDK with streaming
+            # Use new GenAI SDK with async streaming via client.aio
             # Check if we can use cached encoded image
             if (self._encoded_image_cache is not None and
                 self._cache_image_id == id(image)):
@@ -687,33 +912,18 @@ Position is [y, x] in 0-1000 normalized coordinates."""
                 ) if self.thinking_budget > 0 else None
             )
 
-            # Stream response
-            response_stream = self.client.models.generate_content_stream(
+            # Use async streaming via client.aio
+            stream = await self.client.aio.models.generate_content_stream(
                 model=self.model_name,
                 contents=content_parts,
                 config=config
             )
-
-            for chunk in response_stream:
+            async for chunk in stream:
                 if hasattr(chunk, 'text') and chunk.text:
                     yield chunk.text
 
         else:
-            # Old SDK: use stream=True if available
-            temp = temperature if temperature is not None else self.default_temperature
-            config = genai_old.GenerationConfig(
-                temperature=temp,
-            )
-
-            response_stream = self.model.generate_content(
-                [prompt, image],
-                generation_config=config,
-                stream=True
-            )
-
-            for chunk in response_stream:
-                if hasattr(chunk, 'text') and chunk.text:
-                    yield chunk.text
+            raise RuntimeError("Async mode requires google-genai SDK. Install with: pip install google-genai")
 
     def _parse_json_response(self, response_text: str) -> Dict[str, Any]:
         """Parse JSON response from LLM."""
@@ -735,4 +945,9 @@ Position is [y, x] in 0-1000 normalized coordinates."""
             print(f"Failed to parse JSON: {e}")
             print(f"Response: {response_text[:500]}")
             return {}
+
+    async def aclose(self):
+        """Close async client resources."""
+        if self.use_new_sdk and self.client:
+            await self.client.aio.aclose()
 

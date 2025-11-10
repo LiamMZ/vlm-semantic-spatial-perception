@@ -12,6 +12,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import asyncio
 import numpy as np
 import cv2
 from dotenv import load_dotenv
@@ -193,7 +194,7 @@ def print_detection_results(objects: list):
                 print()
 
 
-def main():
+async def main():
     """Run object tracker demo."""
     print("=" * 60)
     print("OBJECT TRACKER DEMO")
@@ -251,7 +252,7 @@ def main():
     print("\n" + "=" * 60)
     print("DETECTING OBJECTS")
     print("=" * 60)
-    objects = tracker.detect_objects(
+    objects = await tracker.detect_objects(
         color_image,
         depth_image,
         intrinsics
@@ -339,7 +340,7 @@ def main():
                             task_context = None
 
                         print(f"\nUpdating {affordance} point for {obj.object_id}...")
-                        point = tracker.update_interaction_point(
+                        point = await tracker.update_interaction_point(
                             obj.object_id,
                             affordance,
                             task_context
@@ -381,8 +382,11 @@ def main():
     print("Demo complete!")
     print("=" * 60)
 
+    # Clean up async resources
+    await tracker.aclose()
+
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

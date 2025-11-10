@@ -38,6 +38,7 @@ class DetectedObject:
         position_3d: Center position [x, y, z] in meters
         bounding_box_2d: Optional 2D bounding box
         properties: Additional properties (color, size, etc.)
+        pddl_state: Dict mapping PDDL predicate names to boolean values (e.g., {"clean": True, "dirty": False})
     """
 
     object_type: str
@@ -48,6 +49,7 @@ class DetectedObject:
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters
     bounding_box_2d: Optional[List[int]] = None  # [y1, x1, y2, x2]
     properties: Dict[str, any] = field(default_factory=dict)
+    pddl_state: Dict[str, bool] = field(default_factory=dict)  # PDDL predicate states
     confidence: float = 1.0
     timestamp: float = field(default_factory=time.time)
 

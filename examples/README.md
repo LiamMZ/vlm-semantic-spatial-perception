@@ -4,132 +4,221 @@ Demonstration scripts for the VLM Semantic Spatial Perception system.
 
 ## Main Demos
 
-### [dynamic_pddl_demo.py](dynamic_pddl_demo.py) - Interactive Full Pipeline Demo
+### [object_tracker_demo.py](object_tracker_demo.py) - Object Detection Demo
 
-**The complete, real-world demonstration of the system.**
+**Interactive demonstration of VLM-based object detection.**
 
 ```bash
-python examples/dynamic_pddl_demo.py
+python examples/object_tracker_demo.py
 ```
 
 **What it does:**
-1. Captures RGB-D scene from RealSense camera
-2. Detects objects using Gemini VLM (real-time, no mock data)
-3. Builds world model with spatial relationships
-4. **Shows you detected objects and prompts for tasks (interactive!)**
-5. Analyzes tasks with LLM in scene context
-6. Generates task-specific PDDL files
+1. Captures RGB-D scene from RealSense camera (or uses synthetic image)
+2. Detects objects using Gemini VLM with affordances and interaction points
+3. Visualizes detection results with bounding boxes and affordance markers
+4. Provides interactive queries for detected objects
 
 **Key features:**
-- ✅ NO mock data - all objects from real VLM detection
-- ✅ NO pre-defined tasks - you specify tasks after seeing objects
-- ✅ Dynamic affordance inference from visual observation
-- ✅ Scene-grounded planning
+- ✅ Real VLM detection with Gemini Robotics-ER
+- ✅ Affordance detection (graspable, pourable, etc.)
+- ✅ Interaction point detection for manipulation
+- ✅ 3D position computation with depth
+- ✅ Visualization with OpenCV
+- ✅ Interactive query interface
 
 **Requirements:**
-- RealSense camera connected and visible objects in view
-- `GEMINI_API_KEY` set in `.env` file
-- Objects arranged in camera's field of view
+- RealSense camera (or will use synthetic image)
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY` set in `.env` file
 
-**Example interaction:**
-```
-Detected objects in scene:
-  • red_cup_1: cup (red) - can be graspable, containable
-  • blue_bottle_1: bottle (blue) - can be graspable, pourable
-  • table_1: table - can be supportable
-  • shelf_1: shelf - can be supportable, containable
-
-Enter robotic manipulation tasks (one per line).
-Examples:
-  - Pick up the red cup and place it on the shelf
-  - Move all graspable objects to the container
-  - Organize the workspace by color
-
-Task 1: Pick up the red cup and place it on the shelf
-Task 2: Move the blue bottle next to the red cup
-Task 3: [press enter to finish]
-```
-
-**Output:**
-- Generated PDDL domain and problem files in `outputs/pddl/task_N/`
-- Task analysis results
-- Performance metrics
+**Interactive features:**
+- Query objects by affordance
+- Update interaction points with task context
+- View objects by type
+- Save/load detections to JSON
 
 ---
 
-### [gemini_robotics_example.py](gemini_robotics_example.py) - Interactive Gemini Capabilities Demo
+### [pddl_predicate_tracking_demo.py](pddl_predicate_tracking_demo.py) - PDDL Predicate Tracking
 
-**Menu-driven demonstration** of all Gemini Robotics-ER capabilities.
+**Real-time PDDL generation with continuous object tracking and state updates.**
 
 ```bash
-python examples/gemini_robotics_example.py
+python examples/pddl_predicate_tracking_demo.py
 ```
 
-**Interactive Menu:**
-```
-GEMINI ROBOTICS CAPABILITIES MENU
-==================================================
-Select a capability to test:
+**Interactive workflow:**
+1. **User provides task** - Natural language description (e.g., "Clean the mug and place it on the shelf")
+2. **LLM task analysis** - Semantically analyzes task to extract PDDL predicates (no keyword matching)
+3. **PDDL initialization** - Creates domain with LLM-extracted predicates BEFORE tracking
+4. **Tracker seeding** - Seeds continuous tracker with PDDL predicates from domain
+5. **Continuous tracking** - Detects objects and predicate states in real-time (10 seconds)
+6. **Live PDDL updates** - Initial state updates as new objects are detected
+7. **Goal generation** - Extracts goal state from LLM analysis
+8. **Final PDDL files** - Generates domain.pddl and problem.pddl for planning
 
-  1. Object Detection with Affordances
-  2. Spatial Reasoning and Relationships
-  3. Task Decomposition
-  4. Interaction Point Detection (with visualization)
-  5. Trajectory Planning
-  6. Full Integration with World Model
+**Key features:**
+- ✅ **Interactive task input** - User defines task after startup
+- ✅ **LLM-based predicate extraction** - No keyword matching, semantic understanding
+- ✅ **PDDL-first architecture** - PDDL initialized before tracker to seed predicates
+- ✅ **Continuous updates** - PDDL state updates in real-time as objects appear
+- ✅ **Camera or simulation** - Works with RealSense camera or simulated detection
+- ✅ **Complete pipeline** - Task → LLM Analysis → PDDL Domain → Tracker → Planning
 
-  7. Run All Examples
-  0. Exit
-```
+**LLM extracts:**
+- Task-relevant predicates (semantic, not keyword-based)
+- Required actions for the task
+- Goal conditions and constraints
+- Object types and relationships
 
-**Features:**
-- **Menu-driven interface** - Select which capability to test
-- **Reusable detection** - Run detection once, use for multiple demos
-- **Interactive prompts** - Input tasks, select objects, choose actions
-- **Visual feedback** - OpenCV visualization for interaction points
-- **Save outputs** - Option to save annotated images
-- Works with RealSense camera or custom test images
+**Use this for:**
+- Real-time perception-to-planning integration
+- Continuous world state monitoring
+- Task-specific predicate tracking
+- Dynamic PDDL generation from vision
 
 ---
 
-### [test_gemini_detection.py](test_gemini_detection.py) - Diagnostic Tool
+### [task_monitoring_demo.py](task_monitoring_demo.py) - Task Monitoring Demo
 
-Test and debug Gemini API integration.
+**Demonstrates PDDL domain maintenance and task state monitoring.**
 
 ```bash
-python examples/test_gemini_detection.py
+python examples/task_monitoring_demo.py
 ```
 
 **What it does:**
-- Tests API key configuration
-- Tests detection with synthetic image
-- Shows detailed error messages and debug info
-- Optionally tests with real camera
+1. Analyzes task and initializes PDDL domain
+2. Simulates object observations
+3. Updates PDDL domain incrementally
+4. Monitors task state (EXPLORE, REFINE, PLAN_AND_EXECUTE)
+5. Generates final PDDL files
 
-**Use this when:**
-- Setting up for the first time
-- Troubleshooting API issues
-- Debugging detection problems
-- Verifying camera integration
+**Key features:**
+- ✅ LLM-driven task analysis
+- ✅ Incremental domain updates
+- ✅ Adaptive state monitoring
+- ✅ Goal object tracking with fuzzy matching
+- ✅ Complete PDDL generation workflow
+
+**Use this for:**
+- Understanding the planning system
+- Testing task analysis
+- Debugging PDDL generation
+- Learning state monitoring logic
 
 ---
 
-### [simple_demo.py](simple_demo.py) - Basic Components Demo
+### [pddl_representation_demo.py](pddl_representation_demo.py) - PDDL Representation Demo
 
-Legacy demonstration of individual system components with mock data.
+**Demonstrates PDDL domain and problem construction.**
 
 ```bash
-python examples/simple_demo.py
+python examples/pddl_representation_demo.py
 ```
 
-**What it demonstrates:**
-- Camera capture
-- Task parsing
-- Object tracking (mock objects)
-- Spatial relationships
-- PDDL state generation
+**What it does:**
+- Shows how to build PDDL domains programmatically
+- Demonstrates predicates, actions, types
+- Shows problem instance creation
+- Generates domain.pddl and problem.pddl files
 
-**Note:** Uses mock object data. For real VLM detection, use `dynamic_pddl_demo.py`.
+**Use this for:**
+- Learning PDDL structure
+- Testing PDDL generation
+- Understanding domain/problem separation
+
+---
+
+### [continuous_pddl_simple_demo.py](continuous_pddl_simple_demo.py) - Continuous PDDL Integration (Simple)
+
+**NEW! Complete continuous integration with auto-stop - perfect for testing.**
+
+```bash
+python examples/continuous_pddl_simple_demo.py
+```
+
+**What it does:**
+1. **Task Analysis** - Analyzes task and generates initial PDDL domain
+2. **Continuous Tracking** - Runs background object detection loop
+3. **Live PDDL Updates** - Updates domain after each detection cycle
+4. **State Monitoring** - Monitors task state and readiness
+5. **Auto-Stop** - Stops when ready for planning or max cycles reached
+6. **PDDL Generation** - Generates final domain.pddl and problem.pddl
+
+**Key features:**
+- ✅ **Fully automated** - No complex input handling
+- ✅ **Continuous loop** - Background detection with callbacks
+- ✅ **Live updates** - PDDL domain evolves as objects detected
+- ✅ **Task-aware** - Monitors state and knows when ready
+- ✅ **Clean output** - Progress updates after each cycle
+- ✅ **Configurable** - Set max cycles and update interval
+
+**Configuration:**
+```python
+max_cycles = 5          # Stop after 5 detection cycles
+update_interval = 3.0   # 3 seconds between detections
+```
+
+**Example output:**
+```
+CYCLE 1/5 - Detected 3 objects
+================================
+�� PDDL Update:
+  • New objects: 3
+  • Total objects: 3
+  • Goal objects found: mug
+  • Still missing: shelf
+
+🎯 Task State: EXPLORE (85%)
+  Reasoning: Goal objects partially found...
+
+🔍 Detected Objects:
+  • mug: 1
+  • table: 1
+  • box: 1
+
+CYCLE 2/5 - Detected 4 objects
+================================
+...
+
+✅ READY FOR PLANNING!
+```
+
+**Use this for:**
+- Testing continuous integration
+- Quick demonstrations
+- Automated workflows
+- Performance benchmarking
+
+---
+
+### [continuous_pddl_integration_demo.py](continuous_pddl_integration_demo.py) - Continuous PDDL Integration (Advanced)
+
+**Advanced continuous integration with interactive controls.**
+
+```bash
+python examples/continuous_pddl_integration_demo.py
+```
+
+**What it does:**
+- Same as simple demo, but with interactive commands
+- User can query status, stop manually, or let it run
+- More detailed progress information
+- Suitable for presentations and debugging
+
+**Interactive commands:**
+```
+Commands:
+  'status' - Show current status
+  'stop'   - Stop tracking and generate PDDL
+  'quit'   - Quit without generating PDDL
+```
+
+**Use this for:**
+- Interactive demonstrations
+- Debugging integration issues
+- Manual control over tracking
+- Real-time system monitoring
 
 ---
 
@@ -154,39 +243,42 @@ python examples/simple_demo.py
 
 4. **Test setup:**
    ```bash
-   python examples/test_gemini_detection.py
+   python examples/object_tracker_demo.py
    ```
 
-### Running the Interactive Demo
+### Running the Continuous Demo
 
 ```bash
-python examples/dynamic_pddl_demo.py
+python examples/continuous_pddl_simple_demo.py
 ```
 
-Follow the prompts:
-1. Camera captures scene (press any key after viewing)
-2. VLM detects objects (takes 5-15 seconds)
-3. System shows detected objects
-4. You enter tasks based on what you see
-5. System generates PDDL files for each task
+The demo will:
+1. Analyze the task and initialize PDDL domain
+2. Start continuous object detection in background
+3. Update PDDL domain after each detection cycle
+4. Monitor task state and stop when ready
+5. Generate final PDDL files
 
 ### Without Camera
 
-If you don't have a RealSense camera, you can still test with an image:
-
-```bash
-python examples/gemini_robotics_example.py
-# When prompted, provide path to a test image
-```
+The demos will gracefully handle missing camera by using synthetic images for testing.
 
 ## Comparison
 
-| Demo | Objects | Tasks | VLM | Interactive | Best For |
-|------|---------|-------|-----|-------------|----------|
-| **dynamic_pddl_demo.py** | Real VLM | User input | ✅ | ✅ | Full pipeline, real-world use |
-| **gemini_robotics_example.py** | Real VLM | User input | ✅ | ✅ | Testing Gemini features |
-| **test_gemini_detection.py** | Synthetic | None | ✅ | ✅ | Debugging, setup |
-| **simple_demo.py** | Mock data | Pre-defined | ❌ | ❌ | Learning components |
+| Demo | Objects | Tasks | VLM | Continuous | Interactive | Best For |
+|------|---------|-------|-----|------------|-------------|----------|
+| **continuous_pddl_simple_demo.py** | Real VLM | Pre-set | ✅ | ✅ | ⚪ | Continuous integration, auto-run |
+| **continuous_pddl_integration_demo.py** | Real VLM | Pre-set | ✅ | ✅ | ✅ | Continuous with manual control |
+| **pddl_predicate_tracking_demo.py** | Real VLM | User input | ✅ | ✅ | ✅ | Real-time PDDL tracking |
+| **object_tracker_demo.py** | Real VLM | N/A | ✅ | ❌ | ✅ | Object detection & visualization |
+| **task_monitoring_demo.py** | Simulated | Pre-set | ✅ | ❌ | ❌ | Planning system demo |
+| **pddl_representation_demo.py** | N/A | Pre-set | ❌ | ❌ | ❌ | PDDL structure demo |
+
+**Legend:**
+- ✅ = Full support
+- ⚪ = Minimal (auto-stop on ready)
+- ❌ = Not supported
+- N/A = Not applicable
 
 ## Tips
 
@@ -224,20 +316,21 @@ python examples/gemini_robotics_example.py
 
 **No objects detected:**
 - Check camera connection: `python -c "from src.camera import RealSenseCamera; cam = RealSenseCamera()"`
-- Verify API key: `python examples/test_gemini_detection.py`
+- Verify API key: `python examples/object_tracker_demo.py`
 - Ensure objects are visible in camera view
 - Check lighting conditions
 
 **Detection errors:**
-- Run diagnostic: `python examples/test_gemini_detection.py`
-- Check API key validity
-- Verify model availability (`gemini-2.0-flash-exp`)
+- Run diagnostic: `python examples/object_tracker_demo.py`
+- Check API key validity (should be `GOOGLE_API_KEY` or `GEMINI_API_KEY`)
+- Verify model availability (uses `gemini-2.0-flash-exp` by default)
 - Check internet connection
 
 **PDDL generation fails:**
 - Ensure objects were detected successfully
 - Check task references detected objects
 - Verify LLM API key is valid
+- Try running `python examples/task_monitoring_demo.py` to test planning system
 
 ## Output Files
 
@@ -269,6 +362,8 @@ After running the demos:
 ## Support
 
 For issues or questions:
-- Check [GEMINI_INTEGRATION.md](../docs/GEMINI_INTEGRATION.md)
-- Review [BUGFIX_SUMMARY.md](../BUGFIX_SUMMARY.md)
-- Run diagnostic script for specific errors
+- Check module documentation in [docs/](../docs/)
+  - [Perception System](../docs/perception.md)
+  - [Planning System](../docs/planning.md)
+  - [Camera System](../docs/camera.md)
+- Run example scripts to test specific components
