@@ -63,3 +63,4 @@ htmlcov/
 # Camera calibration
 calibration/*.yaml
 calibration/*.json
+.claude

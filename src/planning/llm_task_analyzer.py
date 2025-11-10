@@ -78,7 +78,7 @@ class LLMTaskAnalyzer:
         observed_relationships: Optional[List[str]] = None,
         environment_image: Optional[Union[np.ndarray, Image.Image, str, Path]] = None,
         timeout: float = 10.0
-    ) -> TaskAnalysis:
+    ) -> Optional[TaskAnalysis]:
         """
         Analyze task in context of observed environment.
 
@@ -130,16 +130,23 @@ class LLMTaskAnalyzer:
             response = self.model.generate_content(
                 content,
                 generation_config=genai.GenerationConfig(
-                    temperature=1.0,  # Low for consistency
+                    temperature=0.1,  # Low for consistency
                     top_p=0.9,
-                    max_output_tokens=2048,
+                    max_output_tokens=8192,  # Increased to avoid truncation
                     response_mime_type="application/json"
                 )
             )
-            print(f"task analysis prompt: {prompt}")
-            print(f"task analysis response: {response}")
             elapsed = time.time() - start_time
             print(f"   → LLM analysis completed in {elapsed:.2f}s")
+
+            # Check if response was truncated
+            if response.candidates[0].finish_reason != 1:  # 1 = STOP (normal completion)
+                print(f"   ⚠ Warning: Response truncated (finish_reason: {response.candidates[0].finish_reason})")
+                # Try to salvage what we can by completing the JSON
+                text = response.text
+                # If it's incomplete JSON, we can't use it
+                if not text.strip().endswith('}'):
+                    raise ValueError(f"Incomplete response from LLM (finish_reason: {response.candidates[0].finish_reason})")
 
             # Parse response
             analysis = self._parse_response(response.text)
@@ -153,6 +160,7 @@ class LLMTaskAnalyzer:
             print(f"   ⚠ LLM analysis failed: {e}")
             import traceback
             traceback.print_exc()
+            return None
 
     def _build_initial_analysis_prompt(self, task: str) -> str:
         """
@@ -161,103 +169,33 @@ class LLMTaskAnalyzer:
         This prompt asks the LLM to predict what predicates, actions, and objects
         will likely be needed for the task, even without seeing the environment yet.
         """
-        return f"""You are a robotic task planning expert. Analyze this manipulation task and predict what will be needed to accomplish it.
+        return f"""Analyze this robotic task and predict required PDDL components.
 
 TASK: {task}
 
-Since we haven't observed the environment yet, predict what PDDL components will likely be needed:
-
-Provide a detailed JSON response:
+Return JSON with:
 {{
-  "action_sequence": ["high-level action steps", "in order", ...],
-  "goal_predicates": ["final state predicates like 'on(obj1, obj2)'", ...],
-  "preconditions": ["required starting conditions", ...],
-  "goal_objects": ["object types mentioned in task", ...],
-  "tool_objects": ["tools likely needed", ...],
-  "obstacle_objects": ["objects that might interfere", ...],
-  "initial_predicates": ["expected initial state predicates", ...],
-  "relevant_predicates": ["ALL predicate names needed for this task (just names, not instances)", ...],
-  "required_actions": [
-    {{
-      "name": "action_name",
-      "parameters": ["?obj - object_type", "?loc - location"],
-      "precondition": "(and (graspable ?obj) (reachable ?obj))",
-      "effect": "(and (holding ?obj) (not (at ?obj ?loc)))",
-      "description": "Brief description of what this action does"
-    }}
-  ],
-  "complexity": "simple|medium|complex",
-  "estimated_steps": <number>
-}}
-
-IMPORTANT INSTRUCTIONS:
-
-1. **relevant_predicates**: List ALL PDDL predicate NAMES (not instances) that will be needed.
-   Examples: ["clean", "dirty", "graspable", "on", "in", "opened", "closed", "holding", "empty-hand"]
-   - Include state predicates (clean, dirty, opened, closed, filled, empty)
-   - Include spatial predicates (on, in, inside, at, near, above, below)
-   - Include manipulation predicates (graspable, holding, empty-hand, reachable)
-   - Be comprehensive - include 8-15 predicates for a typical task
-
-2. **required_actions**: Define 3-6 PDDL actions needed for this task type.
-   - Use proper PDDL syntax: "(and ...)" for conjunctions
-   - Include preconditions and effects
-   - Parameters should be "?var - type" format
-   - Add descriptive comments
-
-3. **action_sequence**: Provide 3-8 high-level steps
-   Examples: ["pick(mug)", "wash(mug, sink)", "dry(mug)", "place(mug, shelf)"]
-
-4. **goal_predicates**: Final desired state in PDDL format
-   Examples: ["clean(mug)", "on(mug, shelf)", "not(dirty(mug))"]
-
-5. **complexity**: Rate as:
-   - simple: 1-3 actions, single object
-   - medium: 4-6 actions, multiple objects
-   - complex: 7+ actions, multi-step with dependencies
-
-6. **estimated_steps**: Realistic number of PDDL actions needed
-
-EXAMPLE for "Clean the dirty mug and place it on the shelf":
-{{
-  "action_sequence": ["pick(mug)", "move_to(sink)", "wash(mug, sink)", "dry(mug)", "move_to(shelf)", "place(mug, shelf)"],
-  "goal_predicates": ["clean(mug)", "on(mug, shelf)", "not(dirty(mug))"],
-  "preconditions": ["graspable(mug)", "reachable(mug)", "exists(sink)", "exists(shelf)"],
-  "goal_objects": ["mug", "shelf"],
-  "tool_objects": ["sink", "soap", "towel"],
+  "action_sequence": ["step1", "step2"],
+  "goal_predicates": ["on(obj, location)"],
+  "preconditions": ["graspable(obj)"],
+  "goal_objects": ["obj_types_from_task"],
+  "tool_objects": ["tools_needed"],
   "obstacle_objects": [],
-  "initial_predicates": ["dirty(mug)", "on(mug, table)"],
-  "relevant_predicates": ["clean", "dirty", "wet", "graspable", "holding", "empty-hand", "on", "at", "near", "reachable", "opened", "closed"],
+  "initial_predicates": ["expected_initial_states"],
+  "relevant_predicates": ["predicate_names"],
   "required_actions": [
     {{
       "name": "pick",
       "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (reachable ?obj) (empty-hand))",
-      "effect": "(and (holding ?obj) (not (empty-hand)))",
-      "description": "Pick up an object"
-    }},
-    {{
-      "name": "wash",
-      "parameters": ["?obj - object", "?sink - sink"],
-      "precondition": "(and (holding ?obj) (dirty ?obj) (at robot ?sink))",
-      "effect": "(and (clean ?obj) (wet ?obj) (not (dirty ?obj)))",
-      "description": "Wash a dirty object in the sink"
-    }},
-    {{
-      "name": "place",
-      "parameters": ["?obj - object", "?surface - surface"],
-      "precondition": "(and (holding ?obj) (reachable ?surface))",
-      "effect": "(and (on ?obj ?surface) (empty-hand) (not (holding ?obj)))",
-      "description": "Place object on a surface"
+      "precondition": "(and (graspable ?obj) (empty-hand))",
+      "effect": "(and (holding ?obj) (not (empty-hand)))"
     }}
   ],
-  "complexity": "medium",
-  "estimated_steps": 6
+  "complexity": "simple",
+  "estimated_steps": 3
 }}
 
-Now analyze the task: "{task}"
-
-Be thorough and specific. This analysis will guide the perception system on what to look for."""
+Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
 
     def _build_analysis_prompt(
         self,

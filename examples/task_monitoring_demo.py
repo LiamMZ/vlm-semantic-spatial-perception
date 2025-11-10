@@ -21,7 +21,6 @@ from src.planning import (
     TaskStateMonitor,
     TaskState
 )
-from src.perception import DetectedObject
 
 # Load environment
 load_dotenv()

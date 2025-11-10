@@ -1,6 +1,5 @@
 """PDDL planning and dynamic predicate generation"""
 
-from .dynamic_pddl_generator import DynamicPDDLGenerator
 from .llm_task_analyzer import LLMTaskAnalyzer, TaskAnalysis
 from .pddl_representation import (
     PDDLRepresentation,
@@ -16,7 +15,6 @@ from .task_state_monitor import TaskStateMonitor, TaskState, TaskStateDecision
 
 __all__ = [
     # Legacy components
-    "DynamicPDDLGenerator",
 
     # Core LLM analysis
     "LLMTaskAnalyzer",

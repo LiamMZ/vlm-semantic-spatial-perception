@@ -9,14 +9,7 @@ Gemini Robotics-ER for:
 - Task decomposition
 """
 
-from .gemini_robotics import (
-    GeminiRoboticsClient,
-    ObjectDetectionResult,
-    SpatialReasoningResult,
-    TrajectoryResult,
-    TaskDecompositionResult,
-    InteractionPointResult
-)
+
 from .object_tracker import ObjectTracker
 from .object_registry import (
     DetectedObject,
@@ -24,16 +17,8 @@ from .object_registry import (
     DetectedObjectRegistry
 )
 from .continuous_tracker import ContinuousObjectTracker, TrackingStats
-from .vlm_detector import VLMObjectDetector
 
 __all__ = [
-    # Legacy Gemini client (high-level capabilities)
-    "GeminiRoboticsClient",
-    "ObjectDetectionResult",
-    "SpatialReasoningResult",
-    "TrajectoryResult",
-    "TaskDecompositionResult",
-    "InteractionPointResult",
     # Object tracking system (focused on detection & affordances)
     "ObjectTracker",
     "DetectedObject",
@@ -42,6 +27,4 @@ __all__ = [
     # Continuous background tracking
     "ContinuousObjectTracker",
     "TrackingStats",
-    # World model integration
-    "VLMObjectDetector",
 ]

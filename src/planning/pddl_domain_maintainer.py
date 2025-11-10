@@ -101,6 +101,10 @@ class PDDLDomainMaintainer:
             timeout=15.0
         )
 
+        # Check if analysis succeeded
+        if self.task_analysis is None:
+            raise RuntimeError(f"LLM task analysis failed for task: {task_description}")
+
         # Extract goal object types from task
         self.goal_object_types = set(self.task_analysis.goal_objects)
 
@@ -216,8 +220,9 @@ class PDDLDomainMaintainer:
 
         self.last_update_observations += len(detected_objects)
 
-        # Check if we observed any goal-relevant objects
-        goal_objects_found = self.goal_object_types.intersection(self.observed_object_types)
+        # Check if we observed any goal-relevant objects (with fuzzy matching)
+        goal_objects_found = self._match_goal_objects(self.observed_object_types)
+        goal_objects_missing = self.goal_object_types - goal_objects_found
 
         return {
             "objects_added": objects_added,
@@ -226,7 +231,7 @@ class PDDLDomainMaintainer:
             "total_object_types": len(self.observed_object_types),
             "total_observations": self.last_update_observations,
             "goal_objects_found": list(goal_objects_found),
-            "goal_objects_missing": list(self.goal_object_types - self.observed_object_types)
+            "goal_objects_missing": list(goal_objects_missing)
         }
 
     async def refine_domain_from_observations(
@@ -289,6 +294,36 @@ class PDDLDomainMaintainer:
 
         return True
 
+    def _match_goal_objects(self, observed_types: Set[str]) -> Set[str]:
+        """
+        Match goal object types against observed types with fuzzy matching.
+
+        Handles cases like "red_mug" (goal) matching "mug" (observed).
+        Returns the set of goal object types that have been matched.
+
+        Args:
+            observed_types: Set of observed object types
+
+        Returns:
+            Set of goal object types that match observed types
+        """
+        matched = set()
+
+        for goal_type in self.goal_object_types:
+            # Exact match
+            if goal_type in observed_types:
+                matched.add(goal_type)
+                continue
+
+            # Fuzzy match: check if observed type is a substring of goal type
+            # e.g., "mug" matches "red_mug"
+            for obs_type in observed_types:
+                if obs_type in goal_type or goal_type in obs_type:
+                    matched.add(goal_type)
+                    break
+
+        return matched
+
     async def are_goal_objects_observed(self) -> bool:
         """
         Check if all goal-relevant objects have been observed.
@@ -296,7 +331,8 @@ class PDDLDomainMaintainer:
         Returns:
             True if all goal objects have been seen
         """
-        return self.goal_object_types.issubset(self.observed_object_types)
+        matched = self._match_goal_objects(self.observed_object_types)
+        return len(matched) == len(self.goal_object_types)
 
     async def get_missing_goal_objects(self) -> List[str]:
         """
@@ -305,7 +341,8 @@ class PDDLDomainMaintainer:
         Returns:
             List of object types mentioned in goal but not yet observed
         """
-        return list(self.goal_object_types - self.observed_object_types)
+        matched = self._match_goal_objects(self.observed_object_types)
+        return list(self.goal_object_types - matched)
 
     async def get_domain_statistics(self) -> Dict:
         """
@@ -365,11 +402,31 @@ class PDDLDomainMaintainer:
                     args_str = pred_str[pred_str.index("(") + 1:pred_str.index(")")]
                     args = [arg.strip() for arg in args_str.split(",") if arg.strip()]
 
+                    # Map generic object types to actual object instances
+                    # e.g., "red_mug" -> "red_mug_1" if red_mug_1 exists
+                    mapped_args = []
+                    for arg in args:
+                        # Check if this is an exact object instance
+                        if arg in self.pddl.object_instances:
+                            mapped_args.append(arg)
+                        else:
+                            # Try to find an instance with this type
+                            found = False
+                            for obj_name, obj in self.pddl.object_instances.items():
+                                # Match if object type contains arg or vice versa
+                                if arg in obj.object_type or obj.object_type in arg:
+                                    mapped_args.append(obj_name)
+                                    found = True
+                                    break
+                            if not found:
+                                # Use original arg (will fail validation later)
+                                mapped_args.append(arg)
+
                     # Only add if predicate is defined
                     if pred_name in self.pddl.predicates:
                         await self.pddl.add_goal_literal_async(
                             pred_name,
-                            args,
+                            mapped_args,
                             negated=negated
                         )
             except Exception as e:
