@@ -6,34 +6,11 @@ Makes intelligent decisions about exploration, planning, or domain refinement.
 """
 
 import asyncio
-from enum import Enum
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
 
 from .pddl_representation import PDDLRepresentation
 from .pddl_domain_maintainer import PDDLDomainMaintainer
-
-
-class TaskState(Enum):
-    """Possible states for task execution."""
-    EXPLORE = "explore"  # Need more environmental information
-    PLAN_AND_EXECUTE = "plan_and_execute"  # Ready to generate and execute plan
-    REFINE_DOMAIN = "refine_domain"  # Domain incomplete, needs refinement
-    GOAL_UNREACHABLE = "goal_unreachable"  # Goal cannot be achieved with current knowledge
-    COMPLETE = "complete"  # Task successfully completed
-
-
-@dataclass
-class TaskStateDecision:
-    """
-    Decision about current task state and recommended action.
-    """
-    state: TaskState
-    confidence: float  # 0.0 to 1.0
-    reasoning: str
-    blockers: List[str]  # What's preventing progress
-    recommendations: List[str]  # Suggested actions
-    metrics: Dict[str, any]  # Supporting data
+from .utils.task_types import TaskState, TaskStateDecision
 
 
 class TaskStateMonitor:

@@ -223,7 +223,6 @@ class PDDLDomainMaintainer:
         # Check if we observed any goal-relevant objects (with fuzzy matching)
         goal_objects_found = self._match_goal_objects(self.observed_object_types)
         goal_objects_missing = self.goal_object_types - goal_objects_found
-
         return {
             "objects_added": objects_added,
             "new_object_types": list(new_object_types),

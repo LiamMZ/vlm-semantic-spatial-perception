@@ -10,39 +10,16 @@ This module uses an LLM to:
 
 import json
 import time
-from dataclasses import dataclass
+import io
 from typing import Dict, List, Optional, Union
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-
-@dataclass
-class TaskAnalysis:
-    """Result of LLM task analysis."""
-
-    # Task understanding
-    action_sequence: List[str]  # High-level action steps
-    goal_predicates: List[str]  # Goal state predicates
-    preconditions: List[str]  # Required preconditions
-
-    # Relevant objects
-    goal_objects: List[str]  # Primary objects for task
-    tool_objects: List[str]  # Tools/intermediate objects
-    obstacle_objects: List[str]  # Objects to avoid
-
-    # Scene-specific predicates
-    initial_predicates: List[str]  # Current state predicates
-    relevant_predicates: List[str]  # Task-relevant predicate types
-
-    # Action definitions
-    required_actions: List[Dict]  # PDDL action schemas
-
-    # Metadata
-    complexity: str  # 'simple', 'medium', 'complex'
-    estimated_steps: int
+from .utils.task_types import TaskAnalysis
 
 
 class LLMTaskAnalyzer:
@@ -53,7 +30,7 @@ class LLMTaskAnalyzer:
     to the actual environment rather than relying on fixed patterns.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-pro"):
         """
         Initialize LLM task analyzer.
 
@@ -61,11 +38,11 @@ class LLMTaskAnalyzer:
             api_key: Gemini API key (None to use environment variable)
             model_name: Model to use (flash for speed, pro for quality)
         """
-        if api_key:
-            genai.configure(api_key=api_key)
+        self.api_key = api_key
+        self.model_name = model_name
+        self.client = genai.Client(api_key=api_key)
 
-        # Use flash model for speed
-        self.model = genai.GenerativeModel(model_name)
+        print(f"ℹ LLMTaskAnalyzer using GenAI SDK with model: {model_name}")
 
         # Response cache for identical queries
         self._cache: Dict[str, TaskAnalysis] = {}
@@ -121,35 +98,37 @@ class LLMTaskAnalyzer:
         # Call LLM with timeout
         start_time = time.time()
         try:
-            # Build content (text + optional image)
+            # Build content parts
+            content_parts = []
             if pil_image:
-                content = [pil_image, prompt]
-            else:
-                content = prompt
+                # Encode image
+                img_byte_arr = io.BytesIO()
+                pil_image.save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
+                content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
+            content_parts.append(prompt)
 
-            response = self.model.generate_content(
-                content,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.1,  # Low for consistency
-                    top_p=0.9,
-                    max_output_tokens=8192,  # Increased to avoid truncation
-                    response_mime_type="application/json"
-                )
+            # Generate content
+            config = types.GenerateContentConfig(
+                temperature=0.1,  # Low for consistency
+                top_p=0.9,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=-1)
             )
+
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=content_parts,
+                config=config
+            )
+            response_text = response.text
+
             elapsed = time.time() - start_time
             print(f"   → LLM analysis completed in {elapsed:.2f}s")
 
-            # Check if response was truncated
-            if response.candidates[0].finish_reason != 1:  # 1 = STOP (normal completion)
-                print(f"   ⚠ Warning: Response truncated (finish_reason: {response.candidates[0].finish_reason})")
-                # Try to salvage what we can by completing the JSON
-                text = response.text
-                # If it's incomplete JSON, we can't use it
-                if not text.strip().endswith('}'):
-                    raise ValueError(f"Incomplete response from LLM (finish_reason: {response.candidates[0].finish_reason})")
-
             # Parse response
-            analysis = self._parse_response(response.text)
+            analysis = self._parse_response(response_text)
 
             # Cache result
             self._cache[cache_key] = analysis

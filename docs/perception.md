@@ -24,24 +24,24 @@ The perception system provides VLM-powered semantic scene understanding for robo
 
 ### Core Files
 
-- **[object_tracker.py](../src/perception/object_tracker.py)** (36,938 bytes)
-  - Main VLM-based detection engine
+- **[object_tracker.py](../src/perception/object_tracker.py)**
+  - Main VLM-based detection engine using Google GenAI SDK
   - Async streaming and parallel processing
   - Affordance analysis and interaction point detection
   - Registry management and querying
 
-- **[object_registry.py](../src/perception/object_registry.py)** (12,573 bytes)
+- **[object_registry.py](../src/perception/object_registry.py)**
   - Thread-safe object storage using `threading.RLock`
   - CRUD operations on detected objects
   - Querying by type, affordance, ID
   - JSON serialization/deserialization
 
-- **[continuous_tracker.py](../src/perception/continuous_tracker.py)** (8,106 bytes)
+- **[continuous_tracker.py](../src/perception/continuous_tracker.py)**
   - Background tracking service
   - Configurable update rate (default 1 Hz)
   - Statistics tracking and callback notifications
 
-- **[utils/coordinates.py](../src/perception/utils/coordinates.py)** (5,167 bytes)
+- **[utils/coordinates.py](../src/perception/utils/coordinates.py)**
   - 2D/3D coordinate transformations
   - Pinhole camera model back-projection
   - Batch processing utilities
@@ -59,6 +59,7 @@ The perception system provides VLM-powered semantic scene understanding for robo
                  │
 ┌────────────────▼────────────────────────────┐
 │      ObjectTracker (VLM Detection)          │
+│  - Google GenAI SDK (new API)               │
 │  - Gemini Robotics-ER 1.5 / Flash          │
 │  - Async parallel processing                │
 └────────────────┬────────────────────────────┘
@@ -644,4 +645,4 @@ api_key = os.getenv("GOOGLE_API_KEY")
 
 ---
 
-*Last Updated: November 10, 2025*
+*Last Updated: November 20, 2025*

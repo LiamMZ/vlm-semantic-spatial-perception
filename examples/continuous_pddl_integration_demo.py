@@ -90,8 +90,7 @@ class ContinuousPDDLIntegration:
         )
         self.maintainer = PDDLDomainMaintainer(
             self.pddl,
-            api_key=api_key,
-            min_observations=min_observations
+            api_key=api_key
         )
         self.monitor = TaskStateMonitor(
             self.maintainer,

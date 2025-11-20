@@ -14,14 +14,9 @@ import io
 import numpy as np
 from PIL import Image
 
-# Try to import the new Google GenAI SDK first (for robotics model)
-try:
-    from google import genai as genai_new
-    from google.genai import types
-    USE_NEW_SDK = True
-except ImportError:
-    USE_NEW_SDK = False
-    import google.generativeai as genai_old
+# Import the new Google GenAI SDK
+from google import genai
+from google.genai import types
 
 # Import coordinate conversion utilities
 from .utils.coordinates import (
@@ -61,7 +56,7 @@ class ObjectTracker:
         api_key: Optional[str] = None,
         model_name: str = "auto",
         default_temperature: float = 0.5,
-        thinking_budget: int = 0,
+        thinking_budget: int = -1,
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
@@ -83,7 +78,6 @@ class ObjectTracker:
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
         """
         self.api_key = api_key
-        self.use_new_sdk = USE_NEW_SDK
         self.max_parallel_requests = max_parallel_requests
         self.crop_target_size = crop_target_size
         self.enable_affordance_caching = enable_affordance_caching
@@ -94,27 +88,14 @@ class ObjectTracker:
 
         # Auto-select best model
         if model_name == "auto":
-            if USE_NEW_SDK:
-                self.model_name = self.ROBOTICS_MODEL
-                print(f"ℹ ObjectTracker using: {self.model_name}")
-            else:
-                self.model_name = self.FLASH_MODEL
-                print(f"ℹ New GenAI SDK not available. Using: {self.model_name}")
-                print(f"  Install with: pip install google-genai")
+            self.model_name = self.ROBOTICS_MODEL
+            print(f"ℹ ObjectTracker using: {self.model_name}")
         else:
             self.model_name = model_name
 
-        # Initialize appropriate SDK
-        if USE_NEW_SDK and "robotics" in self.model_name:
-            self.client = genai_new.Client(api_key=api_key)
-            self.model = None
-            print(f"✓ ObjectTracker initialized with new GenAI SDK")
-        else:
-            if api_key:
-                genai_old.configure(api_key=api_key)
-            self.client = None
-            self.model = genai_old.GenerativeModel(self.model_name)
-            print(f"✓ ObjectTracker initialized with legacy SDK")
+        # Initialize GenAI SDK
+        self.client = genai.Client(api_key=api_key)
+        print(f"✓ ObjectTracker initialized with GenAI SDK")
 
         self.default_temperature = default_temperature
         self.thinking_budget = thinking_budget
@@ -212,14 +193,10 @@ class ObjectTracker:
         # Performance optimization: Encode image once for all requests
         encode_start = time.time()
         self._cache_image_id = id(pil_image)
-        if self.use_new_sdk and self.client:
-            # Pre-encode image for new SDK (reused in parallel requests)
-            img_byte_arr = io.BytesIO()
-            pil_image.save(img_byte_arr, format='PNG')
-            self._encoded_image_cache = img_byte_arr.getvalue()
-        else:
-            # Old SDK passes PIL image directly (no encoding needed)
-            self._encoded_image_cache = None
+        # Pre-encode image (reused in parallel requests)
+        img_byte_arr = io.BytesIO()
+        pil_image.save(img_byte_arr, format='PNG')
+        self._encoded_image_cache = img_byte_arr.getvalue()
         encode_time = time.time() - encode_start
 
         # Step 1: Stream object names and collect them
@@ -888,42 +865,37 @@ Position is [y, x] in 0-1000 normalized coordinates."""
         Generate content with async streaming support using client.aio.
         Yields text chunks as they arrive.
         """
-        if self.use_new_sdk and self.client:
-            # Use new GenAI SDK with async streaming via client.aio
-            # Check if we can use cached encoded image
-            if (self._encoded_image_cache is not None and
-                self._cache_image_id == id(image)):
-                img_bytes = self._encoded_image_cache
-            else:
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format='PNG')
-                img_bytes = img_byte_arr.getvalue()
-
-            content_parts = [
-                types.Part.from_bytes(data=img_bytes, mime_type='image/png'),
-                prompt
-            ]
-
-            temp = temperature if temperature is not None else self.default_temperature
-            config = types.GenerateContentConfig(
-                temperature=temp,
-                thinking_config=types.ThinkingConfig(
-                    thinking_budget=self.thinking_budget
-                ) if self.thinking_budget > 0 else None
-            )
-
-            # Use async streaming via client.aio
-            stream = await self.client.aio.models.generate_content_stream(
-                model=self.model_name,
-                contents=content_parts,
-                config=config
-            )
-            async for chunk in stream:
-                if hasattr(chunk, 'text') and chunk.text:
-                    yield chunk.text
-
+        # Check if we can use cached encoded image
+        if (self._encoded_image_cache is not None and
+            self._cache_image_id == id(image)):
+            img_bytes = self._encoded_image_cache
         else:
-            raise RuntimeError("Async mode requires google-genai SDK. Install with: pip install google-genai")
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+
+        content_parts = [
+            types.Part.from_bytes(data=img_bytes, mime_type='image/png'),
+            prompt
+        ]
+
+        temp = temperature if temperature is not None else self.default_temperature
+        config = types.GenerateContentConfig(
+            temperature=temp,
+            thinking_config=types.ThinkingConfig(
+                thinking_budget=self.thinking_budget
+            )
+        )
+
+        # Use async streaming via client.aio
+        stream = await self.client.aio.models.generate_content_stream(
+            model=self.model_name,
+            contents=content_parts,
+            config=config
+        )
+        async for chunk in stream:
+            if hasattr(chunk, 'text') and chunk.text:
+                yield chunk.text
 
     def _parse_json_response(self, response_text: str) -> Dict[str, Any]:
         """Parse JSON response from LLM."""
@@ -948,6 +920,6 @@ Position is [y, x] in 0-1000 normalized coordinates."""
 
     async def aclose(self):
         """Close async client resources."""
-        if self.use_new_sdk and self.client:
+        if self.client:
             await self.client.aio.aclose()
 
