@@ -15,6 +15,8 @@ the PDDL domain as new objects are detected.
 import os
 import sys
 import asyncio
+import json
+import time
 from pathlib import Path
 from typing import Optional, Callable
 from datetime import datetime
@@ -133,6 +135,7 @@ class ContinuousPDDLIntegration:
         self.last_state = None
         self.ready_for_planning = False
         self._running = False
+        self._known_object_ids = set()  # Track known objects to identify new ones
 
     def _emit_event(self, event_type: str, data: Optional[dict] = None):
         """Emit an event to the event handler."""
@@ -156,7 +159,7 @@ class ContinuousPDDLIntegration:
         """
         self.detection_count += 1
 
-        # Get all detected objects
+        # Get all detected objects from tracker's built-in registry
         all_objects = self.tracker.get_all_objects()
 
         if not all_objects:
@@ -198,10 +201,30 @@ class ContinuousPDDLIntegration:
                 self.ready_for_planning = True
                 newly_ready = True
 
-        # Build object type summary
-        object_types = {}
+        # Identify new objects
+        current_object_ids = {obj.object_id for obj in all_objects}
+        new_object_ids = current_object_ids - self._known_object_ids
+        self._known_object_ids = current_object_ids
+        
+        # Build detailed info for new objects only
+        new_objects_detail = []
         for obj in all_objects:
-            object_types[obj.object_type] = object_types.get(obj.object_type, 0) + 1
+            if obj.object_id in new_object_ids:
+                # Extract predicates/relationships from pddl_state
+                predicates = []
+                if obj.pddl_state:
+                    for key, value in obj.pddl_state.items():
+                        if isinstance(value, bool) and value:
+                            predicates.append(key)
+                        elif value and key not in ['object_id', 'object_type']:
+                            predicates.append(f"{key}={value}")
+                
+                new_objects_detail.append({
+                    "object_id": obj.object_id,
+                    "object_type": obj.object_type,
+                    "predicates": predicates,
+                    "affordances": list(obj.affordances)
+                })
 
         # Emit single event with all data
         self._emit_event("detection_update", {
@@ -219,15 +242,22 @@ class ContinuousPDDLIntegration:
             "state_changed": state_changed,
             "old_state": old_state.value if old_state else "INIT",
             "newly_ready": newly_ready,
-            "object_types": object_types
+            "new_objects": new_objects_detail
         })
         
-        # Generate PDDL files continuously after each update
+        # Auto-save both PDDL and state continuously after each update
         try:
             await self.generate_pddl_files()
             self._emit_event("pddl_auto_saved", {"detection_count": self.detection_count})
         except Exception as e:
             self._emit_event("pddl_save_error", {"error": str(e)})
+        
+        # Save state (registry + metadata) alongside PDDL
+        try:
+            await self.save_state()
+            self._emit_event("state_auto_saved", {"detection_count": self.detection_count})
+        except Exception as e:
+            self._emit_event("state_save_error", {"error": str(e)})
 
     async def initialize_from_task(self):
         """
@@ -325,8 +355,13 @@ class ContinuousPDDLIntegration:
         stats = await self.tracker.get_stats()
         domain_stats = await self.maintainer.get_domain_statistics()
         decision = await self.monitor.determine_state()
+        
+        # Get PDDL snapshots for actions and goals
+        domain_snapshot = await self.pddl.get_domain_snapshot()
+        problem_snapshot = await self.pddl.get_problem_snapshot()
 
         return {
+            "task_description": self.task_description,
             "tracking": {
                 "is_running": stats.is_running,
                 "detection_cycles": stats.total_frames,
@@ -342,8 +377,141 @@ class ContinuousPDDLIntegration:
                 "current": decision.state.value,
                 "confidence": decision.confidence,
                 "ready_for_planning": self.ready_for_planning
+            },
+            "actions": {
+                "predefined": domain_snapshot.get('predefined_actions', []),
+                "llm_generated": domain_snapshot.get('llm_generated_actions', [])
+            },
+            "goals": problem_snapshot.get('goal_literals', [])
+        }
+
+    async def save_state(self, path: Optional[Path] = None) -> Path:
+        """
+        Save system state to disk.
+
+        Saves:
+        - PDDL domain and problem
+        - Object registry
+        - Task information
+        - System metadata
+
+        Args:
+            path: Path to save state (defaults to output_dir / "state.json")
+
+        Returns:
+            Path to saved state file
+        """
+        if path is None:
+            path = Path(self.output_dir) / "state.json"
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._emit_event("save_state_start", {"path": str(path)})
+
+        # Save object registry from tracker
+        registry_path = path.parent / "registry.json"
+        self.tracker.tracker.registry.save_to_json(str(registry_path), include_timestamp=False)
+
+        # Save PDDL files
+        pddl_dir = path.parent / "pddl"
+        if self.pddl:
+            await self.pddl.generate_files_async(str(pddl_dir))
+
+        # Save system state
+        state_data = {
+            "version": "1.0",
+            "timestamp": time.time(),
+            "task_description": self.task_description,
+            "detection_count": self.detection_count,
+            "ready_for_planning": self.ready_for_planning,
+            "last_state": self.last_state.value if self.last_state else None,
+            "task_analysis": {
+                "goal_objects": self.task_analysis.goal_objects if self.task_analysis else [],
+                "relevant_predicates": self.task_analysis.relevant_predicates if self.task_analysis else [],
+                "estimated_steps": self.task_analysis.estimated_steps if self.task_analysis else 0,
+                "complexity": self.task_analysis.complexity if self.task_analysis else "unknown",
+            } if self.task_analysis else None,
+            "files": {
+                "registry": str(registry_path),
+                "domain": str(pddl_dir / f"{self.pddl.domain_name}.pddl") if self.pddl else None,
+                "problem": str(pddl_dir / f"{self.pddl.problem_name}.pddl") if self.pddl else None,
             }
         }
+
+        with open(path, 'w') as f:
+            json.dump(state_data, f, indent=2)
+
+        self._emit_event("save_state_complete", {"path": str(path)})
+        return path
+
+    async def load_state(self, path: Optional[Path] = None) -> None:
+        """
+        Load system state from disk.
+
+        Args:
+            path: Path to state file (defaults to output_dir / "state.json")
+        """
+        if path is None:
+            path = Path(self.output_dir) / "state.json"
+
+        path = Path(path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"State file not found: {path}")
+
+        self._emit_event("load_state_start", {"path": str(path)})
+
+        with open(path, 'r') as f:
+            state_data = json.load(f)
+
+        # Load components using their respective load methods
+        await self._load_registry(state_data)
+        await self._load_task_state(state_data)
+        await self._restore_pddl_domain(state_data)
+
+        self._emit_event("load_state_complete", {"path": str(path)})
+
+    async def _load_registry(self, state_data: dict) -> None:
+        """Load object registry from saved state."""
+        registry_path = state_data["files"]["registry"]
+        if Path(registry_path).exists():
+            self.tracker.tracker.registry.load_from_json(registry_path)
+            self._emit_event("load_state_registry", {"object_count": len(self.tracker.tracker.registry)})
+
+    async def _load_task_state(self, state_data: dict) -> None:
+        """Load task state metadata."""
+        self.task_description = state_data.get("task_description", "")
+        self.detection_count = state_data.get("detection_count", 0)
+        self.ready_for_planning = state_data.get("ready_for_planning", False)
+        
+        last_state_value = state_data.get("last_state")
+        if last_state_value:
+            self.last_state = TaskState(last_state_value)
+
+    async def _restore_pddl_domain(self, state_data: dict) -> None:
+        """Restore PDDL domain from task analysis and observations."""
+        task_analysis_data = state_data.get("task_analysis")
+        if task_analysis_data and self.task_description:
+            # Re-analyze task to restore domain
+            self._emit_event("load_state_reanalyze", {"task": self.task_description})
+            await self.initialize_from_task()
+
+            # Re-process observations through maintainer
+            all_objects = self.tracker.tracker.registry.get_all_objects()
+            if all_objects:
+                self._emit_event("load_state_reprocess", {"object_count": len(all_objects)})
+                objects_dict = [
+                    {
+                        "object_id": obj.object_id,
+                        "object_type": obj.object_type,
+                        "affordances": list(obj.affordances),
+                        "pddl_state": obj.pddl_state,
+                        "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None
+                    }
+                    for obj in all_objects
+                ]
+                await self.maintainer.update_from_observations(objects_dict)
 
     def cleanup(self):
         """Clean up resources."""
@@ -403,6 +571,7 @@ class ContinuousPDDLTextualApp(App):
         self._command_input: Optional[Input] = None
         self._initializing: bool = True
         self._awaiting_task_input: bool = False
+        self._init_failed: bool = False
         
         # Log file will be set up after system initialization
         self.log_file: Optional[Path] = None
@@ -433,11 +602,18 @@ class ContinuousPDDLTextualApp(App):
         # Delay initialization to allow UI to render first
         if not self.api_key:
             self._write_log("⚠ GEMINI_API_KEY or GOOGLE_API_KEY is not set.")
-            self._write_log("Please set it as an environment variable and restart.")
+            self._write_log("Please set it as an environment variable.")
+            self._write_log("")
+            self._write_log("After setting the key, type 'restart' to retry.")
             self._initializing = False
             self._awaiting_task_input = False
+            self._init_failed = True
             if self._command_input:
-                self._command_input.disabled = True
+                self._command_input.disabled = False
+                self._command_input.placeholder = "Type 'restart' to retry..."
+                self._command_input.focus()
+            self._update_status()
+            self._update_commands_panel()
         else:
             # Start initialization after UI is rendered
             asyncio.create_task(self._delayed_initialization())
@@ -459,6 +635,15 @@ class ContinuousPDDLTextualApp(App):
         command = event.value.strip()
         # Clear input immediately for responsive feedback
         event.input.value = ""
+        
+        # Handle initialization failure state - only allow restart
+        if self._init_failed:
+            if command.lower() in ["restart", "quit", "exit"]:
+                await self.handle_command(command)
+            else:
+                self._write_log(f"> {command}")
+                self._write_log("⚠ System initialization failed. Use 'restart' to retry or 'quit' to exit.")
+            return
         
         # Handle initial task input
         if self._awaiting_task_input:
@@ -490,15 +675,7 @@ class ContinuousPDDLTextualApp(App):
         action = parts[0].strip().lower()
         argument = parts[1].strip() if len(parts) > 1 else ""
 
-        if action == "task":
-            if argument:
-                self._write_log("⚙ Updating task...")
-                self.task_description = argument
-                self._write_log(f"✓ Task updated to: \"{self.task_description}\"")
-                self._update_status()
-            else:
-                self._write_log(f"Current task: \"{self.task_description}\"")
-        elif action == "interval":
+        if action == "interval":
             if not argument:
                 self._write_log(f"Current update interval: {self.update_interval:.2f}s")
             else:
@@ -516,13 +693,110 @@ class ContinuousPDDLTextualApp(App):
                 self._display_status(status)
             else:
                 self._write_log("⚠ System not initialized yet.")
+        elif action == "save":
+            self._write_log("⚙ Saving state...")
+            if self.system:
+                try:
+                    path = await self.system.save_state()
+                    self._write_log(f"✓ State saved to {path}")
+                except Exception as exc:
+                    self._write_log(f"⚠ Failed to save state: {exc}")
+            else:
+                self._write_log("⚠ System not initialized yet.")
+        elif action == "load":
+            if not self.system:
+                self._write_log("⚠ System not initialized yet.")
+            else:
+                # Parse optional path argument
+                load_path = None
+                if argument:
+                    load_path = Path(argument) / "state.json" if not argument.endswith('.json') else Path(argument)
+                    self._write_log(f"⚙ Loading state from {load_path}...")
+                else:
+                    self._write_log("⚙ Loading state...")
+                
+                try:
+                    await self.system.load_state(load_path)
+                    self._update_status()
+                    self._write_log("✓ State loaded successfully")
+                except FileNotFoundError as exc:
+                    self._write_log(f"⚠ {exc}")
+                except Exception as exc:
+                    self._write_log(f"⚠ Failed to load state: {exc}")
         elif action == "stop":
             self._write_log("⚙ Stopping tracking...")
             await self._stop_tracking()
+        elif action == "continue":
+            if not self.system:
+                self._write_log("⚠ System not initialized.")
+            elif self.system._running:
+                self._write_log("⚠ Tracking is already running.")
+            else:
+                self._write_log("⚙ Resuming tracking...")
+                self.system.start_tracking()
+                self._update_status()
+                self._update_commands_panel()
+                self._write_log("✓ Tracking resumed")
+        elif action == "restart":
+            self._write_log("⚙ Restarting system...")
+            
+            # Stop tracking if running
+            if self.system and self.system._running:
+                await self.system.stop_tracking()
+            
+            # Clean up existing system
+            if self.system:
+                self.system.cleanup()
+                self.system = None
+            
+            # Clear init failed flag and reload API key
+            self._init_failed = False
+            self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            
+            # Check for API key before initializing
+            if not self.api_key:
+                self._write_log("⚠ GEMINI_API_KEY or GOOGLE_API_KEY is still not set.")
+                self._write_log("Please set it as an environment variable and try again.")
+                self._init_failed = True
+                if self._command_input:
+                    self._command_input.placeholder = "Type 'restart' to retry..."
+            else:
+                # Reinitialize
+                self._write_log("⚙ Reinitializing components...")
+                await self._initialize_system()
+                
+                # If we had a task and init succeeded, start tracking automatically
+                if self.task_description and self.system and not self._awaiting_task_input and not self._init_failed:
+                    self._write_log("⚙ Restarting tracking with previous task...")
+                    await self._start_tracking_with_task()
+            
+            self._update_status()
+            self._update_commands_panel()
         elif action == "generate":
-            self._write_log("⚙ Generating PDDL files...")
-            force = argument.lower() == "force"
-            await self._generate_pddl(force=force)
+            # Generate PDDL files (inline logic)
+            if not self.system:
+                self._write_log("⚠ System not initialized.")
+            else:
+                force = argument.lower() == "force"
+                self._write_log("⚙ Checking readiness...")
+                decision = await self.system.monitor.determine_state()
+                ready = (
+                    decision.state == TaskState.PLAN_AND_EXECUTE
+                    or self.system.ready_for_planning
+                    or force
+                )
+                
+                if not ready:
+                    self._write_log("⚠ Not ready for planning yet.")
+                    self._write_log(f"  Current state: {decision.state.value}")
+                    self._write_log("  Use 'generate force' to export anyway.")
+                    if decision.blockers:
+                        self._write_log("  Blockers:")
+                        for blocker in decision.blockers:
+                            self._write_log(f"    ✗ {blocker}")
+                else:
+                    await self.system.generate_pddl_files()
+                    self._write_log(f"✓ Output: {self.system.output_dir}")
         elif action in {"quit", "exit"}:
             self._write_log("⚙ Shutting down...")
             await self.action_shutdown()
@@ -571,10 +845,7 @@ class ContinuousPDDLTextualApp(App):
             self._setup_log_file(self.system.output_dir)
             
             self._write_log("")
-            self._write_log("✓ System initialized successfully!")
-            self._write_log("")
-            self._write_log("Please enter a task description to begin...")
-            self._write_log("Example: 'Pick up the red mug and place it on the shelf'")
+            self._write_log("✓ System initialized")
             
             # Now ready for task input
             self._initializing = False
@@ -585,16 +856,18 @@ class ContinuousPDDLTextualApp(App):
                 self._command_input.focus()
             
         except Exception as exc:
-            self._write_log(f"⚠ Failed to initialize system: {exc}")
-            self._write_log("Troubleshooting:")
-            self._write_log("  • Is RealSense camera connected?")
-            self._write_log("  • Is the camera in use by another application?")
-            self._write_log("  • Try running: rs-enumerate-devices")
+            self._write_log(f"⚠ Initialization failed: {exc}")
+            self._write_log("Check: RealSense connection, device availability (rs-enumerate-devices)")
+            self._write_log("")
+            self._write_log("Type 'restart' to retry initialization.")
             self.system = None
             self._initializing = False
             self._awaiting_task_input = False
+            self._init_failed = True
             if self._command_input:
-                self._command_input.disabled = True
+                self._command_input.disabled = False
+                self._command_input.placeholder = "Type 'restart' to retry..."
+                self._command_input.focus()
         
         self._update_status()
         self._update_commands_panel()
@@ -635,61 +908,36 @@ class ContinuousPDDLTextualApp(App):
 
         await self.system.stop_tracking()
         
-        # Show final status
-        self._write_log("")
-        self._write_log("⚙ Fetching final status...")
-        status = await self.system.get_status()
-        self._display_status(status)
-        
         # Always generate PDDL files when stopped
-        self._write_log("⚙ Auto-generating PDDL files...")
         try:
             await self.system.generate_pddl_files()
         except Exception as exc:
-            self._write_log(f"⚠ Failed to generate PDDL: {exc}")
+            self._write_log(f"⚠ PDDL generation failed: {exc}")
         
         self._update_status()
+        self._update_commands_panel()
         self._write_log("")
-        self._write_log("✓ All operations complete. Type 'quit' to exit.")
+        self._write_log("✓ Stopped. Use 'continue' to resume or 'quit' to exit.")
 
-    async def _generate_pddl(self, force: bool = False):
-        """Generate PDDL files if ready or forced."""
-        if not self.system:
-            self._write_log("⚠ System not initialized.")
-            return
-
-        self._write_log("⚙ Checking readiness...")
-        decision = await self.system.monitor.determine_state()
-        ready = (
-            decision.state == TaskState.PLAN_AND_EXECUTE
-            or self.system.ready_for_planning
-            or force
-        )
-
-        if not ready:
-            self._write_log("⚠ Not ready for planning yet.")
-            self._write_log(f"  Current state: {decision.state.value}")
-            self._write_log("  Use 'generate force' to export anyway.")
-            if decision.blockers:
-                self._write_log("  Blockers:")
-                for blocker in decision.blockers:
-                    self._write_log(f"    • {blocker}")
-            return
-
-        await self.system.generate_pddl_files()
-        self._write_log(f"✓ PDDL files ready: {self.system.output_dir}")
-    
     def _display_status(self, status: dict):
         """Display system status."""
         sep = "=" * 80
         tracking = status['tracking']
         pddl = status['pddl']
         task = status['task_state']
+        actions = status['actions']
+        goals = status['goals']
         
         self._write_log("")
         self._write_log(sep)
         self._write_log("SYSTEM STATUS")
         self._write_log(sep)
+        
+        # Task description
+        self._write_log("Task:")
+        self._write_log(f"  \"{status['task_description']}\"")
+        
+        self._write_log("")
         self._write_log(f"Tracking: {'RUNNING' if tracking['is_running'] else 'STOPPED'}")
         self._write_log(f"Detection cycles: {tracking['detection_cycles']}")
         self._write_log(f"Frames with detection: {tracking['frames_with_detection']}")
@@ -711,6 +959,53 @@ class ContinuousPDDLTextualApp(App):
         self._write_log(f"  • Confidence: {task['confidence']:.1%}")
         self._write_log(f"  • Ready for planning: {'YES' if task['ready_for_planning'] else 'NO'}")
         
+        # Show generated actions
+        self._write_log("")
+        self._write_log("Actions:")
+        predefined = actions['predefined']
+        llm_generated = actions['llm_generated']
+        
+        self._write_log(f"  • Predefined actions: {len(predefined)}")
+        if predefined:
+            for action_name in predefined:
+                self._write_log(f"    - {action_name}")
+        
+        self._write_log(f"  • LLM-generated actions: {len(llm_generated)}")
+        if llm_generated:
+            for action_name in llm_generated:
+                self._write_log(f"    - {action_name}")
+        
+        # Show goals
+        self._write_log("")
+        self._write_log("Goals:")
+        if goals:
+            self._write_log(f"  • Total goal literals: {len(goals)}")
+            for goal in goals:
+                self._write_log(f"    - {goal}")
+        else:
+            self._write_log("  • No goals set yet")
+        
+        # Show all objects with predicates
+        if self.system:
+            all_objects = self.system.tracker.get_all_objects()
+            if all_objects:
+                self._write_log("")
+                self._write_log(f"Objects ({len(all_objects)}):")
+                for obj in all_objects:
+                    self._write_log(f"  • {obj.object_id} ({obj.object_type})")
+                    # Extract predicates from pddl_state
+                    if obj.pddl_state:
+                        predicates = []
+                        for key, value in obj.pddl_state.items():
+                            if isinstance(value, bool) and value:
+                                predicates.append(key)
+                            elif value and key not in ['object_id', 'object_type']:
+                                predicates.append(f"{key}={value}")
+                        if predicates:
+                            self._write_log(f"    Predicates: {', '.join(predicates)}")
+                    if obj.affordances:
+                        self._write_log(f"    Affordances: {', '.join(obj.affordances)}")
+        
         self._write_log("")
         self._write_log(sep)
 
@@ -728,13 +1023,19 @@ class ContinuousPDDLTextualApp(App):
                 await self.system.stop_tracking()
                 
                 # Always generate PDDL files before cleanup
-                self._write_log("")
-                self._write_log("Generating final PDDL files...")
                 try:
                     await self.system.generate_pddl_files()
-                    self._write_log("✓ Final PDDL files saved.")
                 except Exception as exc:
-                    self._write_log(f"⚠ Failed to generate final PDDL: {exc}")
+                    self._write_log(f"⚠ PDDL generation failed: {exc}")
+            
+            # Save final state if we have data
+            if self.system.task_description and self.system.detection_count > 0:
+                self._write_log("⚙ Saving state...")
+                try:
+                    await self.system.save_state()
+                    self._write_log("✓ State saved")
+                except Exception as exc:
+                    self._write_log(f"⚠ State save failed: {exc}")
 
             try:
                 self.system.cleanup()
@@ -747,7 +1048,7 @@ class ContinuousPDDLTextualApp(App):
                 self._write_log("")
                 if self.system:
                     self._write_log(f"✓ All outputs saved to: {self.system.output_dir}")
-                    self._write_log(f"  • PDDL files (domain & problem)")
+                    self._write_log("  • PDDL files (domain & problem)")
                     self._write_log(f"  • Session log: {self.log_file.name if self.log_file else 'session.log'}")
                 else:
                     self._write_log(f"✓ Log saved to: {self.log_file}")
@@ -765,12 +1066,15 @@ class ContinuousPDDLTextualApp(App):
     def _log_commands(self):
         """Print the available commands to the log."""
         self._write_log("\nAvailable commands:")
+        self._write_log("  • help                 – Show this list")
         self._write_log("  • status               – Show current system status")
         self._write_log("  • stop                 – Stop tracking loop")
+        self._write_log("  • continue             – Resume stopped tracking")
+        self._write_log("  • restart              – Restart entire system")
+        self._write_log("  • save                 – Save current state to disk")
+        self._write_log("  • load [path]          – Load saved state (from path or current output_dir)")
         self._write_log("  • generate [force]     – Export PDDL files (force to override readiness)")
-        self._write_log("  • task <description>   – Update the task description")
         self._write_log("  • interval <seconds>   – Update detection interval")
-        self._write_log("  • help                 – Show this list")
         self._write_log("  • quit                 – Cleanup and exit")
 
     def _write_log(self, message: str = ""):
@@ -812,6 +1116,8 @@ class ContinuousPDDLTextualApp(App):
 
         if self._initializing:
             status_text = "Initializing system components..."
+        elif self._init_failed:
+            status_text = "Initialization failed - type 'restart' to retry"
         elif self._awaiting_task_input:
             status_text = "Waiting for task description..."
         else:
@@ -835,10 +1141,16 @@ class ContinuousPDDLTextualApp(App):
 
         if self._initializing:
             commands_text = "Initializing hardware and components..."
+        elif self._init_failed:
+            commands_text = "Commands: restart | quit"
         elif self._awaiting_task_input:
-            commands_text = "Enter task description to begin"
+            commands_text = "Input: task description"
         else:
-            commands_text = "Commands: status | stop | generate [force] | task <desc> | interval <sec> | help | quit"
+            tracking_state = "RUNNING" if self.system and self.system._running else "STOPPED"
+            if tracking_state == "STOPPED" and self.system:
+                commands_text = "Commands: help | status | continue | restart | save | load [path] | generate [force] | interval <sec> | quit"
+            else:
+                commands_text = "Commands: help | status | stop | restart | save | load [path] | generate [force] | interval <sec> | quit"
         
         self._commands_widget.update(commands_text)
     
@@ -889,13 +1201,7 @@ class ContinuousPDDLTextualApp(App):
             self._write_log(sep)
             self._write_log(f"Update interval: {data['update_interval']}s")
         elif event_type == "tracking_started":
-            self._write_log("✓ Tracking started")
-            self._write_log("")
-            self._write_log("System will continuously:")
-            self._write_log("  1. Detect objects")
-            self._write_log("  2. Update PDDL domain")
-            self._write_log("  3. Save PDDL files")
-            self._write_log("  4. Monitor task state")
+            self._write_log("✓ Tracking loop active")
             self._write_log("")
             self._write_log(sep)
         elif event_type == "detection_update":
@@ -905,31 +1211,12 @@ class ContinuousPDDLTextualApp(App):
         elif event_type == "tracking_stopped":
             self._write_log("✓ Tracking stopped")
         elif event_type == "pddl_generate_start":
-            self._write_log("")
-            self._write_log(sep)
-            self._write_log("GENERATING PDDL FILES")
-            self._write_log(sep)
-            self._write_log(f"Output: {data['output_dir']}")
+            # Silent - will show result on completion
+            pass
         elif event_type == "pddl_generate_complete":
-            # Only show full output for manual generation
-            # Auto-saves during detection are handled silently
-            paths = data['paths']
-            domain_sum = data['domain_summary']
+            # One-line summary
             problem_sum = data['problem_summary']
-            self._write_log(f"✓ PDDL files saved:")
-            self._write_log(f"  • Domain: {paths['domain_path']}")
-            self._write_log(f"  • Problem: {paths['problem_path']}")
-            self._write_log("")
-            self._write_log("Domain Summary:")
-            self._write_log(f"  • Types: {domain_sum['types']}")
-            self._write_log(f"  • Predicates: {domain_sum['predicates']}")
-            self._write_log(f"  • Predefined actions: {domain_sum['predefined_actions']}")
-            self._write_log(f"  • LLM-generated actions: {domain_sum['llm_generated_actions']}")
-            self._write_log("")
-            self._write_log("Problem Summary:")
-            self._write_log(f"  • Object instances: {problem_sum['object_instances']}")
-            self._write_log(f"  • Initial literals: {problem_sum['initial_literals']}")
-            self._write_log(f"  • Goal literals: {problem_sum['goal_literals']}")
+            self._write_log(f"✓ PDDL saved: {problem_sum['object_instances']} objects, {problem_sum['initial_literals']} literals, {problem_sum['goal_literals']} goals")
         elif event_type == "cleanup_start":
             self._write_log("⚙ Cleaning up resources...")
         elif event_type == "cleanup_complete":
@@ -939,6 +1226,29 @@ class ContinuousPDDLTextualApp(App):
             pass
         elif event_type == "pddl_save_error":
             self._write_log(f"⚠ PDDL auto-save error: {data.get('error', 'Unknown')}")
+        elif event_type == "state_auto_saved":
+            # Silent auto-save - don't spam the log
+            pass
+        elif event_type == "state_save_error":
+            self._write_log(f"⚠ State auto-save error: {data.get('error', 'Unknown')}")
+        elif event_type == "save_state_start":
+            # Silent - handled by command echo
+            pass
+        elif event_type == "save_state_complete":
+            # Silent - handled by command completion
+            pass
+        elif event_type == "load_state_start":
+            # Silent - handled by command echo
+            pass
+        elif event_type == "load_state_registry":
+            self._write_log(f"  • Loaded {data['object_count']} objects from registry")
+        elif event_type == "load_state_reanalyze":
+            self._write_log(f"  • Re-analyzing task: '{data['task']}'")
+        elif event_type == "load_state_reprocess":
+            self._write_log(f"  • Re-processing {data['object_count']} objects...")
+        elif event_type == "load_state_complete":
+            # Silent - handled by command completion
+            pass
     
     def _handle_detection_update(self, data: dict):
         """Handle detection update event."""
@@ -991,12 +1301,17 @@ class ContinuousPDDLTextualApp(App):
             self._write_log("🎯 READY FOR PLANNING!")
             self._write_log(sep)
         
-        # Object summary
-        if data['object_types']:
+        # New objects detail (show predicates/relationships)
+        new_objects = data.get('new_objects', [])
+        if new_objects:
             self._write_log("")
-            self._write_log("Object Summary:")
-            for obj_type, count in sorted(data['object_types'].items()):
-                self._write_log(f"  • {obj_type}: {count}")
+            self._write_log(f"New Objects ({len(new_objects)}):")
+            for obj in new_objects:
+                self._write_log(f"  • {obj['object_id']} ({obj['object_type']})")
+                if obj['predicates']:
+                    self._write_log(f"    Predicates: {', '.join(obj['predicates'])}")
+                if obj['affordances']:
+                    self._write_log(f"    Affordances: {', '.join(obj['affordances'])}")
         
         self._write_log("")
         self._write_log(sep)
