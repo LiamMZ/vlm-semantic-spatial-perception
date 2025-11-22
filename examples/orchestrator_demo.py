@@ -396,7 +396,7 @@ class OrchestratorDemoApp(App):
         try:
             # Create timestamp-based output directory
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = Path(f"outputs/pddl/continuous_{timestamp}")
+            output_dir = Path(f"outputs/demos/{timestamp}")
             
             # Configure orchestrator with callbacks for demo
             config = OrchestratorConfig(
