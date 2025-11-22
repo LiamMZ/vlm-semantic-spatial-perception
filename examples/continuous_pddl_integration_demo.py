@@ -522,10 +522,13 @@ class ContinuousPDDLIntegration:
 
 class ContinuousPDDLTextualApp(App):
     """Textual TUI for the continuous PDDL integration demo."""
+    
+    dark = False  # Use light mode by default
 
     CSS = """
     Screen {
         layout: vertical;
+        overflow-x: hidden;
     }
 
     #status-panel {
@@ -533,12 +536,20 @@ class ContinuousPDDLTextualApp(App):
         height: 3;
         content-align: left middle;
         border-bottom: heavy $accent;
+        overflow-x: hidden;
     }
 
     #log-panel {
         height: 1fr;
         border: tall $accent;
         padding: 0 1;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    Log {
+        overflow-x: hidden;
+        width: 100%;
     }
 
     #commands-panel {
@@ -546,6 +557,7 @@ class ContinuousPDDLTextualApp(App):
         height: 2;
         content-align: left middle;
         background: $panel;
+        overflow-x: hidden;
     }
 
     #command-input {
@@ -576,6 +588,18 @@ class ContinuousPDDLTextualApp(App):
         # Log file will be set up after system initialization
         self.log_file: Optional[Path] = None
         self._log_file_handle = None
+    
+    def _get_separator(self, char: str = "=") -> str:
+        """Get a separator line that spans the current console width."""
+        try:
+            # Get console width and subtract for borders + padding
+            # Log panel has: tall border (2 chars per side) + padding (1 char per side)
+            # Total: 6 characters to subtract (3 per side)
+            width = self.console.width - 6
+            return char * max(width, 40)  # Minimum width of 40
+        except (AttributeError, Exception):
+            # Fallback to reasonable default if console width unavailable
+            return char * 80
 
     def compose(self) -> ComposeResult:
         """Compose the UI layout."""
@@ -921,7 +945,7 @@ class ContinuousPDDLTextualApp(App):
 
     def _display_status(self, status: dict):
         """Display system status."""
-        sep = "=" * 80
+        sep = self._get_separator()
         tracking = status['tracking']
         pddl = status['pddl']
         task = status['task_state']
@@ -1156,7 +1180,7 @@ class ContinuousPDDLTextualApp(App):
     
     def _on_system_event(self, event_type: str, data: dict):
         """Handle events from ContinuousPDDLIntegration."""
-        sep = "=" * 80
+        sep = self._get_separator()
         
         if event_type == "camera_init_start":
             self._write_log("⚙ Initializing RealSense camera...")
@@ -1252,7 +1276,7 @@ class ContinuousPDDLTextualApp(App):
     
     def _handle_detection_update(self, data: dict):
         """Handle detection update event."""
-        sep = "=" * 80
+        sep = self._get_separator()
         
         self._write_log("")
         self._write_log(sep)

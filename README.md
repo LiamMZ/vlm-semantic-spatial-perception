@@ -190,7 +190,7 @@ vlm-spatial-perception/
 │   ├── camera_config.yaml
 │   ├── gemini.yaml        # Gemini Robotics configuration ✓
 │   ├── perception_config.yaml
-│   └── vlm_config.yaml
+│   └── prompts_config.yaml # VLM prompts for object tracking ✓
 ├── src/
 │   ├── camera/            # Camera abstraction layer ✓
 │   ├── perception/        # VLM perception pipeline ✓
@@ -235,6 +235,48 @@ spatial:
     thresholds:
       near_distance: 0.3  # meters
 ```
+
+### Prompts Configuration ([config/prompts_config.yaml](config/prompts_config.yaml))
+
+All VLM prompts used by `ObjectTracker` are configurable via YAML. This allows easy experimentation and domain-specific customization without code changes.
+
+```yaml
+detection:
+  streaming: |
+    # Prompt for streaming object detection
+  batch: |
+    # Fallback batch detection prompt
+
+analysis:
+  fast_mode: |
+    # Fast analysis (affordances only)
+  full: |
+    # Full analysis (affordances + interaction points)
+
+interaction:
+  update: |
+    # Update specific interaction points
+```
+
+**Usage:**
+```python
+from src.perception.object_tracker import ObjectTracker
+
+# Default prompts path is available as a constant
+print(ObjectTracker.DEFAULT_PROMPTS_CONFIG)
+# config/prompts_config.yaml
+
+# Use default prompts
+tracker = ObjectTracker(api_key="...")
+
+# Use custom prompts
+tracker = ObjectTracker(
+    api_key="...",
+    prompts_config_path="custom_prompts.yaml"
+)
+```
+
+See [docs/prompts_configuration.md](docs/prompts_configuration.md) for detailed customization guide and [examples/custom_prompts_demo.py](examples/custom_prompts_demo.py) for examples.
 
 ## Development Status
 
