@@ -156,6 +156,64 @@ class CuRoboMotionPlanner:
             print('Using static camera transform for pose conversions')
             print(f"Transform: \n {self.static_camera_tf}")
             
+    def get_robot_state(self) -> Dict[str, Any]:
+        """
+        Duck-typed robot state for orchestrator snapshots.
+
+        Returns a JSON-serializable dict capturing current joints, TCP pose,
+        and camera transform when available. Fields are optional and omitted
+        when unavailable; the orchestrator does not rely on any fixed schema.
+        """
+        state: Dict[str, Any] = {
+            "stamp": time.time(),
+            "provider": type(self).__name__,
+        }
+        try:
+            joints = self.get_robot_joint_state()
+            if joints is not None:
+                state["joints"] = np.asarray(joints, dtype=float).tolist()
+        except Exception:
+            pass
+
+        try:
+            tcp = self.get_robot_tcp_pose()
+            if isinstance(tcp, tuple) and len(tcp) == 2:
+                pos, quat = tcp
+                state["tcp_pose"] = {
+                    "position": np.asarray(pos, dtype=float).tolist() if pos is not None else None,
+                    "quaternion_xyzw": np.asarray(quat, dtype=float).tolist() if quat is not None else None,
+                }
+        except Exception:
+            pass
+
+        try:
+            cam_tf = self.get_camera_transform()
+            if isinstance(cam_tf, tuple) and len(cam_tf) == 2:
+                cam_pos, cam_quat = cam_tf
+                # Provide a predictable sub-structure for camera transform
+                state["camera"] = {
+                    "position": np.asarray(cam_pos, dtype=float).tolist() if cam_pos is not None else None,
+                    "quaternion_xyzw": np.asarray(cam_quat, dtype=float).tolist() if cam_quat is not None else None,
+                }
+        except Exception:
+            pass
+
+        # Include static camera transform when set
+        if self.static_camera_position is not None or self.static_camera_rotation is not None:
+            try:
+                quat = None
+                if self.static_camera_rotation is not None:
+                    quat_np = self.static_camera_rotation.as_quat()  # xyzw
+                    quat = np.asarray(quat_np, dtype=float).tolist()
+                pos = np.asarray(self.static_camera_position, dtype=float).tolist() if self.static_camera_position is not None else None
+                state["static_camera"] = {
+                    "position": pos,
+                    "quaternion_xyzw": quat,
+                }
+            except Exception:
+                pass
+
+        return state
 
     def initialize_default_config(self) -> RobotConfig:
         """Initialize default configuration for the planner"""

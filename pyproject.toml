@@ -14,7 +14,7 @@ dependencies = [
     "matplotlib>=3.7.0",
     "mypy>=1.5.0",
     "numpy>=1.24.0",
-    "nvidia-curobo",
+    "nvidia-curobo @ git+https://github.com/Rock-Z/curobo.git",
     "open3d>=0.18.0",
     "openai>=1.0.0",
     "opencv-python>=4.8.0",
@@ -36,7 +36,6 @@ dependencies = [
 torch = [
   { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-nvidia-curobo = { git = "https://github.com/Rock-Z/curobo.git" }
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"

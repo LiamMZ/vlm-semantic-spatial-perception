@@ -414,15 +414,30 @@ class OrchestratorDemoApp(App):
                 on_save_state=self._on_save_state
             )
             
-            # Initialize orchestrator
-            self.orchestrator = TaskOrchestrator(config)
-            await self.orchestrator.initialize()
-            
-            self._write_log(f"✓ Output directory: {output_dir}")
-            
-            # Set up log file in the same directory as PDDL outputs
+            # Set up log file early so we can capture initialization messages
             self._setup_log_file(str(output_dir))
             
+            # Initialize orchestrator (capture stdout to log)
+            self._write_log("⚙ Initializing components...")
+            self.orchestrator = TaskOrchestrator(config)
+            
+            # Capture initialization messages by redirecting print statements
+            import io
+            import sys
+            old_stdout = sys.stdout
+            sys.stdout = captured_output = io.StringIO()
+            
+            try:
+                await self.orchestrator.initialize()
+            finally:
+                sys.stdout = old_stdout
+                init_output = captured_output.getvalue()
+                # Write captured output to log
+                for line in init_output.split('\n'):
+                    if line.strip():
+                        self._write_log(f"  {line}")
+            
+            self._write_log(f"✓ Output directory: {output_dir}")
             self._write_log("")
             self._write_log("✓ System initialized")
             
