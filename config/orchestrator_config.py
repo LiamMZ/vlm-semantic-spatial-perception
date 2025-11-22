@@ -40,7 +40,8 @@ class OrchestratorConfig:
     # Persistence Configuration
     state_dir: Path = field(default_factory=lambda: Path("outputs/orchestrator_state"))
     auto_save: bool = True  # Auto-save state on updates
-    auto_save_interval: float = 30.0  # Seconds between auto-saves
+    auto_save_on_detection: bool = True  # Save after each detection update
+    auto_save_on_state_change: bool = True  # Save on state changes
 
     # Task Configuration
     exploration_timeout: float = 60.0  # Max time for exploration before forcing decision
@@ -49,3 +50,4 @@ class OrchestratorConfig:
     on_state_change: Optional[Callable[["OrchestratorState", "OrchestratorState"], None]] = None
     on_detection_update: Optional[Callable[[int], None]] = None
     on_task_state_change: Optional[Callable[["TaskStateDecision"], None]] = None
+    on_save_state: Optional[Callable[[Path], None]] = None  # Called after successful save
