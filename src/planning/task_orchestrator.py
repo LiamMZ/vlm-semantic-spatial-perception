@@ -28,7 +28,7 @@ from .pddl_domain_maintainer import PDDLDomainMaintainer
 from .task_state_monitor import TaskStateMonitor, TaskState, TaskStateDecision
 from .llm_task_analyzer import TaskAnalysis
 from ..perception import ContinuousObjectTracker
-from ..perception.object_registry import DetectedObjectRegistry, DetectedObject
+from ..perception.object_registry import DetectedObject
 from ..camera import RealSenseCamera
 
 # Import config from config directory
@@ -115,7 +115,6 @@ class TaskOrchestrator:
         self.maintainer: Optional[PDDLDomainMaintainer] = None
         self.monitor: Optional[TaskStateMonitor] = None
         self.tracker: Optional[ContinuousObjectTracker] = None
-        self.registry: DetectedObjectRegistry = DetectedObjectRegistry()
 
         # Task state
         self.current_task: Optional[str] = None
@@ -126,10 +125,13 @@ class TaskOrchestrator:
         self.detection_count: int = 0
         self.last_detection_time: float = 0.0
         self._detection_running: bool = False
+        
+        # Track known objects for detecting new ones
+        self._known_object_ids: set = set()
 
-        # Auto-save management
-        self._auto_save_task: Optional[asyncio.Task] = None
+        # Auto-save management (event-driven)
         self._last_save_time: float = 0.0
+        self._save_lock: asyncio.Lock = asyncio.Lock()
 
         # Ensure state directory exists
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
@@ -202,10 +204,14 @@ class TaskOrchestrator:
         self.tracker.set_frame_provider(self._get_camera_frames)
         print("  • Continuous object tracker initialized")
 
-        # Start auto-save if enabled
+        # Configure auto-save (event-driven)
         if self.config.auto_save:
-            self._auto_save_task = asyncio.create_task(self._auto_save_loop())
-            print(f"  • Auto-save enabled (interval: {self.config.auto_save_interval}s)")
+            save_triggers = []
+            if self.config.auto_save_on_detection:
+                save_triggers.append("detection updates")
+            if self.config.auto_save_on_state_change:
+                save_triggers.append("state changes")
+            print(f"  • Auto-save enabled on: {', '.join(save_triggers)}")
 
         self._set_state(OrchestratorState.IDLE)
         print("✓ Task Orchestrator initialized and ready\n")
@@ -220,16 +226,8 @@ class TaskOrchestrator:
         if self._detection_running:
             await self.stop_detection()
 
-        # Stop auto-save
-        if self._auto_save_task:
-            self._auto_save_task.cancel()
-            try:
-                await self._auto_save_task
-            except asyncio.CancelledError:
-                pass
-
         # Final save
-        if self.config.auto_save:
+        if self.config.auto_save and self.current_task:
             await self.save_state()
 
         # Stop camera if we created it
@@ -316,8 +314,8 @@ class TaskOrchestrator:
         if was_detecting:
             await self.stop_detection()
 
-        # Get current observations
-        all_objects = self.tracker.get_all_objects() if self.tracker else []
+        # Get current observations from tracker's registry
+        all_objects = self.get_detected_objects()
 
         # Process new task
         result = await self.process_task_request(new_task_description)
@@ -421,12 +419,8 @@ class TaskOrchestrator:
         self.detection_count += 1
         self.last_detection_time = time.time()
 
-        # Get all detected objects
+        # Get all detected objects from tracker's registry
         all_objects = self.tracker.get_all_objects()
-
-        # Update registry
-        for obj in all_objects:
-            self.registry.add_object(obj)
 
         # Convert to dict format for PDDL maintainer
         objects_dict = self._convert_objects_to_dict(all_objects)
@@ -453,6 +447,10 @@ class TaskOrchestrator:
         # Notify detection update callback
         if self.config.on_detection_update:
             self.config.on_detection_update(object_count)
+        
+        # Auto-save on detection update if enabled
+        if self.config.auto_save and self.config.auto_save_on_detection:
+            await self._try_auto_save()
 
     def _convert_objects_to_dict(self, objects: List[DetectedObject]) -> List[Dict]:
         """Convert DetectedObject list to dict format for PDDL maintainer."""
@@ -506,11 +504,18 @@ class TaskOrchestrator:
                 "avg_detection_time": tracker_stats.avg_detection_time,
             }
 
-        # Add registry stats
-        status["registry"] = {
-            "num_objects": len(self.registry),
-            "object_types": list(set(obj.object_type for obj in self.registry.get_all_objects())),
-        }
+        # Add registry stats (from tracker's registry)
+        if self.tracker and self.tracker.tracker:
+            registry = self.tracker.tracker.registry
+            status["registry"] = {
+                "num_objects": len(registry),
+                "object_types": list(set(obj.object_type for obj in registry.get_all_objects())),
+            }
+        else:
+            status["registry"] = {
+                "num_objects": 0,
+                "object_types": [],
+            }
 
         # Add PDDL domain stats
         if self.maintainer:
@@ -541,16 +546,36 @@ class TaskOrchestrator:
         return None
 
     def get_detected_objects(self) -> List[DetectedObject]:
-        """Get all detected objects from registry."""
-        return self.registry.get_all_objects()
+        """Get all detected objects from tracker's registry."""
+        if self.tracker and self.tracker.tracker:
+            return self.tracker.tracker.registry.get_all_objects()
+        return []
 
     def get_objects_by_type(self, object_type: str) -> List[DetectedObject]:
         """Get objects of a specific type."""
-        return self.registry.get_objects_by_type(object_type)
+        if self.tracker and self.tracker.tracker:
+            return self.tracker.tracker.registry.get_objects_by_type(object_type)
+        return []
 
     def get_objects_with_affordance(self, affordance: str) -> List[DetectedObject]:
         """Get objects with a specific affordance."""
-        return self.registry.get_objects_with_affordance(affordance)
+        if self.tracker and self.tracker.tracker:
+            return self.tracker.tracker.registry.get_objects_with_affordance(affordance)
+        return []
+    
+    def get_new_objects(self) -> List[DetectedObject]:
+        """
+        Get newly detected objects since last check.
+        
+        Returns:
+            List of objects that are new since the last call to this method
+        """
+        all_objects = self.get_detected_objects()
+        current_ids = {obj.object_id for obj in all_objects}
+        new_ids = current_ids - self._known_object_ids
+        self._known_object_ids = current_ids
+        
+        return [obj for obj in all_objects if obj.object_id in new_ids]
 
     # ========================================================================
     # PDDL Generation
@@ -640,9 +665,10 @@ class TaskOrchestrator:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Save object registry
+        # Save object registry from tracker
         registry_path = path.parent / "registry.json"
-        self.registry.save_to_json(str(registry_path), include_timestamp=False)
+        if self.tracker and self.tracker.tracker:
+            self.tracker.tracker.registry.save_to_json(str(registry_path), include_timestamp=False)
 
         # Save PDDL files
         pddl_dir = path.parent / "pddl"
@@ -697,11 +723,11 @@ class TaskOrchestrator:
         with open(path, 'r') as f:
             state_data = json.load(f)
 
-        # Load object registry
+        # Load object registry into tracker's registry
         registry_path = state_data["files"]["registry"]
-        if Path(registry_path).exists():
-            self.registry.load_from_json(registry_path)
-            print(f"  • Loaded {len(self.registry)} objects")
+        if Path(registry_path).exists() and self.tracker and self.tracker.tracker:
+            self.tracker.tracker.registry.load_from_json(registry_path)
+            print(f"  • Loaded {len(self.tracker.tracker.registry)} objects")
 
         # Load task information
         self.current_task = state_data.get("current_task")
@@ -714,8 +740,8 @@ class TaskOrchestrator:
             print(f"  • Re-analyzing task: '{self.current_task}'")
             await self.process_task_request(self.current_task)
 
-            # Re-process existing observations
-            all_objects = self.registry.get_all_objects()
+            # Re-process existing observations from tracker's registry
+            all_objects = self.get_detected_objects()
             if all_objects:
                 print(f"  • Re-processing {len(all_objects)} objects...")
                 objects_dict = self._convert_objects_to_dict(all_objects)
@@ -723,20 +749,29 @@ class TaskOrchestrator:
 
         print(f"✓ State loaded successfully")
 
-    async def _auto_save_loop(self):
-        """Background task for auto-saving state."""
-        while True:
+    async def _try_auto_save(self) -> None:
+        """
+        Attempt to auto-save state (non-blocking, with lock).
+        
+        Only saves if we have meaningful state (task and detections).
+        Silently handles errors to avoid disrupting the main flow.
+        """
+        # Quick check without lock
+        if not self.current_task or self.detection_count == 0:
+            return
+        
+        # Try to acquire lock without blocking
+        if self._save_lock.locked():
+            return  # Save already in progress, skip
+        
+        async with self._save_lock:
             try:
-                await asyncio.sleep(self.config.auto_save_interval)
-
-                # Only save if we have meaningful state
-                if self.current_task and self.detection_count > 0:
-                    await self.save_state()
-
-            except asyncio.CancelledError:
-                break
+                path = await self.save_state()
+                if self.config.on_save_state:
+                    self.config.on_save_state(path)
             except Exception as e:
-                print(f"⚠ Auto-save error: {e}")
+                # Silent failure - don't disrupt the main flow
+                pass
 
     # ========================================================================
     # Internal Helpers
@@ -747,16 +782,22 @@ class TaskOrchestrator:
         old_state = self._state
         self._state = new_state
 
-        if old_state != new_state and self.config.on_state_change:
-            self.config.on_state_change(old_state, new_state)
+        if old_state != new_state:
+            if self.config.on_state_change:
+                self.config.on_state_change(old_state, new_state)
+            
+            # Auto-save on state change if enabled
+            if self.config.auto_save and self.config.auto_save_on_state_change:
+                asyncio.create_task(self._try_auto_save())
 
     def __repr__(self) -> str:
         """String representation."""
+        num_objects = len(self.tracker.tracker.registry) if self.tracker and self.tracker.tracker else 0
         return (
             f"TaskOrchestrator("
             f"state={self._state.value}, "
             f"task='{self.current_task or 'None'}', "
-            f"objects={len(self.registry)}, "
+            f"objects={num_objects}, "
             f"detections={self.detection_count}"
             f")"
         )
