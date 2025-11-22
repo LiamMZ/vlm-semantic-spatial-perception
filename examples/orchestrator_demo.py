@@ -45,8 +45,6 @@ load_dotenv()
 
 class OrchestratorDemoApp(App):
     """Interactive Textual TUI for the Task Orchestrator."""
-    
-    dark = False  # Use light mode by default
 
     CSS = """
     Screen {
@@ -92,6 +90,7 @@ class OrchestratorDemoApp(App):
     BINDINGS = [
         ("ctrl+c", "shutdown", "Quit"),
         ("ctrl+q", "shutdown", "Quit"),
+        ("ctrl+d", "toggle_dark", "Toggle Dark Mode"),
     ]
 
     def __init__(self):
