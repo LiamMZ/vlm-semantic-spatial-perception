@@ -917,6 +917,26 @@ class TaskOrchestrator:
         
         return [obj for obj in all_objects if obj.object_id in new_ids]
 
+    def get_world_state_snapshot(self) -> Dict[str, Any]:
+        """
+        Build a world-state payload for downstream planners.
+
+        Returns:
+            Dict containing registry, last snapshot id, snapshot index, and robot state.
+        """
+        snapshot_index: Optional[Dict[str, Any]] = None
+        try:
+            snapshot_index = self._read_pool_index()
+        except Exception:
+            snapshot_index = None
+
+        return {
+            "registry": self._build_enhanced_registry(),
+            "last_snapshot_id": self.last_snapshot_id,
+            "snapshot_index": snapshot_index,
+            "robot_state": self._get_robot_state_struct(),
+        }
+
     # ========================================================================
     # PDDL Generation
     # ========================================================================
