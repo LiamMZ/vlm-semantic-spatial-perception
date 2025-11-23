@@ -460,6 +460,11 @@ Provide:
    - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
 3. Properties: Color, size, material, state{pddl_section}
 
+IMPORTANT:
+- "object_type" should be the category ONLY (e.g., "electrical_plug", "water_bottle", "stove_knob")
+- Do NOT include state information in object_type (e.g., NOT "plug (unplugged)" or "bottle with label")
+- State information belongs in "properties" and "pddl_state" fields
+
 Return JSON:
 {{
   "object_type": "cup",
@@ -501,6 +506,11 @@ Provide detailed information:
    - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
 3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
 4. Properties: Color, size, material, state, etc.{pddl_section}
+
+IMPORTANT:
+- "object_type" should be the category ONLY (e.g., "electrical_plug", "water_bottle", "stove_knob")
+- Do NOT include state information in object_type (e.g., NOT "plug (unplugged)" or "bottle with label")
+- State information belongs in "properties" and "pddl_state" fields
 
 Return in JSON format:
 {{

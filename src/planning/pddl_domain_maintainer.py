@@ -6,6 +6,7 @@ Maintains a consistent domain representation that evolves as more information is
 """
 
 import asyncio
+import re
 from typing import Dict, List, Optional, Set, Union
 from pathlib import Path
 
@@ -14,6 +15,117 @@ from PIL import Image
 
 from .llm_task_analyzer import LLMTaskAnalyzer, TaskAnalysis
 from .pddl_representation import PDDLRepresentation
+
+
+def sanitize_pddl_name(name: str, max_length: int = 50) -> str:
+    """
+    Sanitize a name for use in PDDL.
+
+    PDDL identifiers must:
+    - Start with a letter
+    - Contain only letters, digits, underscores, and hyphens
+    - Not contain spaces, parentheses, quotes, or other special characters
+    - Be reasonably short for readability
+
+    Args:
+        name: Raw name (e.g., "Black electrical plug (unplugged)")
+        max_length: Maximum length for sanitized name
+
+    Returns:
+        Valid PDDL identifier (e.g., "black_electrical_plug")
+
+    Examples:
+        >>> sanitize_pddl_name("Black electrical plug (unplugged)")
+        'black_electrical_plug'
+        >>> sanitize_pddl_name("Blue plastic water bottle with 'CHILL' label")
+        'blue_plastic_water_bottle'
+        >>> sanitize_pddl_name("Right black stove knob")
+        'right_black_stove_knob'
+    """
+    # Convert to lowercase
+    name = name.lower()
+
+    # Remove content in parentheses (usually state information)
+    name = re.sub(r'\([^)]*\)', '', name)
+
+    # Remove quotes and their content
+    name = re.sub(r"['\"].*?['\"]", '', name)
+
+    # Remove common filler words that don't add semantic meaning
+    filler_words = ['with', 'the', 'a', 'an', 'of']
+    for word in filler_words:
+        name = re.sub(rf'\b{word}\b', '', name)
+
+    # Replace spaces and special chars with underscores
+    name = re.sub(r'[^\w\s-]', '', name)  # Remove special chars
+    name = re.sub(r'\s+', '_', name)  # Replace spaces with underscores
+    name = re.sub(r'_+', '_', name)  # Collapse multiple underscores
+    name = name.strip('_')  # Remove leading/trailing underscores
+
+    # Ensure it starts with a letter
+    if name and not name[0].isalpha():
+        name = 'obj_' + name
+
+    # Truncate if too long, but try to keep meaningful parts
+    if len(name) > max_length:
+        # Try to truncate at underscore boundary
+        parts = name[:max_length].split('_')
+        if len(parts) > 1:
+            name = '_'.join(parts[:-1])  # Drop last partial word
+        else:
+            name = name[:max_length]
+
+    # Fallback for empty names
+    if not name:
+        name = 'object'
+
+    return name
+
+
+def sanitize_pddl_formula(formula: str) -> str:
+    """
+    Sanitize a PDDL formula by removing quoted strings.
+
+    LLMs sometimes generate invalid PDDL with quoted strings like:
+      (is-empty ?machine "water_reservoir")
+
+    This should be:
+      (water-reservoir-empty ?machine)
+
+    This function removes quoted strings as a safety measure,
+    though the prompt should prevent them.
+
+    Args:
+        formula: PDDL formula (precondition or effect)
+
+    Returns:
+        Sanitized formula without quoted strings
+
+    Examples:
+        >>> sanitize_pddl_formula('(is-empty ?machine "water_reservoir")')
+        '(is-empty ?machine)'
+        >>> sanitize_pddl_formula('(and (graspable ?obj) (empty-hand))')
+        '(and (graspable ?obj) (empty-hand))'
+    """
+    if not formula:
+        return formula
+
+    # Remove double-quoted strings
+    formula = re.sub(r'"[^"]*"', '', formula)
+
+    # Remove single-quoted strings
+    formula = re.sub(r"'[^']*'", '', formula)
+
+    # Clean up extra whitespace that may result from removal
+    formula = re.sub(r'\s+', ' ', formula)
+
+    # Clean up spaces before closing parens
+    formula = re.sub(r'\s+\)', ')', formula)
+
+    # Clean up spaces after opening parens
+    formula = re.sub(r'\(\s+', '(', formula)
+
+    return formula.strip()
 
 
 class PDDLDomainMaintainer:
@@ -71,6 +183,9 @@ class PDDLDomainMaintainer:
         # Domain evolution tracking
         self.domain_version: int = 0
         self.last_update_observations: int = 0
+
+        # Object type mapping: raw_name -> sanitized_name
+        self._type_name_mapping: Dict[str, str] = {}
 
     async def initialize_from_task(
         self,
@@ -142,17 +257,30 @@ class PDDLDomainMaintainer:
                                 name, type_ = p.split(" - ")
                                 params.append((name.strip("?"), type_.strip()))
 
+                # Sanitize preconditions and effects to remove quoted strings
+                # LLMs sometimes add invalid quoted strings like: (is-empty ?obj "reservoir")
+                precondition = sanitize_pddl_formula(action_def.get("precondition", ""))
+                effect = sanitize_pddl_formula(action_def.get("effect", ""))
+
                 # Add action to domain
                 # Note: Using sync method here as PDDLRepresentation doesn't have async action methods yet
                 self.pddl.add_llm_generated_action(
                     name=action_def.get("name", "unknown"),
                     parameters=params,
-                    precondition=action_def.get("precondition", ""),
-                    effect=action_def.get("effect", ""),
+                    precondition=precondition,
+                    effect=effect,
                     description=action_def.get("description", "")
                 )
             except Exception as e:
                 print(f"⚠ Failed to add action {action_def.get('name')}: {e}")
+
+        # Validate that all predicates used in actions are defined
+        # Auto-add any missing predicates to ensure domain consistency
+        validation_result = await self.validate_and_fix_action_predicates()
+        if validation_result["missing_predicates"]:
+            print(f"✓ Auto-added {len(validation_result['missing_predicates'])} missing predicates")
+        if validation_result["invalid_actions"]:
+            print(f"⚠ Found {len(validation_result['invalid_actions'])} actions with parsing issues")
 
     async def update_from_observations(
         self,
@@ -181,8 +309,16 @@ class PDDLDomainMaintainer:
 
         # Process each detected object
         for obj in detected_objects:
-            obj_type = obj.get("object_type", "unknown")
+            raw_obj_type = obj.get("object_type", "unknown")
             obj_id = obj.get("object_id", "unknown")
+
+            # Sanitize object type name for PDDL
+            # Map raw descriptive name to valid PDDL identifier
+            if raw_obj_type not in self._type_name_mapping:
+                sanitized_type = sanitize_pddl_name(raw_obj_type)
+                self._type_name_mapping[raw_obj_type] = sanitized_type
+
+            obj_type = self._type_name_mapping[raw_obj_type]
 
             # Track new object types
             if obj_type not in self.observed_object_types:
@@ -292,6 +428,114 @@ class PDDLDomainMaintainer:
             return False
 
         return True
+
+    async def validate_and_fix_action_predicates(self) -> Dict[str, List[str]]:
+        """
+        Validate that all predicates used in actions are defined in the domain.
+
+        Automatically adds missing predicates to the domain.
+
+        Returns:
+            Dict with 'missing_predicates' (list of predicates that were added)
+                  and 'invalid_actions' (list of actions that couldn't be parsed)
+
+        Example:
+            >>> stats = await maintainer.validate_and_fix_action_predicates()
+            >>> print(f"Added {len(stats['missing_predicates'])} missing predicates")
+            >>> print(f"Predicates added: {stats['missing_predicates']}")
+        """
+        missing_predicates = []
+        invalid_actions = []
+
+        # Get all actions from the domain
+        all_actions = await self.pddl.get_all_actions()
+
+        for action_name, action in all_actions.items():
+            try:
+                # Extract predicates from preconditions
+                precond_predicates = self._extract_predicates_from_formula(action.precondition)
+
+                # Extract predicates from effects
+                effect_predicates = self._extract_predicates_from_formula(action.effect)
+
+                # Combine all predicates used in this action
+                all_action_predicates = precond_predicates | effect_predicates
+
+                # Check if each predicate is defined in the domain
+                for pred_name in all_action_predicates:
+                    if pred_name not in self.pddl.predicates:
+                        if pred_name not in missing_predicates:
+                            missing_predicates.append(pred_name)
+
+                            # Add the missing predicate to the domain
+                            # Use a generic signature (single object parameter)
+                            await self.pddl.add_predicate_async(
+                                pred_name,
+                                [("obj", "object")]
+                            )
+                            print(f"  ℹ Added missing predicate: {pred_name}")
+
+            except Exception as e:
+                print(f"  ⚠ Failed to parse action '{action_name}': {e}")
+                invalid_actions.append(action_name)
+
+        if missing_predicates:
+            print(f"✓ Validated and added {len(missing_predicates)} missing predicates")
+        else:
+            print("✓ All action predicates are properly defined")
+
+        return {
+            "missing_predicates": missing_predicates,
+            "invalid_actions": invalid_actions
+        }
+
+    def _extract_predicates_from_formula(self, formula: str) -> Set[str]:
+        """
+        Extract predicate names from a PDDL formula.
+
+        Parses formulas like:
+          "(and (graspable ?obj) (empty-hand))"
+        And extracts: {"graspable", "empty-hand"}
+
+        Args:
+            formula: PDDL formula string (precondition or effect)
+
+        Returns:
+            Set of predicate names used in the formula
+        """
+        if not formula:
+            return set()
+
+        predicates = set()
+
+        # Pattern to match predicate names in PDDL formulas
+        # Matches: (predicate-name ...) but excludes logical operators
+        import re
+
+        # Remove 'not' wrapper to get the actual predicate
+        # e.g., (not (holding ?obj)) -> (holding ?obj)
+        formula_clean = re.sub(r'\(not\s+', '(', formula)
+
+        # Find all predicate-like patterns: (word ...)
+        # Exclude logical operators: and, or, not
+        pattern = r'\(([a-zA-Z][a-zA-Z0-9_-]*)\s'
+        matches = re.findall(pattern, formula_clean)
+
+        logical_operators = {'and', 'or', 'not', 'forall', 'exists', 'when'}
+
+        for match in matches:
+            if match not in logical_operators:
+                predicates.add(match)
+
+        # Also handle predicates without parameters like (empty-hand)
+        pattern_no_params = r'\(([a-zA-Z][a-zA-Z0-9_-]*)\)'
+        matches_no_params = re.findall(pattern_no_params, formula_clean)
+
+        for match in matches_no_params:
+            if match not in logical_operators:
+                predicates.add(match)
+
+        return predicates
 
     def _match_goal_objects(self, observed_types: Set[str]) -> Set[str]:
         """

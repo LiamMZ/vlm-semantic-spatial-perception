@@ -174,6 +174,14 @@ Return JSON with:
   "estimated_steps": 3
 }}
 
+IMPORTANT PDDL RULES:
+1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
+2. Preconditions and effects use ONLY variables - NO quoted strings or constants
+3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine)
+4. All predicates should be predicates applied to variables, not string constants
+
 Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
 
     def _build_analysis_prompt(
@@ -226,11 +234,23 @@ Provide a JSON response with:
   "estimated_steps": 3
 }}
 
+CRITICAL PDDL FORMATTING RULES:
+1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
+2. Preconditions and effects can ONLY use:
+   - Variables (e.g., ?obj, ?container)
+   - Predicate names (e.g., graspable, empty-hand, has-water)
+3. NEVER use quoted strings or constants in preconditions/effects
+4. If referencing a component, make it a predicate:
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
+5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
+
 Focus on:
 1. Use observed objects and their actual IDs
 2. Generate predicates matching observed affordances
 3. Create action sequence using observed objects
-4. Include all task-relevant predicates"""
+4. Include all task-relevant predicates
+5. Ensure all PDDL actions follow proper syntax (no quoted strings!)"""
 
     def _parse_response(self, response_text: str) -> TaskAnalysis:
         """Parse LLM JSON response into TaskAnalysis."""

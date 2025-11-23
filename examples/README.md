@@ -349,6 +349,56 @@ outputs/pddl/
 
 Use these PDDL files with planners like Fast Downward, ENHSP, or other PDDL-compatible planners.
 
+**NEW**: See [pddl_solver_demo.py](pddl_solver_demo.py) for integrated solver usage with automatic backend detection.
+
+---
+
+### [test_predicate_validation.py](test_predicate_validation.py) - Predicate Validation Test
+
+**Demonstrates automatic predicate validation and addition.**
+
+```bash
+python examples/test_predicate_validation.py
+```
+
+**What it does:**
+1. Creates a PDDL domain with explicit predicates
+2. Adds actions that reference undefined predicates
+3. Runs automatic validation to detect missing predicates
+4. Auto-adds missing predicates to ensure domain consistency
+5. Generates valid PDDL domain file
+
+**Key features:**
+- ✅ **Automatic detection** - Finds predicates used in actions but not defined
+- ✅ **Auto-fix** - Adds missing predicates with generic signatures
+- ✅ **Validation** - Ensures all actions are parseable and valid
+- ✅ **Zero manual work** - No need to manually track predicate definitions
+
+**Example scenario:**
+```python
+# Define only 2 predicates explicitly
+pddl.add_predicate("graspable", [("obj", "object")])
+pddl.add_predicate("empty-hand", [])
+
+# Add actions that use MORE predicates
+pddl.add_action("pick_up",
+    precondition="(and (graspable ?obj) (empty-hand))",
+    effect="(holding ?obj)"  # 'holding' not defined!
+)
+
+# Validation automatically detects and adds 'holding'
+await maintainer.validate_and_fix_action_predicates()
+# Output: ✓ Auto-added 1 missing predicate: holding
+```
+
+**Use this for:**
+- Testing predicate validation logic
+- Understanding automatic domain repair
+- Debugging PDDL generation issues
+- Learning domain consistency checks
+
+---
+
 ## Next Steps
 
 After running the demos:
