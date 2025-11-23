@@ -22,6 +22,9 @@ home_joints = [5.3, -80.5, -5.6, 75.3, -22.3, 106.5, -6.5]
 
 print(f"Set to go location (joints): {home_joints}")
 
+# xArm gripper reporting is inverted (0 ≈ fully closed, 850 ≈ fully open)
+GRIPPER_OPEN_POS = 850
+
 # Move slowwwwwly
 arm.set_servo_angle(
     angle=home_joints,
@@ -30,6 +33,35 @@ arm.set_servo_angle(
     is_radian=False,
     wait=True
 )
+
+# Fully open the gripper
+try:
+    print("Opening gripper fully...")
+    gripper_open = False
+    if hasattr(arm, "set_gripper_mode"):
+        code = arm.set_gripper_mode(0)
+        if code != 0:
+            print(f"Warning: set_gripper_mode returned {code}")
+    if hasattr(arm, "set_gripper_enable"):
+        code = arm.set_gripper_enable(True)
+        if code != 0:
+            print(f"Warning: set_gripper_enable returned {code}")
+    if hasattr(arm, "clean_gripper_error"):
+        arm.clean_gripper_error()
+    if hasattr(arm, "set_gripper_speed"):
+        arm.set_gripper_speed(2000)
+    if hasattr(arm, "set_gripper_position"):
+        code = arm.set_gripper_position(GRIPPER_OPEN_POS, wait=True, auto_enable=True)
+        gripper_open = code == 0
+    if not gripper_open and hasattr(arm, "open_lite6_gripper"):
+        code = arm.open_lite6_gripper()
+        gripper_open = code == 0
+    if gripper_open:
+        print("Gripper opened fully.")
+    else:
+        print("Unable to verify gripper open state; check manually.")
+except Exception as err:
+    print(f"Unable to open gripper: {err}")
 
 # Optionally wait until motion finishes
 arm.set_state(0)  # ensure back to ready at end
