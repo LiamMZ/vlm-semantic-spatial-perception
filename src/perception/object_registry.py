@@ -304,7 +304,7 @@ class DetectedObjectRegistry:
 
         with open(input_path, 'r') as f:
             data = json.load(f)
-
+        
         loaded_objects = []
         with self._lock:
             for obj_dict in data.get("objects", []):
@@ -323,10 +323,15 @@ class DetectedObjectRegistry:
                         alternative_points=point_data.get("alternative_points", [])
                     )
 
+                # Use latest_position_* fields
+                position_2d = obj_dict.get("latest_position_2d")
+                position_3d_raw = obj_dict.get("latest_position_3d")
+                bounding_box_2d = obj_dict.get("latest_bounding_box_2d")
+                
                 # Reconstruct position_3d
-                pos_3d = obj_dict.get("position_3d")
-                if pos_3d is not None:
-                    pos_3d = np.array(pos_3d, dtype=np.float32)
+                pos_3d = None
+                if position_3d_raw is not None:
+                    pos_3d = np.array(position_3d_raw, dtype=np.float32)
 
                 # Create DetectedObject
                 obj = DetectedObject(
@@ -334,9 +339,9 @@ class DetectedObjectRegistry:
                     object_id=obj_dict["object_id"],
                     affordances=set(obj_dict.get("affordances", [])),
                     interaction_points=interaction_points,
-                    position_2d=obj_dict.get("position_2d"),
+                    position_2d=position_2d,
                     position_3d=pos_3d,
-                    bounding_box_2d=obj_dict.get("bounding_box_2d"),
+                    bounding_box_2d=bounding_box_2d,
                     properties=obj_dict.get("properties", {}),
                     confidence=obj_dict.get("confidence", 1.0),
                     timestamp=obj_dict.get("timestamp", time.time())

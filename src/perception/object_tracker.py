@@ -10,6 +10,7 @@ import asyncio
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 import io
+import yaml
 
 import numpy as np
 from PIL import Image
@@ -50,6 +51,9 @@ class ObjectTracker:
     # Model configurations
     ROBOTICS_MODEL = "gemini-robotics-er-1.5-preview"
     FLASH_MODEL = "gemini-1.5-flash"
+    
+    # Default prompts configuration path
+    DEFAULT_PROMPTS_CONFIG = str(Path(__file__).parent.parent.parent / "config" / "prompts_config.yaml")
 
     def __init__(
         self,
@@ -61,7 +65,8 @@ class ObjectTracker:
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
         fast_mode: bool = False,
-        pddl_predicates: Optional[List[str]] = None
+        pddl_predicates: Optional[List[str]] = None,
+        prompts_config_path: Optional[str] = None
     ):
         """
         Initialize object tracker.
@@ -76,6 +81,7 @@ class ObjectTracker:
             enable_affordance_caching: Cache affordance results for similar objects
             fast_mode: Skip detailed interaction points, only detect affordances
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
+            prompts_config_path: Path to prompts config YAML file (defaults to config/prompts_config.yaml)
         """
         self.api_key = api_key
         self.max_parallel_requests = max_parallel_requests
@@ -85,6 +91,15 @@ class ObjectTracker:
 
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
+        
+        # Load prompts configuration
+        if prompts_config_path is None:
+            prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
+        
+        with open(prompts_config_path, 'r') as f:
+            self.prompts = yaml.safe_load(f)
+        
+        print(f"✓ Loaded prompts from {prompts_config_path}")
 
         # Auto-select best model
         if model_name == "auto":
@@ -284,23 +299,7 @@ class ObjectTracker:
             temperature: Generation temperature
             callback: Async function called with (object_name, bounding_box)
         """
-        prompt = """You are a robotic vision system. Identify all distinct objects in this image.
-
-For each object, provide a descriptive name and bounding box.
-
-Return object info ONE PER LINE in this format:
-OBJECT: red cup | [400, 280, 500, 360]
-OBJECT: blue bottle | [200, 450, 550, 620]
-OBJECT: white bowl | [150, 100, 300, 250]
-END
-
-Important:
-- Include color or distinguishing features in names
-- Be specific (e.g., "red cup" not just "cup")
-- Bounding box format: [y1, x1, y2, x2] in 0-1000 normalized coordinates
-- Each object on a new line: "OBJECT: name | [y1, x1, y2, x2]"
-- End with "END" on its own line
-- Focus on manipulatable objects and surfaces"""
+        prompt = self.prompts['detection']['streaming']
 
         try:
             # Use async streaming API
@@ -335,24 +334,7 @@ Important:
         except Exception as e:
             print(f"   ⚠ Streaming object detection failed, falling back to batch: {e}")
             # Fallback: use non-streaming batch detection
-            prompt = """You are a robotic vision system. Identify all distinct objects in this image.
-
-For each object, provide a descriptive name and bounding box.
-
-Return ONLY a JSON array with object info:
-{
-  "objects": [
-    {"name": "red cup", "bbox": [400, 280, 500, 360]},
-    {"name": "blue bottle", "bbox": [200, 450, 550, 620]},
-    {"name": "white bowl", "bbox": [150, 100, 300, 250]}
-  ]
-}
-
-Important:
-- Include color or distinguishing features in names
-- Be specific (e.g., "red cup" not just "cup")
-- Bounding box format: [y1, x1, y2, x2] in 0-1000 normalized coordinates
-- Focus on manipulatable objects and surfaces"""
+            prompt = self.prompts['detection']['batch']
 
             try:
                 response_text = await self._generate_content(image, prompt, temperature)
@@ -439,97 +421,33 @@ Important:
         pddl_example = ""
         if self.pddl_predicates:
             pddl_list = ", ".join(self.pddl_predicates)
-            pddl_section = f"""
-4. PDDL State Predicates: For each of these predicates, determine if it applies to this object:
-   - Predicates to check: {pddl_list}
-   - Return true/false for each predicate based on visual observation
-   - Examples:
-     * "clean" - object appears clean vs dirty
-     * "opened" - container/door is open vs closed
-     * "filled" - container has contents vs empty
-     * "wet" - object appears wet vs dry"""
-            pddl_example = ',\n  "pddl_state": {"clean": true, "opened": false, "filled": false}'
+            pddl_section = self.prompts['pddl']['section_template'].format(pddl_list=pddl_list)
+            pddl_example = self.prompts['pddl']['example_template']
 
         if self.fast_mode:
             # Fast mode: only detect affordances and properties, no interaction points
-            prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
-
-Provide:
-1. Object position: Center point [y, x] in 0-1000 normalized coordinates
-2. Affordances: What robot actions are possible?
-   - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-3. Properties: Color, size, material, state{pddl_section}
-
-Return JSON:
-{{
-  "object_type": "cup",
-  "position": [450, 320],
-  "affordances": ["graspable", "pourable", "containable"],
-  "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{pddl_example},
-  "confidence": 0.95
-}}
-
-All positions in 0-1000 normalized coords relative to THIS image."""
+            prompt = self.prompts['analysis']['fast_mode'].format(
+                object_name=object_name,
+                crop_note=crop_note,
+                pddl_section=pddl_section,
+                pddl_example=pddl_example
+            )
         elif cached_data:
             # Use cached affordances, only detect interaction points
-            prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
-
-Known affordances: {cached_data['affordances']}
-
-For EACH affordance, identify the optimal interaction point:
-
-Return JSON:
-{{
-  "object_type": "{cached_data['object_type']}",
-  "position": [450, 320],
-  "interaction_points": {{
-    "graspable": {{"position": [450, 340], "confidence": 0.95, "reasoning": "..."}},
-    "pourable": {{"position": [450, 320], "confidence": 0.90, "reasoning": "..."}}
-  }},
-  "confidence": 0.95
-}}
-
-All positions in 0-1000 normalized coords relative to THIS image."""
+            prompt = self.prompts['analysis']['cached_mode'].format(
+                object_name=object_name,
+                crop_note=crop_note,
+                cached_affordances=cached_data['affordances'],
+                object_type=cached_data['object_type']
+            )
         else:
             # Full analysis
-            prompt = f"""You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
-
-Provide detailed information:
-
-1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
-2. Affordances: What robot actions are possible with this object?
-   - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
-4. Properties: Color, size, material, state, etc.{pddl_section}
-
-Return in JSON format:
-{{
-  "object_type": "cup",
-  "position": [450, 320],
-  "affordances": ["graspable", "pourable", "containable"],
-  "interaction_points": {{
-    "graspable": {{
-      "position": [450, 340],
-      "confidence": 0.95,
-      "reasoning": "Handle on the right side provides stable grasp point"
-    }},
-    "pourable": {{
-      "position": [450, 320],
-      "confidence": 0.90,
-      "reasoning": "Top rim center for tilting and pouring"
-    }}
-  }},
-  "properties": {{
-    "color": "red",
-    "material": "ceramic",
-    "size": "medium",
-    "state": "upright"
-  }}{pddl_example},
-  "confidence": 0.95
-}}
-
-Note: All positions are in 0-1000 normalized coordinates relative to THIS image.
-Analyze the {object_name} based on its visual appearance."""
+            prompt = self.prompts['analysis']['full'].format(
+                object_name=object_name,
+                crop_note=crop_note,
+                pddl_section=pddl_section,
+                pddl_example=pddl_example
+            )
 
         try:
             response_text = await self._generate_content(analysis_image, prompt, temperature)
@@ -758,29 +676,14 @@ Analyze the {object_name} based on its visual appearance."""
             return None
 
         # Build prompt for specific interaction point
-        prompt = f"""You are a robotic manipulation system. Identify the optimal interaction point for {affordance} action on the {obj.object_id}.
-
-Object type: {obj.object_type}
-Action: {affordance}"""
-
-        if task_context:
-            prompt += f"\nTask context: {task_context}"
-
-        prompt += f"""
-
-Analyze the {obj.object_id} and determine the best point to {affordance} based on:
-- Object shape and features
-- Intended action
-- Task requirements (if provided)
-
-Return in JSON format:
-{{
-  "position": [y, x],
-  "confidence": 0.0-1.0,
-  "reasoning": "Detailed explanation"
-}}
-
-Position is [y, x] in 0-1000 normalized coordinates."""
+        task_context_section = f"\nTask context: {task_context}" if task_context else ""
+        
+        prompt = self.prompts['interaction']['update'].format(
+            affordance=affordance,
+            object_id=obj.object_id,
+            object_type=obj.object_type,
+            task_context_section=task_context_section
+        )
 
         try:
             response_text = await self._generate_content(
