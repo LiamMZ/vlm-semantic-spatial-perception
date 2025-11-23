@@ -1409,11 +1409,10 @@ class CuRoboMotionPlanner:
             if is_place:
                 target_position[2] += 0.1
                 
-            if type(target_orientation) is not tuple and type(target_orientation[0]) is not float:
-                for i in range(len(target_orientation[0])):
-                    print(target_orientation)
-                    if abs(target_orientation[0][i]) < 0.001: 
-                        target_orientation[0][i] = 0.00
+            target_orientation = self._coerce_orientation_vector(target_orientation)
+            target_orientation = [
+                0.0 if abs(val) < 1e-6 else val for val in target_orientation
+            ]
             
             # Plan the motion with converted pose
             success, trajectory, dt = self.move_to_pose(
@@ -2377,6 +2376,32 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Error ensuring robot readiness: {e}")
             return False
+
+    def _coerce_orientation_vector(self, orientation):
+        """
+        Ensure orientation is a flat list[float] of length >= 1.
+        Handles nested lists/tuples/np arrays produced by upstream planners.
+        """
+        if orientation is None:
+            return [0.0, 1.0, 0.0, 0.0]
+
+        if isinstance(orientation, np.ndarray):
+            orientation = orientation.flatten().tolist()
+        elif isinstance(orientation, (list, tuple)):
+            if len(orientation) and isinstance(orientation[0], (list, tuple, np.ndarray)):
+                first = orientation[0]
+                orientation = (
+                    first.flatten().tolist()
+                    if isinstance(first, np.ndarray)
+                    else list(first)
+                )
+            else:
+                orientation = list(orientation)
+        else:
+            orientation = [float(orientation)]
+
+        orientation = [float(val) for val in orientation]
+        return orientation
 
 
     def _plan_arc_motion_around_pivot(
