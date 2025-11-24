@@ -32,6 +32,7 @@ LLM_ARTIFACTS_DIR = Path("tests/artifacts/llm_pick")
 LLM_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 LLM_RESPONSE_PATH = LLM_ARTIFACTS_DIR / "pick_plan_llm_response.json"
 TRANSLATED_PLAN_PATH = LLM_ARTIFACTS_DIR / "pick_plan_llm_translated.json"
+NEW_IP_RESPONSE_PATH = LLM_ARTIFACTS_DIR / "new_interaction_points.json"
 
 
 def _load_world_state() -> Dict[str, Dict]:
@@ -69,9 +70,15 @@ def _cloth_interaction(world_state: dict) -> dict:
 def _recording_llm_call(original_call):
     """Wrap the real LLM call to capture the raw response text to artifacts."""
 
+    call_idx = {"count": 0}
+
     def _wrapper(self, *args, **kwargs):
         response_text = original_call(self, *args, **kwargs)
-        LLM_RESPONSE_PATH.write_text(response_text)
+        call_idx["count"] += 1
+        if call_idx["count"] == 1:
+            LLM_RESPONSE_PATH.write_text(response_text)
+        else:
+            NEW_IP_RESPONSE_PATH.write_text(response_text)
         return response_text
 
     return _wrapper
@@ -81,7 +88,8 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
     """
     Source data: fixture registry/snapshots in tests/assets/continuous_pick_fixture; real Gemini call.
     Methods covered: SkillDecomposer.plan (real _call_llm wrapped for recording) and PrimitiveExecutor.prepare_plan.
-    Artifacts emitted: tests/artifacts/llm_pick/pick_plan_llm_response.json and pick_plan_llm_translated.json.
+    Artifacts emitted: tests/artifacts/llm_pick/pick_plan_llm_response.json (plan),
+    new_interaction_points.json (affordance enrichment), and pick_plan_llm_translated.json.
     Assertions: plan includes cloth references and a graspable-like interaction point, helper params present,
     artifacts exist; also prepares translated plan without errors assertion beyond existence.
     """
@@ -106,11 +114,17 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
     assert LLM_RESPONSE_PATH.exists()
     assert plan.action_name == "pick"
     assert len(plan.primitives) >= 1
-    primitive = plan.primitives[0]
-    assert primitive.references["object_id"] == cloth["object_id"]
-    ip_label = primitive.references.get("interaction_point", "")
+
+    move_primitives = [p for p in plan.primitives if p.name.startswith("move_to_pose")]
+    assert move_primitives, "expected at least one move_to_pose* primitive"
+    cloth_move = next(
+        (p for p in move_primitives if p.references.get("object_id") == cloth["object_id"]),
+        None,
+    )
+    assert cloth_move, "expected a move primitive referencing the target cloth"
+    ip_label = cloth_move.references.get("interaction_point", "")
     assert "graspable" in ip_label
-    assert primitive.parameters.get("target_pixel_yx") or primitive.parameters.get("target_position")
+    assert cloth_move.parameters.get("target_pixel_yx") or cloth_move.parameters.get("target_position")
 
     # Translate helper parameters to executor/xArm-friendly payload and persist.
     executor = PrimitiveExecutor(
