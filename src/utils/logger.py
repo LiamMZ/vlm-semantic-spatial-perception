@@ -68,4 +68,3 @@ def get_logger(name: str = "") -> MinimalLogger:
         MinimalLogger: A minimal logger instance
     """
     return MinimalLogger(name)
-

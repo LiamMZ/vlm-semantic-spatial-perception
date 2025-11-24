@@ -1,0 +1,1387 @@
+{
+  "stamp": 1763852012.0685399,
+  "objects": [
+    {
+      "object_id": "white_electric_stove_control_panel",
+      "object_type": "White electric stove control panel",
+      "affordances": [
+        "cleanable",
+        "turnable",
+        "pushable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": false,
+        "graspable": false,
+        "clear": true,
+        "empty-hand": true,
+        "clean": true,
+        "opened": false,
+        "filled": false,
+        "wet": false
+      },
+      "position_3d": null,
+      "bounding_box_2d": [
+        0,
+        0,
+        100,
+        360
+      ],
+      "interaction_points": {
+        "turnable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            87,
+            150
+          ],
+          "position_3d": [
+            -0.29494622349739075,
+            -0.26536914706230164,
+            0.7830000519752502
+          ],
+          "confidence": 0.85,
+          "reasoning": "The left control knob is designed to be turned to adjust stove settings.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            87,
+            150
+          ],
+          "position_3d": [
+            -0.29494622349739075,
+            -0.26536914706230164,
+            0.7830000519752502
+          ],
+          "confidence": 0.8,
+          "reasoning": "The left control knob likely also has a push function, common for ignition or setting activation.",
+          "alternative_points": []
+        },
+        "cleanable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            50,
+            179
+          ],
+          "position_3d": null,
+          "confidence": 0.9,
+          "reasoning": "The large, flat, and smooth white surface of the control panel is suitable for wiping and cleaning.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "silver_stove_knob_(left)",
+      "object_type": "Silver stove knob",
+      "affordances": [
+        "pushable",
+        "graspable",
+        "rotatable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "empty-hand": false
+      },
+      "position_3d": [
+        -0.25730687379837036,
+        -0.2285933643579483,
+        0.7950000166893005
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            150,
+            200
+          ],
+          "position_3d": [
+            -0.25730687379837036,
+            -0.2285933643579483,
+            0.7950000166893005
+          ],
+          "confidence": 0.95,
+          "reasoning": "The knob's design allows for a secure grip to facilitate rotation.",
+          "alternative_points": []
+        },
+        "rotatable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            150,
+            200
+          ],
+          "position_3d": [
+            -0.25730687379837036,
+            -0.2285933643579483,
+            0.7950000166893005
+          ],
+          "confidence": 0.95,
+          "reasoning": "The primary function of a stove knob is to be rotated to control heat.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            150,
+            200
+          ],
+          "position_3d": [
+            -0.25730687379837036,
+            -0.2285933643579483,
+            0.7950000166893005
+          ],
+          "confidence": 0.8,
+          "reasoning": "Many stove knobs require an initial push to engage the turning mechanism for safety.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "silver_stove_knob_(right)",
+      "object_type": "stove knob",
+      "affordances": [
+        "pushable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "empty-hand": false
+      },
+      "position_3d": [
+        -0.20549248158931732,
+        -0.29874467849731445,
+        0.8250000476837158
+      ],
+      "bounding_box_2d": [
+        20,
+        240,
+        80,
+        290
+      ],
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            58,
+            271
+          ],
+          "position_3d": [
+            -0.20549248158931732,
+            -0.29874467849731445,
+            0.8250000476837158
+          ],
+          "confidence": 0.9,
+          "reasoning": "The entire outer surface of the knob is designed to be grasped for turning. The center of the front face is a representative point for interaction.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            58,
+            271
+          ],
+          "position_3d": [
+            -0.20549248158931732,
+            -0.29874467849731445,
+            0.8250000476837158
+          ],
+          "confidence": 0.8,
+          "reasoning": "Many stove knobs require a push action before turning. The center of the front face is the typical point for pushing.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "black_electric_stove_top_surface",
+      "object_type": "Black electric stove top surface",
+      "affordances": [
+        "supportable",
+        "cookable",
+        "cleanable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": false,
+        "graspable": false,
+        "clear": false,
+        "empty-hand": false,
+        "clean": true,
+        "opened": false,
+        "filled": false,
+        "wet": false
+      },
+      "position_3d": [
+        -0.12210634350776672,
+        0.08176778256893158,
+        0.7420000433921814
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            800,
+            400
+          ],
+          "position_3d": [
+            -0.07450398057699203,
+            0.15331974625587463,
+            0.6680000424385071
+          ],
+          "confidence": 0.9,
+          "reasoning": "A clear area on the front right of the stove top where an object could be placed.",
+          "alternative_points": []
+        },
+        "cleanable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            600,
+            300
+          ],
+          "position_3d": [
+            -0.16471917927265167,
+            0.05331199988722801,
+            0.7570000290870667
+          ],
+          "confidence": 0.9,
+          "reasoning": "A central point on the black surface, suitable for wiping or scrubbing.",
+          "alternative_points": []
+        },
+        "cookable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            500,
+            150
+          ],
+          "position_3d": [
+            -0.30059653520584106,
+            -0.007279546931385994,
+            0.7980000376701355
+          ],
+          "confidence": 0.9,
+          "reasoning": "The center of the left electric burner, where a pot or pan would be placed for cooking.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "silver_electric_stove_burner_(front_left)",
+      "object_type": "Silver electric stove burner (front left)",
+      "affordances": [
+        "cleanable",
+        "supportable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "empty-hand": false,
+        "clean": true,
+        "opened": false,
+        "filled": false,
+        "wet": false
+      },
+      "position_3d": [
+        -0.3011492192745209,
+        -0.02196357399225235,
+        0.8030000329017639
+      ],
+      "bounding_box_2d": [
+        400,
+        70,
+        560,
+        240
+      ],
+      "interaction_points": {
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            479,
+            153
+          ],
+          "position_3d": [
+            -0.3011492192745209,
+            -0.02196357399225235,
+            0.8030000329017639
+          ],
+          "confidence": 0.95,
+          "reasoning": "The entire spiral surface is designed to support cookware, with the center being a common resting point for pots and pans.",
+          "alternative_points": []
+        },
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            479,
+            153
+          ],
+          "position_3d": [
+            -0.3011492192745209,
+            -0.02196357399225235,
+            0.8030000329017639
+          ],
+          "confidence": 0.85,
+          "reasoning": "Electric burners are often removable for cleaning or replacement; the central post or edges would be suitable points for lifting or manipulation.",
+          "alternative_points": []
+        },
+        "cleanable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            479,
+            153
+          ],
+          "position_3d": [
+            -0.3011492192745209,
+            -0.02196357399225235,
+            0.8030000329017639
+          ],
+          "confidence": 0.9,
+          "reasoning": "The entire surface of the burner needs to be cleaned periodically; the center is a good general point for applying cleaning actions.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "gray_and_black",
+      "object_type": "Nespresso Machine",
+      "affordances": [
+        "pourable",
+        "pullable",
+        "graspable",
+        "containable",
+        "openable",
+        "supportable",
+        "pushable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "empty-hand": true,
+        "opened": false,
+        "filled": false
+      },
+      "position_3d": [
+        -0.0334748700261116,
+        -0.13555480539798737,
+        0.7680000066757202
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            300,
+            400
+          ],
+          "position_3d": [
+            -0.11130984127521515,
+            -0.16788101196289062,
+            0.9980000257492065
+          ],
+          "confidence": 0.9,
+          "reasoning": "The side of the machine provides a stable point for grasping and lifting.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            350,
+            465
+          ],
+          "position_3d": [
+            -0.03434661403298378,
+            -0.10121359676122665,
+            0.7880000472068787
+          ],
+          "confidence": 0.85,
+          "reasoning": "The main body of the machine can be pushed or pulled across the countertop.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            350,
+            465
+          ],
+          "position_3d": [
+            -0.03434661403298378,
+            -0.10121359676122665,
+            0.7880000472068787
+          ],
+          "confidence": 0.85,
+          "reasoning": "The main body of the machine can be pushed or pulled across the countertop.",
+          "alternative_points": []
+        },
+        "openable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            100,
+            460
+          ],
+          "position_3d": null,
+          "confidence": 0.9,
+          "reasoning": "The top front lever/lid is used to open the capsule compartment.",
+          "alternative_points": []
+        },
+        "pourable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            100,
+            500
+          ],
+          "position_3d": [
+            -0.0036328218411654234,
+            -0.21733559668064117,
+            0.6640000343322754
+          ],
+          "confidence": 0.8,
+          "reasoning": "The opening for the water tank is located at the top back of the machine for refilling.",
+          "alternative_points": []
+        },
+        "containable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            500,
+            465
+          ],
+          "position_3d": [
+            -0.035174764692783356,
+            -0.007361646741628647,
+            0.8070000410079956
+          ],
+          "confidence": 0.8,
+          "reasoning": "The internal water reservoir and used capsule bin are containment areas. The drip tray also contains spills.",
+          "alternative_points": []
+        },
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            550,
+            465
+          ],
+          "position_3d": [
+            -0.03430302441120148,
+            0.024122780188918114,
+            0.7870000600814819
+          ],
+          "confidence": 0.9,
+          "reasoning": "The drip tray/cup rest at the base is designed to support a coffee cup.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "white_kitchen_countertop",
+      "object_type": "White kitchen countertop",
+      "affordances": [
+        "supportable",
+        "cleanable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": false,
+        "clear": false,
+        "empty-hand": false
+      },
+      "position_3d": [
+        0.15185138583183289,
+        -0.008219136856496334,
+        0.9010000228881836
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            750,
+            700
+          ],
+          "position_3d": [
+            0.15478269755840302,
+            0.1421203315258026,
+            0.7490000128746033
+          ],
+          "confidence": 0.95,
+          "reasoning": "Any flat area on the countertop can support objects. This point is a representative area where objects are currently placed or could be placed.",
+          "alternative_points": []
+        },
+        "cleanable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            500,
+            665
+          ],
+          "position_3d": [
+            0.15185138583183289,
+            -0.008219136856496334,
+            0.9010000228881836
+          ],
+          "confidence": 0.9,
+          "reasoning": "Any part of the countertop's surface can be wiped or cleaned.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "dark_gray_wall_panel",
+      "object_type": "Dark gray wall panel",
+      "affordances": [
+        "supportable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": false,
+        "graspable": false,
+        "clear": true,
+        "empty-hand": false
+      },
+      "position_3d": [
+        0.29113051295280457,
+        -0.008892256766557693,
+        0.7150000333786011
+      ],
+      "bounding_box_2d": [
+        0,
+        640,
+        1000,
+        1000
+      ],
+      "interaction_points": {
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            497,
+            890
+          ],
+          "position_3d": [
+            0.29113051295280457,
+            -0.008892256766557693,
+            0.7150000333786011
+          ],
+          "confidence": 0.9,
+          "reasoning": "Any point on the large, flat vertical surface can support objects leaned against it or mounted to it. The chosen point is a central, representative area.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "blue_bodyarmor_chill_drink_bottle",
+      "object_type": "Blue Bodyarmor Chill drink bottle",
+      "affordances": [
+        "pourable",
+        "pullable",
+        "containable",
+        "graspable",
+        "openable",
+        "supportable",
+        "pushable",
+        "closable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": false,
+        "graspable": true,
+        "clear": false,
+        "clean": true,
+        "opened": false,
+        "filled": true,
+        "wet": false
+      },
+      "position_3d": [
+        0.011174539104104042,
+        0.07963564246892929,
+        0.531000018119812
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            750,
+            525
+          ],
+          "position_3d": [
+            0.011490203440189362,
+            0.10360173881053925,
+            0.5460000038146973
+          ],
+          "confidence": 0.95,
+          "reasoning": "The main cylindrical body of the bottle offers a stable point for a power or pinch grasp, avoiding the clamp.",
+          "alternative_points": []
+        },
+        "pourable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            570,
+            525
+          ],
+          "position_3d": [
+            0.0162251777946949,
+            0.03513195365667343,
+            0.7710000276565552
+          ],
+          "confidence": 0.9,
+          "reasoning": "The opening of the bottle, where the cap is located, is the point from which liquid would be poured.",
+          "alternative_points": []
+        },
+        "openable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            550,
+            525
+          ],
+          "position_3d": [
+            0.016456665471196175,
+            0.02396952360868454,
+            0.7820000648498535
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cap is the part designed to be twisted or pulled open.",
+          "alternative_points": []
+        },
+        "closable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            550,
+            525
+          ],
+          "position_3d": [
+            0.016456665471196175,
+            0.02396952360868454,
+            0.7820000648498535
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cap is the part designed to be twisted or pushed closed.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            700,
+            500
+          ],
+          "position_3d": [
+            -0.002921576611697674,
+            0.08008556813001633,
+            0.534000039100647
+          ],
+          "confidence": 0.85,
+          "reasoning": "Any side of the bottle's body can be pushed.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            700,
+            550
+          ],
+          "position_3d": [
+            0.02473108470439911,
+            0.07798594236373901,
+            0.5200000405311584
+          ],
+          "confidence": 0.85,
+          "reasoning": "Any side of the bottle's body can be pulled.",
+          "alternative_points": []
+        },
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            850,
+            525
+          ],
+          "position_3d": [
+            0.012226755730807781,
+            0.15646003186702728,
+            0.581000030040741
+          ],
+          "confidence": 0.9,
+          "reasoning": "The bottom flat surface of the bottle can rest on a flat surface for support.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "gray_metal_c-clamp",
+      "object_type": "c_clamp",
+      "affordances": [
+        "pullable",
+        "graspable",
+        "openable",
+        "supportable",
+        "pushable",
+        "closable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": false,
+        "empty-hand": false
+      },
+      "position_3d": [
+        0.0966474860906601,
+        0.20086205005645752,
+        0.6430000066757202
+      ],
+      "bounding_box_2d": [
+        800,
+        460,
+        1000,
+        840
+      ],
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            908,
+            800
+          ],
+          "position_3d": [
+            0.20670410990715027,
+            0.20758037269115448,
+            0.6610000133514404
+          ],
+          "confidence": 0.95,
+          "reasoning": "The screw handle is designed for manual rotation and provides a natural point for grasping the tool.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            908,
+            553
+          ],
+          "position_3d": [
+            0.029431762173771858,
+            0.18779587745666504,
+            0.5980000495910645
+          ],
+          "confidence": 0.9,
+          "reasoning": "The main body of the C-clamp offers a stable and broad surface to apply force for pushing.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            908,
+            800
+          ],
+          "position_3d": [
+            0.20670410990715027,
+            0.20758037269115448,
+            0.6610000133514404
+          ],
+          "confidence": 0.95,
+          "reasoning": "The screw handle provides a good leverage point for pulling the clamp.",
+          "alternative_points": []
+        },
+        "openable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            908,
+            800
+          ],
+          "position_3d": [
+            0.20670410990715027,
+            0.20758037269115448,
+            0.6610000133514404
+          ],
+          "confidence": 0.95,
+          "reasoning": "Turning the screw handle counter-clockwise will open the clamp jaws.",
+          "alternative_points": []
+        },
+        "closable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            908,
+            800
+          ],
+          "position_3d": [
+            0.20670410990715027,
+            0.20758037269115448,
+            0.6610000133514404
+          ],
+          "confidence": 0.95,
+          "reasoning": "Turning the screw handle clockwise will close the clamp jaws.",
+          "alternative_points": []
+        },
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            908,
+            592
+          ],
+          "position_3d": [
+            0.05629202350974083,
+            0.19501878321170807,
+            0.6210000514984131
+          ],
+          "confidence": 0.95,
+          "reasoning": "The inner surfaces of the jaws are designed to hold and support objects by applying clamping force, as demonstrated by the can currently held.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "blue_plastic",
+      "object_type": "cap",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "closable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "empty-hand": false,
+        "clean": true,
+        "opened": true,
+        "filled": false,
+        "wet": false
+      },
+      "position_3d": [
+        -0.15035204589366913,
+        0.1451297402381897,
+        0.656000018119812
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            790,
+            290
+          ],
+          "position_3d": [
+            -0.15035204589366913,
+            0.1451297402381897,
+            0.656000018119812
+          ],
+          "confidence": 0.95,
+          "reasoning": "The entire cap is small and can be grasped from any side or top.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            790,
+            290
+          ],
+          "position_3d": [
+            -0.15035204589366913,
+            0.1451297402381897,
+            0.656000018119812
+          ],
+          "confidence": 0.9,
+          "reasoning": "Any point on its outer surface can be pushed.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            790,
+            290
+          ],
+          "position_3d": [
+            -0.15035204589366913,
+            0.1451297402381897,
+            0.656000018119812
+          ],
+          "confidence": 0.9,
+          "reasoning": "Any point on its outer surface can be pulled.",
+          "alternative_points": []
+        },
+        "closable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            790,
+            290
+          ],
+          "position_3d": [
+            -0.15035204589366913,
+            0.1451297402381897,
+            0.656000018119812
+          ],
+          "confidence": 0.85,
+          "reasoning": "The cap's center is the optimal point for a robot to align and place it onto a bottle opening.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "brown_paper_grocery_bag",
+      "object_type": "Brown paper grocery bag",
+      "affordances": [
+        "pullable",
+        "containable",
+        "graspable",
+        "openable",
+        "supportable",
+        "pushable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": false,
+        "clean": true,
+        "opened": true,
+        "filled": true,
+        "wet": false
+      },
+      "position_3d": [
+        -0.15891534090042114,
+        0.09316566586494446,
+        0.4910000264644623
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            600,
+            300
+          ],
+          "position_3d": [
+            -0.16471917927265167,
+            0.05331199988722801,
+            0.7570000290870667
+          ],
+          "confidence": 0.9,
+          "reasoning": "The top-right side of the bag offers a clear and stable point for a robot gripper to grasp, avoiding the contents.",
+          "alternative_points": []
+        },
+        "containable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            550,
+            200
+          ],
+          "position_3d": [
+            -0.18157128989696503,
+            0.017195528373122215,
+            0.5610000491142273
+          ],
+          "confidence": 0.95,
+          "reasoning": "The open top of the bag is the designated area for placing or removing contents.",
+          "alternative_points": []
+        },
+        "supportable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            900,
+            200
+          ],
+          "position_3d": [
+            -0.17315621674060822,
+            0.1653514802455902,
+            0.5350000262260437
+          ],
+          "confidence": 0.9,
+          "reasoning": "The bottom surface of the bag is designed to rest on a flat surface for support.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            750,
+            300
+          ],
+          "position_3d": [
+            -0.14796438813209534,
+            0.12902779877185822,
+            0.6800000071525574
+          ],
+          "confidence": 0.85,
+          "reasoning": "Any visible side surface of the bag can be pushed to move it across the stove top.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            750,
+            300
+          ],
+          "position_3d": [
+            -0.14796438813209534,
+            0.12902779877185822,
+            0.6800000071525574
+          ],
+          "confidence": 0.85,
+          "reasoning": "Any visible side surface of the bag can be pulled to move it across the stove top.",
+          "alternative_points": []
+        },
+        "openable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            550,
+            200
+          ],
+          "position_3d": [
+            -0.18157128989696503,
+            0.017195528373122215,
+            0.5610000491142273
+          ],
+          "confidence": 0.9,
+          "reasoning": "The top rim of the bag defines its opening, allowing access to its contents. While already open, this is the region for manipulating its open state.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "black_folded_fabric/towel",
+      "object_type": "Black folded fabric/towel",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": true,
+        "on": false,
+        "graspable": true,
+        "clear": true,
+        "clean": true,
+        "opened": false,
+        "filled": false,
+        "wet": false
+      },
+      "position_3d": [
+        -0.23146025836467743,
+        0.04022209346294403,
+        0.5580000281333923
+      ],
+      "bounding_box_2d": [
+        490,
+        0,
+        800,
+        260
+      ],
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            566,
+            115
+          ],
+          "position_3d": [
+            -0.2376822978258133,
+            0.02421054057776928,
+            0.5730000138282776
+          ],
+          "confidence": 0.95,
+          "reasoning": "The fabric's deformable nature allows for grasping almost anywhere. An upper-central point provides a good bulk for a stable lift.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            518,
+            129
+          ],
+          "position_3d": [
+            -0.31631168723106384,
+            0.0032713348045945168,
+            0.7910000085830688
+          ],
+          "confidence": 0.9,
+          "reasoning": "Pulling from the top edge is a natural action to extract the fabric from the bag or unfold it.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            612,
+            115
+          ],
+          "position_3d": [
+            -0.22980104386806488,
+            0.043606214225292206,
+            0.5540000200271606
+          ],
+          "confidence": 0.9,
+          "reasoning": "Pushing on the central mass of the fabric allows for compacting it further into the bag or repositioning it.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "white_nespresso_machine_power_cord",
+      "object_type": "White Nespresso machine power cord",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "empty-hand": true
+      },
+      "position_3d": [
+        -0.15353801846504211,
+        -0.08272896707057953,
+        0.9330000281333923
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            400,
+            350
+          ],
+          "position_3d": [
+            -0.15353801846504211,
+            -0.08272896707057953,
+            0.9330000281333923
+          ],
+          "confidence": 0.9,
+          "reasoning": "A visible, accessible segment of the cord on the countertop.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            400,
+            350
+          ],
+          "position_3d": [
+            -0.15353801846504211,
+            -0.08272896707057953,
+            0.9330000281333923
+          ],
+          "confidence": 0.85,
+          "reasoning": "Any point along the visible cord can be pulled, assuming it's not snagged elsewhere.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            400,
+            350
+          ],
+          "position_3d": [
+            -0.15353801846504211,
+            -0.08272896707057953,
+            0.9330000281333923
+          ],
+          "confidence": 0.85,
+          "reasoning": "Any point along the visible cord can be pushed to reposition it.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "black_nespresso_machine_power_cord",
+      "object_type": "Black Nespresso machine power cord",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "bendable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": false,
+        "empty-hand": true
+      },
+      "position_3d": [
+        0.19935855269432068,
+        0.036125678569078445,
+        0.8550000190734863
+      ],
+      "bounding_box_2d": [
+        400,
+        560,
+        700,
+        800
+      ],
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            566,
+            725
+          ],
+          "position_3d": [
+            0.19935855269432068,
+            0.036125678569078445,
+            0.8550000190734863
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cord is uniformly graspable along its visible length; this point is centrally located and easily accessible for a robot gripper.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            566,
+            725
+          ],
+          "position_3d": [
+            0.19935855269432068,
+            0.036125678569078445,
+            0.8550000190734863
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cord can be pushed from any point along its length; this point is centrally located for general manipulation.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            566,
+            725
+          ],
+          "position_3d": [
+            0.19935855269432068,
+            0.036125678569078445,
+            0.8550000190734863
+          ],
+          "confidence": 0.9,
+          "reasoning": "The cord can be pulled from any point along its length; this point is centrally located for general manipulation.",
+          "alternative_points": []
+        },
+        "bendable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            566,
+            725
+          ],
+          "position_3d": [
+            0.19935855269432068,
+            0.036125678569078445,
+            0.8550000190734863
+          ],
+          "confidence": 0.85,
+          "reasoning": "The cord is flexible and can be bent at any point along its length; this point represents a general area for bending actions.",
+          "alternative_points": []
+        }
+      }
+    },
+    {
+      "object_id": "white_and_orange",
+      "object_type": "product_label",
+      "affordances": [
+        "removable",
+        "pushable",
+        "pullable",
+        "graspable"
+      ],
+      "pddl_state": {
+        "holding": false,
+        "in": false,
+        "on": true,
+        "graspable": true,
+        "clear": true,
+        "clean": true,
+        "opened": false,
+        "filled": false,
+        "wet": false
+      },
+      "position_3d": [
+        0.16635523736476898,
+        0.056692421436309814,
+        0.8050000667572021
+      ],
+      "bounding_box_2d": null,
+      "interaction_points": {
+        "graspable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            600,
+            700
+          ],
+          "position_3d": [
+            0.16635523736476898,
+            0.056692421436309814,
+            0.8050000667572021
+          ],
+          "confidence": 0.9,
+          "reasoning": "The center of the label provides a stable point for a pinch or tweezer-like grasp.",
+          "alternative_points": []
+        },
+        "removable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            580,
+            670
+          ],
+          "position_3d": [
+            0.14470578730106354,
+            0.044913358986377716,
+            0.8340000510215759
+          ],
+          "confidence": 0.85,
+          "reasoning": "An edge or corner would be ideal for peeling or tearing if the label is meant to be removed.",
+          "alternative_points": []
+        },
+        "pushable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            600,
+            700
+          ],
+          "position_3d": [
+            0.16635523736476898,
+            0.056692421436309814,
+            0.8050000667572021
+          ],
+          "confidence": 0.8,
+          "reasoning": "Any flat surface of the label can be pushed, moving the attached cord.",
+          "alternative_points": []
+        },
+        "pullable": {
+          "snapshot_id": "20251122_225334_005-44cfcf",
+          "position_2d": [
+            600,
+            700
+          ],
+          "position_3d": [
+            0.16635523736476898,
+            0.056692421436309814,
+            0.8050000667572021
+          ],
+          "confidence": 0.8,
+          "reasoning": "Any flat surface of the label can be pulled, moving the attached cord.",
+          "alternative_points": []
+        }
+      }
+    }
+  ]
+}

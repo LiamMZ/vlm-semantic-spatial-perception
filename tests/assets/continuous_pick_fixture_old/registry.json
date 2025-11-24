@@ -1,0 +1,422 @@
+{
+  "version": "2.0",
+  "num_objects": 16,
+  "detection_timestamp": "2025-11-22T18:10:04.846538",
+  "note": "Positions and interaction points are stored per snapshot under perception_pool/snapshots/<id>/detections.json. Registry tracks only observation ids.",
+  "objects": [
+    {
+      "object_type": "White electric stove control panel",
+      "object_id": "white_electric_stove_control_panel",
+      "affordances": [
+        "cleanable",
+        "turnable",
+        "pushable"
+      ],
+      "properties": {
+        "color": "white (panel), dark (knobs/indicators)",
+        "material": "metal or plastic with a smooth finish",
+        "size": "large (occupies most of the image frame)",
+        "state": "installed, functional"
+      },
+      "confidence": 0.9,
+      "timestamp": 1763851998.0222254,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Silver stove knob",
+      "object_id": "silver_stove_knob_(left)",
+      "affordances": [
+        "pushable",
+        "graspable",
+        "rotatable"
+      ],
+      "properties": {
+        "color": "silver",
+        "material": "metallic",
+        "size": "small",
+        "state": "attached to stove, currently in 'off' position (indicator pointing upwards)"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763851992.195268,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "stove knob",
+      "object_id": "silver_stove_knob_(right)",
+      "affordances": [
+        "pushable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "silver",
+        "material": "metal",
+        "size": "small",
+        "state": "mounted"
+      },
+      "confidence": 0.85,
+      "timestamp": 1763851998.7782998,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Black electric stove top surface",
+      "object_id": "black_electric_stove_top_surface",
+      "affordances": [
+        "supportable",
+        "cookable",
+        "cleanable"
+      ],
+      "properties": {
+        "color": "black with silver elements",
+        "material": "metal (enamel-coated steel for surface, nichrome/cast iron for burners)",
+        "size": "large",
+        "state": "idle, partially occupied (with a bag and cap), burners are off"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763851994.5071068,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Silver electric stove burner (front left)",
+      "object_id": "silver_electric_stove_burner_(front_left)",
+      "affordances": [
+        "cleanable",
+        "supportable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "silver",
+        "material": "metal",
+        "size": "medium",
+        "state": "off"
+      },
+      "confidence": 0.98,
+      "timestamp": 1763851999.01486,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Nespresso Machine",
+      "object_id": "gray_and_black",
+      "affordances": [
+        "pourable",
+        "pullable",
+        "graspable",
+        "containable",
+        "openable",
+        "supportable",
+        "pushable"
+      ],
+      "properties": {
+        "color": "Black (main body), Gray (top, front panel, drip tray)",
+        "material": "Plastic, Metal",
+        "size": "Medium",
+        "state": "Upright, plugged in, appears functional"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763852003.7534523,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "White kitchen countertop",
+      "object_id": "white_kitchen_countertop",
+      "affordances": [
+        "supportable",
+        "cleanable"
+      ],
+      "properties": {
+        "color": "white",
+        "material": "laminate or solid surface",
+        "size": "large (extends across the right side of the image)",
+        "state": "fixed, relatively clean, dry"
+      },
+      "confidence": 0.98,
+      "timestamp": 1763851992.5311086,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Dark gray wall panel",
+      "object_id": "dark_gray_wall_panel",
+      "affordances": [
+        "supportable"
+      ],
+      "properties": {
+        "color": "dark gray",
+        "material": "solid surface (e.g., painted drywall, paneling)",
+        "size": "large (appears to be a wall section)",
+        "state": "fixed, vertical"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763851997.0308588,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Blue Bodyarmor Chill drink bottle",
+      "object_id": "blue_bodyarmor_chill_drink_bottle",
+      "affordances": [
+        "pourable",
+        "pullable",
+        "containable",
+        "graspable",
+        "openable",
+        "supportable",
+        "pushable",
+        "closable"
+      ],
+      "properties": {
+        "color": "blue",
+        "material": "plastic",
+        "size": "medium (standard single-serving bottle)",
+        "state": "upright, clamped, contains liquid, cap on"
+      },
+      "confidence": 0.98,
+      "timestamp": 1763851997.6672046,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "c_clamp",
+      "object_id": "gray_metal_c-clamp",
+      "affordances": [
+        "pullable",
+        "graspable",
+        "openable",
+        "supportable",
+        "pushable",
+        "closable"
+      ],
+      "properties": {
+        "color": "dark gray",
+        "material": "metal",
+        "size": "medium",
+        "state": "clamping (holding an object)"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763852005.6448696,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "cap",
+      "object_id": "blue_plastic",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "closable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "blue",
+        "material": "plastic",
+        "size": "small",
+        "state": "detached, lying on its side"
+      },
+      "confidence": 0.98,
+      "timestamp": 1763852007.89464,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Brown paper grocery bag",
+      "object_id": "brown_paper_grocery_bag",
+      "affordances": [
+        "pullable",
+        "containable",
+        "graspable",
+        "openable",
+        "supportable",
+        "pushable"
+      ],
+      "properties": {
+        "color": "brown",
+        "material": "paper",
+        "size": "medium",
+        "state": "open, partially filled with a black cloth, upright, resting on the stove"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763851997.4166298,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Black folded fabric/towel",
+      "object_id": "black_folded_fabric/towel",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "black",
+        "size": "large (appears to be a full-size towel or small blanket when folded)",
+        "material": "fabric (textured, possibly waffle knit)",
+        "state": "folded, dry, contained in a bag"
+      },
+      "confidence": 0.98,
+      "timestamp": 1763851998.7255726,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "White Nespresso machine power cord",
+      "object_id": "white_nespresso_machine_power_cord",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "white",
+        "material": "plastic/rubber insulation",
+        "size": "thin, cylindrical (partially visible length)",
+        "state": "connected to Nespresso machine, resting on countertop, appears clean and dry"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763851991.0767384,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "Black Nespresso machine power cord",
+      "object_id": "black_nespresso_machine_power_cord",
+      "affordances": [
+        "pullable",
+        "pushable",
+        "bendable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "black",
+        "material": "rubber/plastic insulation",
+        "size": "medium thickness, indeterminate length (partially visible)",
+        "state": "curved, lying on a surface, appears connected at both ends (ends are out of frame)"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763852006.802367,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    },
+    {
+      "object_type": "product_label",
+      "object_id": "white_and_orange",
+      "affordances": [
+        "removable",
+        "pushable",
+        "pullable",
+        "graspable"
+      ],
+      "properties": {
+        "color": "white with orange text/graphics",
+        "material": "paper/plastic tag",
+        "size": "small",
+        "state": "attached to power cord, resting on counter"
+      },
+      "confidence": 0.95,
+      "timestamp": 1763851992.57667,
+      "observations": [
+        "20251122_225327_907-6096be",
+        "20251122_225328_001-fab7e7",
+        "20251122_225330_001-3601ed",
+        "20251122_225332_003-8a5d42",
+        "20251122_225334_005-44cfcf"
+      ],
+      "latest_observation": "20251122_225334_005-44cfcf"
+    }
+  ]
+}

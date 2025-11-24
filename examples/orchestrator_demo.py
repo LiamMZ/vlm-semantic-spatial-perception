@@ -22,6 +22,7 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+import logging
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 
 from src.planning import TaskOrchestrator, OrchestratorState, TaskState
+from src.utils.logging_utils import configure_logging
 # Import config from config directory
 config_path = Path(__file__).parent.parent / "config"
 if str(config_path) not in sys.path:
@@ -106,6 +108,7 @@ class OrchestratorDemoApp(App):
         self._initializing: bool = True
         self._awaiting_task_input: bool = False
         self._init_failed: bool = False
+        self._logging_configured: bool = False
         
         # Log file will be set up after system initialization
         self.log_file: Optional[Path] = None
@@ -178,6 +181,14 @@ class OrchestratorDemoApp(App):
             self._write_log(f"✓ Log file: {self.log_file}")
         except Exception as e:
             self._write_log(f"⚠ Could not create log file: {e}")
+
+    def _configure_logging_pipeline(self):
+        """Attach Python logging to the UI log stream."""
+        if self._logging_configured:
+            return
+        # Route all loggers (including RealSense and orchestrator) into the UI
+        configure_logging(level=logging.DEBUG, callback=self._write_log, include_console=False)
+        self._logging_configured = True
 
     async def on_input_submitted(self, event: Input.Submitted):
         """Handle user command submissions."""
@@ -415,26 +426,12 @@ class OrchestratorDemoApp(App):
             
             # Set up log file early so we can capture initialization messages
             self._setup_log_file(str(output_dir))
+            self._configure_logging_pipeline()
             
-            # Initialize orchestrator (capture stdout to log)
+            # Initialize orchestrator with logging routed to the UI
             self._write_log("⚙ Initializing components...")
             self.orchestrator = TaskOrchestrator(config)
-            
-            # Capture initialization messages by redirecting print statements
-            import io
-            import sys
-            old_stdout = sys.stdout
-            sys.stdout = captured_output = io.StringIO()
-            
-            try:
-                await self.orchestrator.initialize()
-            finally:
-                sys.stdout = old_stdout
-                init_output = captured_output.getvalue()
-                # Write captured output to log
-                for line in init_output.split('\n'):
-                    if line.strip():
-                        self._write_log(f"  {line}")
+            await self.orchestrator.initialize()
             
             self._write_log(f"✓ Output directory: {output_dir}")
             self._write_log("")

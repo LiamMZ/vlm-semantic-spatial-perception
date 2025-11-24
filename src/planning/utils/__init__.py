@@ -13,6 +13,7 @@ from .task_types import (
     TaskState,
     TaskStateDecision
 )
+from .snapshot_utils import SnapshotArtifacts, SnapshotCache, load_snapshot_artifacts
 
 __all__ = [
     # PDDL types
@@ -26,5 +27,10 @@ __all__ = [
     # Task types
     "TaskAnalysis",
     "TaskState",
-    "TaskStateDecision"
+    "TaskStateDecision",
+
+    # Snapshot helpers
+    "SnapshotArtifacts",
+    "SnapshotCache",
+    "load_snapshot_artifacts",
 ]

@@ -2,6 +2,7 @@
 Intel RealSense camera implementation.
 """
 
+import logging
 import time
 from typing import Optional
 
@@ -14,7 +15,7 @@ except ImportError:
     REALSENSE_AVAILABLE = False
 
 from .base_camera import BaseCamera, CameraIntrinsics
-from ..utils.logger import MinimalLogger, get_logger
+from ..utils.logging_utils import get_structured_logger
 
 
 class RealSenseCamera(BaseCamera):
@@ -31,7 +32,7 @@ class RealSenseCamera(BaseCamera):
         fps: int = 30,
         enable_depth: bool = True,
         auto_start: bool = True,
-        logger: Optional[MinimalLogger] = None
+        logger: Optional[logging.Logger] = None
     ):
         """
         Initialize RealSense camera.
@@ -42,7 +43,7 @@ class RealSenseCamera(BaseCamera):
             fps: Target frame rate
             enable_depth: Enable depth stream
             auto_start: Automatically start camera on initialization
-            logger: Logger instance (if None, creates a minimal logger)
+            logger: Logger instance (if None, creates a structured logger)
 
         Raises:
             ImportError: If pyrealsense2 is not installed
@@ -56,7 +57,7 @@ class RealSenseCamera(BaseCamera):
         self.height = height
         self.fps = fps
         self.enable_depth = enable_depth
-        self.logger = logger if logger is not None else get_logger("RealSenseCamera")
+        self.logger = logger if logger is not None else get_structured_logger("RealSenseCamera")
 
         self.pipeline: Optional[rs.pipeline] = None
         self.config: Optional[rs.config] = None

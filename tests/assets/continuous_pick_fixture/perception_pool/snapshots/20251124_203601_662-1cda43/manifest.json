@@ -1,0 +1,18 @@
+{
+  "snapshot_id": "20251124_203601_662-1cda43",
+  "captured_at": "2025-11-24T20:36:01.729596Z",
+  "recorded_at": "2025-11-24T20:36:01.729596Z",
+  "sources": {
+    "camera": "RealSenseCamera",
+    "robot": "CuRoboMotionPlanner"
+  },
+  "files": {
+    "color": "color.png",
+    "depth_npz": "depth.npz",
+    "intrinsics": "intrinsics.json",
+    "detections": "detections.json",
+    "robot_state": "robot_state.json"
+  },
+  "notes": "",
+  "hashes": null
+}
