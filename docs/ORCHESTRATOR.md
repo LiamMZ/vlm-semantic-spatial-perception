@@ -71,3 +71,4 @@ perception_pool/
 - `get_world_state_snapshot()` is the handoff for `SkillDecomposer.plan(...)` and `PrimitiveExecutor.execute_plan(...)`; it embeds the latest perception pool index so snapshot utilities can load color/depth/intrinsics.
 - Snapshots are IDed as `YYYYMMDD_HHMMSS_mmm-<shortid>` for stable ordering; timestamp authority is host time, not camera hardware.
 - When storage is tight, tune `max_snapshot_count` instead of deleting folders manually to keep `index.json` consistent.
+- Logging: orchestrator and camera now emit via Python logging. The Textual demo wires `configure_logging(callback=_write_log, include_console=False, level=logging.DEBUG)` to stream RealSense/debug lines into the UI without buffering.

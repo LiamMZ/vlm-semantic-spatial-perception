@@ -49,3 +49,4 @@ Goal (delivered): `TaskOrchestrator` now captures lightweight “observation sna
 - Always cite snapshot IDs and the cadence/retention settings used when reporting results or incidents.
 - When customizing storage paths, prefer `perception_pool_dir` over manual symlinks.
 - If robot context is expected but missing, capture that in the daily journal with the base commit hash (`git log -1 --format="%H"`).
+- Route orchestrator/camera logs through `configure_logging(..., callback=_write_log, include_console=False)` (see `examples/orchestrator_demo.py`) so snapshot/camera errors surface in real time without stdout redirection.

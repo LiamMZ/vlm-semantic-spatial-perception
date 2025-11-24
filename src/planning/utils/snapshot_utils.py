@@ -24,6 +24,7 @@ class SnapshotArtifacts:
     depth: Optional[np.ndarray] = None
     intrinsics: Optional[Any] = None
     color_shape: Optional[Tuple[int, int]] = None
+    robot_state: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -65,6 +66,7 @@ def load_snapshot_artifacts(
     artifacts.color_bytes = _read_optional_bytes(perception_pool_dir, files.get("color"))
     artifacts.depth = _read_depth_array(perception_pool_dir, files.get("depth_npz"))
     artifacts.intrinsics = _read_intrinsics(perception_pool_dir, files.get("intrinsics"))
+    artifacts.robot_state = _read_robot_state(perception_pool_dir, files.get("robot_state"))
 
     if artifacts.color_bytes is not None and files.get("color"):
         try:
@@ -141,3 +143,14 @@ def _read_intrinsics(perception_pool_dir: Path, relative_path: Optional[str]) ->
     except Exception:
         return None
 
+
+def _read_robot_state(perception_pool_dir: Path, relative_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not relative_path:
+        return None
+    path = Path(perception_pool_dir) / relative_path
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None

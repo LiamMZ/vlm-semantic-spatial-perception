@@ -28,10 +28,10 @@ class PrimitiveExecutionResult:
 
 
 class PrimitiveExecutor:
-    """Translate and execute primitive plans against the CuRobo motion planner."""
+    """Translate and execute primitive plans against the configured primitives interface."""
 
-    def __init__(self, planner: Optional[Any], perception_pool_dir: Path):
-        self.planner = planner
+    def __init__(self, primitives: Optional[Any], perception_pool_dir: Path):
+        self.primitives = primitives
         self.perception_pool_dir = Path(perception_pool_dir)
         self._snapshot_cache = SnapshotCache()
 
@@ -50,7 +50,7 @@ class PrimitiveExecutor:
         translated_plan, warnings, errors = self.prepare_plan(plan, world_state)
         if errors:
             return PrimitiveExecutionResult(executed=False, warnings=warnings, errors=errors)
-        if dry_run or self.planner is None:
+        if dry_run or self.primitives is None:
             return PrimitiveExecutionResult(executed=False, warnings=warnings)
 
         primitive_results: List[Any] = []
@@ -58,15 +58,15 @@ class PrimitiveExecutor:
         for idx, primitive in enumerate(translated_plan.primitives):
             schema = PRIMITIVE_LIBRARY.get(primitive.name)
             if (
-                self.planner is not None
+                self.primitives is not None
                 and not dry_run
                 and schema is not None
                 and "execute" in schema.optional_params
             ):
                 primitive.parameters.setdefault("execute", True)
-            method = getattr(self.planner, primitive.name, None)
+            method = getattr(self.primitives, primitive.name, None)
             if not callable(method):
-                runtime_errors.append(f"[{idx}] planner missing primitive '{primitive.name}'")
+                runtime_errors.append(f"[{idx}] primitives missing primitive '{primitive.name}'")
                 break
             try:
                 raw_result = method(**primitive.parameters)
@@ -102,6 +102,7 @@ class PrimitiveExecutor:
             cache=self._snapshot_cache,
             snapshot_id=getattr(plan, "source_snapshot_id", None),
         )
+        warnings.extend(self._robot_pose_warnings(world_state, artifacts))
         if getattr(plan, "source_snapshot_id", None) and plan.source_snapshot_id != artifacts.snapshot_id:
             warnings.append(
                 f"Plan snapshot {plan.source_snapshot_id} missing on disk; "
@@ -122,6 +123,31 @@ class PrimitiveExecutor:
         warnings: List[str] = []
         for primitive in plan.primitives:
             warnings.extend(self._translate_helper_parameters(primitive, artifacts))
+        return warnings
+
+    def _robot_pose_warnings(
+        self,
+        world_state: Dict[str, Any],
+        artifacts: SnapshotArtifacts,
+    ) -> List[str]:
+        """
+        Surface potential transform mismatch when replaying cached perception with a moved robot.
+        """
+        warnings: List[str] = []
+        snapshot_state = artifacts.robot_state or {}
+        live_state = world_state.get("robot_state") or {}
+        snap_joints = snapshot_state.get("joints")
+        live_joints = live_state.get("joints")
+        if snap_joints and live_joints and len(snap_joints) == len(live_joints):
+            try:
+                max_delta = max(abs(a - b) for a, b in zip(snap_joints, live_joints))
+                if max_delta > 0.1:
+                    warnings.append(
+                        f"Snapshot robot joints differ from current by up to {max_delta:.3f} rad; "
+                        "camera transform may be stale for this cached perception."
+                    )
+            except Exception:
+                pass
         return warnings
 
     def _translate_helper_parameters(

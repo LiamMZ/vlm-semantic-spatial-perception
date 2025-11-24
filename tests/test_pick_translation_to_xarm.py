@@ -42,22 +42,26 @@ def _load_world_state() -> Dict[str, Dict]:
 
 
 def _cloth_interaction(world_state: dict) -> dict:
-    """Extract the cloth graspable interaction point from the fixture registry."""
-    objects = world_state["registry"].get("objects", [])
-    for obj in objects:
-        if obj.get("object_id") == "black_folded_fabric/towel":
+    """Extract the cloth graspable interaction point from the latest snapshot detections."""
+    snapshot_id = world_state["last_snapshot_id"]
+    det_path = (
+        FIXTURE_DIR / "perception_pool" / "snapshots" / snapshot_id / "detections.json"
+    )
+    detections = json.loads(det_path.read_text())
+    for obj in detections.get("objects", []):
+        if obj.get("object_id") == "black_fabric_garment":
             grasp = (obj.get("interaction_points") or {}).get("graspable") or {}
-            pos2d = grasp.get("position_2d") or obj.get("latest_position_2d")
-            pos3d = grasp.get("position_3d") or obj.get("latest_position_3d")
+            pos2d = grasp.get("position_2d") or obj.get("position_2d")
+            pos3d = grasp.get("position_3d") or obj.get("position_3d")
             return {
                 "object_id": obj["object_id"],
-                "snapshot_id": grasp.get("snapshot_id") or obj.get("latest_observation"),
+                "snapshot_id": grasp.get("snapshot_id") or snapshot_id,
                 "position_2d": pos2d,
                 "position_3d": pos3d,
                 "confidence": grasp.get("confidence", obj.get("confidence")),
                 "reasoning": grasp.get("reasoning", ""),
             }
-    raise AssertionError("black_folded_fabric/towel not found in registry")
+    raise AssertionError("black_fabric_garment not found in detections")
 
 
 def _mock_llm_response(world_state: dict) -> str:
@@ -103,7 +107,7 @@ def _mock_llm_response(world_state: dict) -> str:
                 "freshness_notes": [],
                 "warnings": [],
             },
-            "new_interaction_points": [],
+            "interaction_points": [],
             "resolved_interaction_point": cloth,
         }
     )
@@ -112,7 +116,7 @@ def _mock_llm_response(world_state: dict) -> str:
 @pytest.mark.parametrize(
     "action_parameters",
     [
-        ({"object_id": "black_folded_fabric/towel", "interaction": "graspable"}),
+        ({"object_id": "black_fabric_garment", "interaction": "graspable"}),
     ],
 )
 def test_pick_plan_translates_to_xarm_calls(action_parameters):
@@ -127,7 +131,6 @@ def test_pick_plan_translates_to_xarm_calls(action_parameters):
 
     decomposer = SkillDecomposer(
         api_key="test",
-        cache_enabled=False,
     )
     decomposer._perception_pool_dir = FIXTURE_DIR / "perception_pool"
 
@@ -136,11 +139,10 @@ def test_pick_plan_translates_to_xarm_calls(action_parameters):
             action_name="pick",
             parameters=action_parameters,
             world_hint=world_state,
-            use_cache=False,
         )
 
     executor = PrimitiveExecutor(
-        planner=None,
+        primitives=None,
         perception_pool_dir=FIXTURE_DIR / "perception_pool",
     )
 
@@ -177,7 +179,7 @@ def test_pick_plan_translates_to_xarm_calls(action_parameters):
     assert "target_position" in logged[0]["parameters"]
     assert len(logged[0]["parameters"]["target_position"]) == 3
     assert all(
-        primitive.references.get("object_id") == "black_folded_fabric/towel"
+        primitive.references.get("object_id") == "black_fabric_garment"
         for primitive in plan.primitives
     )
     assert logged[1]["method"] == "close_gripper"

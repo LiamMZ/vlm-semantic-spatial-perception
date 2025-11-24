@@ -5,9 +5,13 @@ Goal: convert symbolic actions (e.g., `pick`, `place`, `push`) into executable x
 ### Current Implementation
 - **Catalog-driven prompting**: `config/primitive_descriptions.md` documents primitives from `src/kinematics/xarm_curobo_interface.py` and seeds the Gemini prompt template in `config/skill_decomposer_prompts.yaml`.
 - **World-state ingestion**: `SkillDecomposer` pulls registry v2.0, snapshot index (`perception_pool/index.json`), and `last_snapshot_id` from `TaskOrchestrator.get_world_state_snapshot()` (or disk fallback). Relevant objects are filtered from the registry and staleness is annotated.
-- **LLM call + validation**: Prompts are sent to Gemini Robotics-ER 1.5 with structured output; responses are validated against `PRIMITIVE_LIBRARY` in `src/primitives/skill_plan_types.py`. Registry hashing (`compute_registry_hash`) powers the plan cache.
+- **LLM call + validation**: Prompts are sent to Gemini Robotics-ER 1.5 with structured output; responses are validated against `PRIMITIVE_LIBRARY` in `src/primitives/skill_plan_types.py`. Registry hashing (`compute_registry_hash`) is recorded on the plan for freshness checks instead of driving a cache.
 - **Helper parameters**: LLMs emit image-grounded helper fields (`target_pixel_yx`, `pivot_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) instead of raw metric poses. The executor back-projects them using depth/intrinsics from the selected snapshot.
 - **Execution**: `PrimitiveExecutor` translates helper fields, validates, and optionally drives `CuRoboMotionPlanner`. Results are normalized for JSON safety.
+- **Prompt sources**: Both the primary plan template/response schema and the interaction-point enrichment prompt/schema come from `config/skill_decomposer_prompts.yaml`; no inline prompt strings remain in `SkillDecomposer`.
+- **Interaction handling**: Interaction points and positions live on snapshot detections (`perception_pool/snapshots/<id>/detections.json`). The decomposer pulls the latest snapshot’s detections, merges interaction points into the working registry view, and warns when points are absent (no enrichment call is made). The prompt lists each interaction point with normalized `[y, x]` coordinates; the LLM is told to reuse existing points (no new `interaction_points` payload) and only propose new affordance+point pairs when it cannot use an existing one.
+- **LLM tuning**: Static Gemini config (top_p, output tokens, mime type, thinking_config) lives on the class via `llm_config_kwargs`; callers can override at construction. Temperature stays per-call.
+- **Interaction outputs**: The main plan JSON surfaces proposed affordance points in `interaction_points`; no backward compatibility for `new_interaction_points`.
 
 ### Inputs
 - Symbolic action + parameters (object IDs/types, goal hints).
@@ -16,7 +20,7 @@ Goal: convert symbolic actions (e.g., `pick`, `place`, `push`) into executable x
 
 ### Outputs
 - `SkillPlan` (ordered `PrimitiveCall` list) with diagnostics:
-  - `diagnostics.warnings`, `freshness_notes`, and `new_interaction_points` if data was missing or stale.
+  - `diagnostics.warnings`, `freshness_notes`, and `interaction_points` if data was missing or stale.
   - `source_snapshot_id` to anchor executor back-projection.
 
 ### Usage Pattern
@@ -33,7 +37,7 @@ decomposer = SkillDecomposer(
 plan = decomposer.plan("pick", {"object_id": "black_folded_fabric"})
 
 executor = PrimitiveExecutor(
-    planner=None,  # swap in CuRoboMotionPlanner(...) to execute
+    primitives=None,  # swap in CuRoboMotionPlanner(...) to execute
     perception_pool_dir=Path(cfg.state_dir) / "perception_pool",
 )
 result = executor.execute_plan(plan, world, dry_run=True)

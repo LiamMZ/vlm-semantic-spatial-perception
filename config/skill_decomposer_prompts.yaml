@@ -15,14 +15,17 @@ template: |
   {object_section}
   Latest snapshot id: {last_snapshot_id}
   Perception context: {perception_context}
+  Existing interaction points above include normalized [y, x] coordinates when available.
 
   Translation contract:
   - Use helper fields inside `parameters` (e.g., `target_pixel_yx`, `pivot_pixel_yx`,
     `depth_offset_m`, `motion_normal`, `tcp_standoff_m`). The PrimitiveExecutor will convert these
     into metric arguments using depth + intrinsics right before execution.
   - Leave metric-only API fields blank unless you are certain they are already expressed in meters.
-  - Reference new interaction points via `references.interaction_point` and include their normalized
-    [y, x] in `new_interaction_points`.
+  - If you use an existing interaction point, set `references.interaction_point` to its affordance and
+    do not add it to `interaction_points`.
+  - Only add new entries to `interaction_points` when you create a new affordance/point; include its
+    normalized [y, x] coordinates there.
 
   Constraints:
   - Prefer existing interaction points; add new ones only when none are suitable.
@@ -102,7 +105,7 @@ response_schema:
           type: array
           items:
             type: string
-    new_interaction_points:
+    interaction_points:
       type: array
       items:
         type: object
@@ -120,3 +123,51 @@ response_schema:
             type: number
           rationale:
             type: string
+
+interaction_points:
+  template: |
+    You are the Gemini Robotics-ER 1.5 perception assistant. Use the attached RGB snapshot to locate
+    precise affordance-level interaction points. Follow the Robotics-ER demo format: normalized
+    [y, x] coordinates in the 0-1000 range grounded in the attached image. Emit JSON that matches
+    the response schema below and avoid prose.
+
+    Snapshot id: {snapshot_id}
+    Perception context: {perception_context}
+    Objects needing interaction points:
+    ------------------------------------------------
+    {request_section}
+    ------------------------------------------------
+    Response schema:
+    {response_schema}
+  response_schema:
+    type: object
+    required: ["interaction_points"]
+    properties:
+      interaction_points:
+        type: array
+        items:
+          type: object
+          required: ["object_id", "affordance", "position_2d"]
+          properties:
+            object_id:
+              type: string
+            affordance:
+              type: string
+            position_2d:
+              type: array
+              items:
+                type: number
+            position_3d:
+              type: array
+              items:
+                type: number
+            confidence:
+              type: number
+            rationale:
+              type: string
+            source:
+              type: string
+      notes:
+        type: array
+        items:
+          type: string

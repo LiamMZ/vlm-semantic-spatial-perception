@@ -59,7 +59,7 @@ def test_prepare_plan_translates_pixel_targets(tmp_path):
         ],
     )
 
-    executor = PrimitiveExecutor(planner=None, perception_pool_dir=snapshot["pool_dir"])
+    executor = PrimitiveExecutor(primitives=None, perception_pool_dir=snapshot["pool_dir"])
     _, warnings, errors = executor.prepare_plan(
         plan,
         {
@@ -87,13 +87,13 @@ def test_execute_plan_serializes_joint_state_results(tmp_path):
         ],
     )
 
-    class FakePlanner:
+    class FakePrimitives:
         def move_to_pose(self, target_position, **kwargs):
             del target_position, kwargs  # unused in fake planner
             js = JointState.from_position(torch.zeros((1, 7)))
             return True, js, 0.1
 
-    executor = PrimitiveExecutor(planner=FakePlanner(), perception_pool_dir=snapshot["pool_dir"])
+    executor = PrimitiveExecutor(primitives=FakePrimitives(), perception_pool_dir=snapshot["pool_dir"])
     result = executor.execute_plan(
         plan,
         {

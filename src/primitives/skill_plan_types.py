@@ -158,7 +158,7 @@ class SkillPlanDiagnostics:
     freshness_notes: List[str] = field(default_factory=list)
     freshness: Dict[str, float] = field(default_factory=dict)
     rationale: str = ""
-    new_interaction_points: List[Dict[str, Any]] = field(default_factory=list)
+    interaction_points: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -167,7 +167,7 @@ class SkillPlanDiagnostics:
             "freshness_notes": self.freshness_notes,
             "freshness": self.freshness,
             "rationale": self.rationale,
-            "new_interaction_points": self.new_interaction_points,
+            "interaction_points": self.interaction_points,
         }
 
     @classmethod
@@ -178,7 +178,7 @@ class SkillPlanDiagnostics:
             freshness_notes=data.get("freshness_notes") or [],
             freshness=data.get("freshness") or {},
             rationale=data.get("rationale") or "",
-            new_interaction_points=data.get("new_interaction_points") or [],
+            interaction_points=data.get("interaction_points") or [],
         )
 
 

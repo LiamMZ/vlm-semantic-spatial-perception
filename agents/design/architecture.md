@@ -33,6 +33,7 @@ SkillDecomposer.plan(...) → SkillPlan → PrimitiveExecutor.execute_plan(...)
 - Prompts: `config/prompts_config.yaml` (perception), `config/skill_decomposer_prompts.yaml` (primitive planning). Keep them aligned with `agents/design/prompts_configuration.md`.
 - Primitive catalog: `config/primitive_descriptions.md` must mirror callable signatures in `src/kinematics/xarm_curobo_interface.py` and stay in sync with `PRIMITIVE_LIBRARY`.
 - Snapshot helpers: `src/planning/utils/snapshot_utils.py` resolve color/depth/intrinsics for a snapshot ID referenced in the registry or plan.
+- Logging: use `configure_logging` (`src/utils/logging_utils.py`) to route `TaskOrchestrator`/`RealSenseCamera` logs into UI callbacks (e.g., the Textual demo) instead of redirecting stdout.
 
 ## Example Orchestration + Primitive Plan
 ```python
@@ -61,7 +62,7 @@ async def main():
     plan = decomposer.plan("pick", {"object_id": "black_folded_fabric"})
 
     executor = PrimitiveExecutor(
-        planner=None,  # inject CuRoboMotionPlanner(...) to execute on hardware
+        primitives=None,  # inject CuRoboMotionPlanner(...) to execute on hardware
         perception_pool_dir=cfg.state_dir / "perception_pool",
     )
     result = executor.execute_plan(plan, world, dry_run=True)

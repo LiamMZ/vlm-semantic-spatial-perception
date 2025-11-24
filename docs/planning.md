@@ -11,7 +11,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 - `task_state_monitor.py` – gates exploration vs. plan readiness (`TaskState.PLAN_AND_EXECUTE`).
 - `task_orchestrator.py` – orchestrates perception, PDDL maintenance, snapshots, and world-state export.
 - `primitives/skill_decomposer.py` – LLM-backed decomposition of symbolic actions to primitives; attaches latest snapshot bytes and registry slices.
-- `primitives/skill_plan_types.py` – `PrimitiveCall`, `SkillPlan`, validators, and registry hashing for cache keys.
+- `primitives/skill_plan_types.py` – `PrimitiveCall`, `SkillPlan`, validators, and registry hashing for plan freshness tracking.
 - `primitives/primitive_executor.py` – translates helper fields (e.g., `target_pixel_yx`) into metric targets using depth/intrinsics from the perception pool and optionally drives `CuRoboMotionPlanner`.
 - `planning/utils/snapshot_utils.py` – loads color/depth/intrinsics for a snapshot ID from `perception_pool/index.json`.
 
@@ -20,7 +20,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 2. **Continuous updates**: `ContinuousObjectTracker` feeds detections; `update_from_observations(...)` keeps the domain and registry fresh.
 3. **Gating**: `TaskStateMonitor.determine_state()` sets `READY_FOR_PLANNING` once predicates/objects meet `min_observations`.
 4. **PDDL outputs**: `TaskOrchestrator.generate_pddl_files()` writes domain/problem under `state_dir/pddl/`.
-5. **Primitive planning** (optional): `SkillDecomposer.plan(action_name, parameters, orchestrator=...)` pulls the latest registry + snapshot, uses `config/primitive_descriptions.md` and `config/skill_decomposer_prompts.yaml`, and validates against `PRIMITIVE_LIBRARY`.
+5. **Primitive planning** (optional): `SkillDecomposer.plan(action_name, parameters, orchestrator=...)` pulls the latest registry + snapshot, uses `config/primitive_descriptions.md` and `config/skill_decomposer_prompts.yaml`, and validates against `PRIMITIVE_LIBRARY`. The decomposer reads interaction points from the latest snapshot detections (`perception_pool/snapshots/<id>/detections.json`), merges them into the working registry view, and passes their normalized `[y, x]` coordinates into the prompt; the LLM is instructed to reuse those points (leaving `interaction_points` empty) and only emit new affordance+point entries when choosing a novel location.
 6. **Execution/translation**: `PrimitiveExecutor.execute_plan(...)` back-projects helper pixels to 3D using the perception pool and calls the motion planner (or dry-runs).
 
 ## Skill Decomposition + Execution (code-backed)
@@ -48,7 +48,7 @@ plan = decomposer.plan(
 
 # Translate (and optionally execute) against the perception pool on disk
 executor = PrimitiveExecutor(
-    planner=None,  # inject CuRoboMotionPlanner(...) to execute on hardware
+    primitives=None,  # inject CuRoboMotionPlanner(...) to execute on hardware
     perception_pool_dir=Path("outputs/orchestrator_state/perception_pool"),
 )
 result = executor.execute_plan(plan, world_state, dry_run=True)

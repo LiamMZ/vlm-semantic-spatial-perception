@@ -9,7 +9,6 @@ primitive library before being returned to the caller.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from pathlib import Path
@@ -19,6 +18,7 @@ import yaml
 from google import genai
 from google.genai import types
 
+from src.perception.utils import pixel_to_normalized
 from src.primitives.skill_plan_types import (
     PrimitiveCall,
     SkillPlan,
@@ -30,6 +30,8 @@ from src.planning.utils.snapshot_utils import SnapshotArtifacts, SnapshotCache, 
 
 # Default prompts config path (all prompt text lives in YAML)
 DEFAULT_PROMPTS_PATH = Path(__file__).resolve().parents[2] / "config" / "skill_decomposer_prompts.yaml"
+DEFAULT_PRIMITIVE_CATALOG_PATH = Path(__file__).resolve().parents[2] / "config" / "primitive_descriptions.md"
+
 
 class SkillDecomposer:
     """LLM-backed decomposer that maps symbolic actions to executable primitives."""
@@ -41,19 +43,15 @@ class SkillDecomposer:
         orchestrator: Optional[TaskOrchestrator] = None,
         primitive_catalog_path: Optional[Path] = None,
         prompts_config_path: Optional[Path] = None,
-        cache_enabled: bool = True,
         client: Optional[genai.Client] = None,
+        llm_config_kwargs: Optional[Dict[str, Any]] = None,
     ):
-        self.model_name = model_name or "gemini-robotics-er-1.5-preview"
+        self.model_name = model_name
         self.client = client or genai.Client(api_key=api_key)
         self.orchestrator = orchestrator
-        self.cache_enabled = cache_enabled
-        self._plan_cache: Dict[str, SkillPlan] = {}
 
         root = Path(__file__).resolve().parents[2]
-        default_catalog = root / "config" / "primitive_descriptions.md"
-        self.primitive_catalog_path = Path(primitive_catalog_path or default_catalog)
-        self._catalog_cache: Tuple[float, str] = (0.0, "")
+        self.primitive_catalog_path = Path(primitive_catalog_path or DEFAULT_PRIMITIVE_CATALOG_PATH)
         self.prompts_config_path = Path(prompts_config_path or DEFAULT_PROMPTS_PATH)
         self._prompts_cache: Tuple[float, Optional[Dict[str, Any]]] = (0.0, None)
         self._snapshot_cache = SnapshotCache()
@@ -69,6 +67,14 @@ class SkillDecomposer:
         else:
             self._perception_pool_dir = Path(self._state_dir) / "perception_pool"
 
+        default_llm_config = {
+            "top_p": 0.8,
+            "max_output_tokens": 4096,
+            "response_mime_type": "application/json",
+            "thinking_config": types.ThinkingConfig(thinking_budget=-1),
+        }
+        self.llm_config_kwargs = {**default_llm_config, **(llm_config_kwargs or {})}
+
     # --------------------------------------------------------------------- #
     # Public API
     # --------------------------------------------------------------------- #
@@ -77,7 +83,6 @@ class SkillDecomposer:
         action_name: str,
         parameters: Dict[str, Any],
         world_hint: Optional[Dict[str, Any]] = None,
-        use_cache: bool = True,
         temperature: float = 0.1,
     ) -> SkillPlan:
         """
@@ -87,7 +92,6 @@ class SkillDecomposer:
             action_name: Symbolic action name (e.g., "pick", "place").
             parameters: Action parameters (object ids, target poses, etc.).
             world_hint: Optional world slice override (registry, snapshots).
-            use_cache: Reuse cached plan when registry hash matches.
             temperature: LLM temperature for Gemini.
 
         Returns:
@@ -96,11 +100,7 @@ class SkillDecomposer:
         world_state = self._prepare_world_state(world_hint, parameters)
         registry_hash = compute_registry_hash(world_state.get("registry", {}))
 
-        cache_key = self._make_cache_key(action_name, parameters, registry_hash)
-        if self.cache_enabled and use_cache and cache_key in self._plan_cache:
-            return self._plan_cache[cache_key]
-
-        catalog_text = self._load_primitive_catalog()
+        catalog_text = self.primitive_catalog_path.read_text()
         snapshot_artifacts = load_snapshot_artifacts(
             world_state, self._perception_pool_dir, cache=self._snapshot_cache
         )
@@ -126,9 +126,6 @@ class SkillDecomposer:
         )
         plan.source_snapshot_id = snapshot_artifacts.snapshot_id
         self._post_process_plan(plan, world_state, snapshot_artifacts)
-
-        if self.cache_enabled:
-            self._plan_cache[cache_key] = plan
 
         return plan
 
@@ -177,9 +174,27 @@ class SkillDecomposer:
             if isinstance(ts, (int, float)):
                 obj["staleness_seconds"] = max(0.0, now - ts)
 
+        snapshot_id = world_state.get("last_snapshot_id")
+        world_state["latest_detections"] = self._load_snapshot_detections(snapshot_id)
+        detection_map = {d.get("object_id"): d for d in world_state["latest_detections"]}
+        merged_objects: List[Dict[str, Any]] = []
+        for obj in registry.get("objects", []):
+            detection = detection_map.get(obj.get("object_id")) or {}
+            merged = dict(obj)
+            if detection:
+                merged.setdefault("interaction_points", detection.get("interaction_points"))
+                merged.setdefault("latest_observation", snapshot_id)
+                if detection.get("bounding_box_2d") is not None:
+                    merged.setdefault("latest_bounding_box_2d", detection.get("bounding_box_2d"))
+                if detection.get("position_2d") is not None:
+                    merged.setdefault("latest_position_2d", detection.get("position_2d"))
+                if detection.get("position_3d") is not None:
+                    merged.setdefault("latest_position_3d", detection.get("position_3d"))
+            merged_objects.append(merged)
+        registry["objects"] = merged_objects
         world_state["registry"] = registry
         world_state["relevant_objects"] = self._filter_relevant_objects(
-            objects, parameters=parameters
+            merged_objects, parameters=parameters
         )
         return world_state
 
@@ -216,22 +231,6 @@ class SkillDecomposer:
     # --------------------------------------------------------------------- #
     # Prompt assembly and LLM call
     # --------------------------------------------------------------------- #
-    def _load_primitive_catalog(self) -> str:
-        """Load primitive docs from disk with a simple mtime cache."""
-        path = self.primitive_catalog_path
-        try:
-            mtime = path.stat().st_mtime
-        except FileNotFoundError:
-            return ""
-
-        cached_mtime, cached_text = self._catalog_cache
-        if mtime == cached_mtime and cached_text:
-            return cached_text
-
-        text = path.read_text()
-        self._catalog_cache = (mtime, text)
-        return text
-
     def _build_prompt(
         self,
         action_name: str,
@@ -246,22 +245,41 @@ class SkillDecomposer:
         """
         registry = world_state.get("registry", {})
         relevant = world_state.get("relevant_objects") or registry.get("objects", [])
+        detection_map = {
+            det.get("object_id"): det for det in world_state.get("latest_detections") or []
+        }
+        color_shape = snapshot_artifacts.color_shape
         perception_context = self._format_perception_context(world_state, snapshot_artifacts)
 
         def _format_obj(obj: Dict[str, Any]) -> str:
+            detection = detection_map.get(obj.get("object_id")) or {}
             affordances = ", ".join(obj.get("affordances", []))
-            i_points = obj.get("interaction_points", {}) or {}
-            ip_short = ", ".join(
-                f"{k}@{v.get('snapshot_id', obj.get('latest_observation'))}"
-                for k, v in i_points.items()
-            )
+            i_points = detection.get("interaction_points") or obj.get("interaction_points") or {}
+            ip_entries: List[str] = []
+            for name, point in sorted(i_points.items()):
+                snap = point.get("snapshot_id") or detection.get("snapshot_id") or obj.get("latest_observation")
+                norm_yx = None
+                pos2d = point.get("position_2d")
+                if isinstance(pos2d, (list, tuple)) and len(pos2d) >= 2:
+                    # position_2d from perception is already normalized [x, y]; convert to [y, x] for the prompt
+                    norm_yx = [float(pos2d[1]), float(pos2d[0])]
+                if norm_yx:
+                    label = (
+                        f"{name}@{snap}: yx_norm=[{norm_yx[0]:.1f}, {norm_yx[1]:.1f}]"
+                        if color_shape
+                        else f"{name}@{snap}: yx=[{norm_yx[0]}, {norm_yx[1]}]"
+                    )
+                else:
+                    label = f"{name}@{snap}"
+                ip_entries.append(label)
+            ip_short = "; ".join(ip_entries)
             stale = obj.get("staleness_seconds")
             stale_note = f"{stale:.1f}s old" if stale is not None else "freshness: unknown"
             return (
                 f"- {obj.get('object_type')} ({obj.get('object_id')}): "
                 f"affordances=[{affordances}] "
                 f"interaction_points=[{ip_short}] "
-                f"latest_snapshot={obj.get('latest_observation')} "
+                f"latest_snapshot={detection.get('snapshot_id') or obj.get('latest_observation')} "
                 f"{stale_note}"
             )
 
@@ -284,13 +302,7 @@ class SkillDecomposer:
         response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Send prompt (plus optional media) to Gemini and return raw text."""
-        config_kwargs: Dict[str, Any] = {
-            "temperature": temperature,
-            "top_p": 0.8,
-            "max_output_tokens": 4096,
-            "response_mime_type": "application/json",
-            "thinking_config": types.ThinkingConfig(thinking_budget=-1),
-        }
+        config_kwargs: Dict[str, Any] = {**self.llm_config_kwargs, "temperature": temperature}
         if response_schema:
             config_kwargs["response_json_schema"] = response_schema
 
@@ -308,6 +320,14 @@ class SkillDecomposer:
         )
         return response.text
 
+    @property
+    def llm_config_kwargs(self) -> Dict[str, Any]:
+        return self._llm_config_kwargs
+
+    @llm_config_kwargs.setter
+    def llm_config_kwargs(self, value: Dict[str, Any]) -> None:
+        self._llm_config_kwargs = dict(value) if value is not None else {}
+
     def _load_prompts_config(self) -> Dict[str, Any]:
         """Load prompt template and response schema from YAML."""
         path = self.prompts_config_path
@@ -321,12 +341,21 @@ class SkillDecomposer:
 
         template = data.get("template")
         response_schema = data.get("response_schema")
+        interaction_points = data.get("interaction_points") or {}
+        interaction_template = interaction_points.get("template")
+        interaction_response_schema = interaction_points.get("response_schema")
         if not template or not isinstance(response_schema, dict):
             raise ValueError(f"Prompt config {path} must define 'template' and 'response_schema'")
+        if not interaction_template or not isinstance(interaction_response_schema, dict):
+            raise ValueError(
+                f"Prompt config {path} must define interaction_points.template and interaction_points.response_schema"
+            )
 
         prompts = {
             "template": template,
             "response_schema": json.loads(json.dumps(response_schema)),
+            "interaction_template": interaction_template,
+            "interaction_response_schema": json.loads(json.dumps(interaction_response_schema)),
         }
         self._prompts_cache = (mtime, prompts)
         return prompts
@@ -351,7 +380,7 @@ class SkillDecomposer:
             freshness_notes=diagnostics_block.get("freshness_notes") or [],
             freshness=diagnostics_block.get("freshness", {}),
             rationale=diagnostics_block.get("rationale", ""),
-            new_interaction_points=data.get("new_interaction_points") or [],
+            interaction_points=data.get("interaction_points") or [],
         )
 
         plan = SkillPlan(
@@ -373,21 +402,9 @@ class SkillDecomposer:
         """
         objects = world_state.get("registry", {}).get("objects", [])
         indexed = {obj.get("object_id"): obj for obj in objects}
-        missing_requests: Dict[str, Dict[str, Any]] = {}
-
-        def _track_request(object_id: str, obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-            if not object_id or obj is None:
-                return {}
-            payload = missing_requests.setdefault(
-                object_id,
-                {
-                    "object": obj,
-                    "desired_affordances": set(),
-                    "needs_general_scan": False,
-                    "source_indices": set(),
-                },
-            )
-            return payload
+        detection_map = {
+            det.get("object_id"): det for det in world_state.get("latest_detections") or []
+        }
 
         for idx, primitive in enumerate(plan.primitives):
             ref_id = primitive.references.get("object_id")
@@ -399,24 +416,21 @@ class SkillDecomposer:
             ip_label = primitive.references.get("interaction_point")
             if ref_id and ip_label:
                 obj = indexed.get(ref_id, {})
-                ip = (obj.get("interaction_points") or {}).get(ip_label)
+                detection = detection_map.get(ref_id, {})
+                ip = (detection.get("interaction_points") or {}).get(ip_label)
                 if not ip:
                     plan.diagnostics.warnings.append(
                         f"[{idx}] missing interaction point '{ip_label}' on {ref_id}"
                     )
-                    payload = _track_request(ref_id, obj)
-                    if payload:
-                        payload["desired_affordances"].add(ip_label)
-                        payload["source_indices"].add(idx)
                 else:
                     primitive.metadata.setdefault("resolved_interaction_point", ip)
             if ref_id and ref_id in indexed:
                 obj = indexed[ref_id]
-                if not (obj.get("interaction_points") or {}):
-                    payload = _track_request(ref_id, obj)
-                    if payload:
-                        payload["needs_general_scan"] = True
-                        payload["source_indices"].add(idx)
+                detection = detection_map.get(ref_id, {})
+                if not (detection.get("interaction_points") or {}):
+                    plan.diagnostics.warnings.append(
+                        f"[{idx}] object '{ref_id}' has no interaction points in snapshot {detection.get('snapshot_id')}"
+                    )
 
         # Bubble object staleness into diagnostics
         for obj in world_state.get("relevant_objects", []):
@@ -425,16 +439,6 @@ class SkillDecomposer:
                 note = f"Object {obj.get('object_id')} observation is {staleness:.1f}s old"
                 plan.diagnostics.warnings.append(note)
                 plan.diagnostics.freshness_notes.append(note)
-
-        if missing_requests:
-            new_points, ip_warnings = self._synthesize_interaction_points(
-                world_state, snapshot_artifacts, missing_requests
-            )
-            if ip_warnings:
-                plan.diagnostics.warnings.extend(ip_warnings)
-            if new_points:
-                plan.diagnostics.new_interaction_points.extend(new_points)
-                self._attach_candidate_points(plan, new_points)
 
     # --------------------------------------------------------------------- #
     # Utilities
@@ -487,195 +491,20 @@ class SkillDecomposer:
             )
         ]
 
-    def _make_cache_key(
-        self, action_name: str, parameters: Dict[str, Any], registry_hash: str
-    ) -> str:
-        payload = json.dumps({"action": action_name, "parameters": parameters}, sort_keys=True)
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        return f"{action_name}:{registry_hash}:{digest}"
-
-
-    def _build_interaction_point_prompt(
-        self,
-        world_state: Dict[str, Any],
-        snapshot_artifacts: SnapshotArtifacts,
-        requests: Dict[str, Dict[str, Any]],
-    ) -> str:
+    def _load_snapshot_detections(self, snapshot_id: Optional[str]) -> List[Dict[str, Any]]:
         """
-        Build a Gemini Robotics-ER prompt asking for new affordance interaction points.
+        Load detections (including interaction points) for a snapshot to ground prompts.
         """
-        perception_context = self._format_perception_context(world_state, snapshot_artifacts)
-        snapshot_id = snapshot_artifacts.snapshot_id or world_state.get("last_snapshot_id")
-
-        request_blocks: List[str] = []
-        for object_id, payload in requests.items():
-            obj = payload.get("object") or {}
-            desired: List[str] = sorted(payload.get("desired_affordances") or [])
-            if payload.get("needs_general_scan"):
-                desired.append("any stable affordance supporting grasp/push")
-            bbox = obj.get("latest_bounding_box_2d") or obj.get("latest_position_2d")
-            existing = ", ".join((obj.get("interaction_points") or {}).keys()) or "none"
-            staleness = obj.get("staleness_seconds")
-            request_blocks.append(
-                "\n".join(
-                    [
-                        f"object_id: {object_id}",
-                        f"object_type: {obj.get('object_type')}",
-                        f"latest_snapshot: {obj.get('latest_observation')}",
-                        f"bounding_box_2d: {bbox}",
-                        f"latest_position_3d: {obj.get('latest_position_3d')}",
-                        f"existing_interaction_points: {existing}",
-                        f"requested_affordances: {desired or ['grasp']}",
-                        f"staleness_seconds: {staleness}",
-                    ]
-                )
-            )
-
-        if not request_blocks:
-            return ""
-
-        request_section = "\n".join(request_blocks)
-
-        response_schema = (
-            "{\n"
-            '  "interaction_points": [\n'
-            "    {\n"
-            '      "object_id": "id",\n'
-            '      "affordance": "grasp",\n'
-            '      "position_2d": [y, x],  # normalized 0-1000 per Gemini Robotics-ER demo\n'
-            '      "confidence": 0.0-1.0,\n'
-            '      "rationale": "why this point works"\n'
-            "    }\n"
-            "  ],\n"
-            '  "notes": ["optional warnings when object not visible"]\n'
-            "}"
-        )
-
-        header = (
-            "You are the Gemini Robotics-ER 1.5 perception assistant. "
-            "Use the attached RGB snapshot to locate precise affordance-level interaction points. "
-            "Follow the object-tracking demo format (normalized [y, x] coordinates in the 0-1000 range) "
-            "and only emit JSON that adheres to the schema below."
-        )
-
-        return (
-            f"{header}\n\n"
-            f"Snapshot id: {snapshot_id}\n"
-            f"Perception context: {perception_context}\n"
-            "Objects needing interaction points:\n"
-            f"{'-'*48}\n"
-            f"{request_section}\n"
-            f"{'-'*48}\n"
-            "Response schema:\n"
-            f"{response_schema}"
-        )
-
-    def _synthesize_interaction_points(
-        self,
-        world_state: Dict[str, Any],
-        snapshot_artifacts: SnapshotArtifacts,
-        requests: Dict[str, Dict[str, Any]],
-    ) -> Tuple[List[Dict[str, Any]], List[str]]:
-        """
-        Invoke Gemini Robotics-ER to propose new interaction points when the registry lacks them.
-        """
-        warnings: List[str] = []
-        if not requests:
-            return [], warnings
-
-        media_parts = self._build_media_parts(snapshot_artifacts)
-        if not media_parts:
-            warnings.append(
-                "No snapshot media available for affordance enrichment; "
-                "capture a snapshot to enable Gemini Robotics-ER image grounding."
-            )
-            return [], warnings
-
-        prompt = self._build_interaction_point_prompt(world_state, snapshot_artifacts, requests)
-        if not prompt:
-            return [], warnings
-
+        if not snapshot_id:
+            return []
+        det_path = Path(self._perception_pool_dir) / "snapshots" / snapshot_id / "detections.json"
+        if not det_path.exists():
+            return []
         try:
-            response_text = self._call_llm(prompt, temperature=0.0, media_parts=media_parts)
-        except Exception as exc:
-            warnings.append(f"Interaction point enrichment failed: {exc}")
-            return [], warnings
-
-        try:
-            points = self._parse_interaction_points_response(response_text)
-        except ValueError as exc:
-            warnings.append(f"Could not parse interaction point response: {exc}")
-            return [], warnings
-
-        return points, warnings
-
-    def _parse_interaction_points_response(self, response_text: str) -> List[Dict[str, Any]]:
-        """
-        Parse Gemini Robotics-ER interaction point JSON payloads.
-        """
-        try:
-            data = json.loads(response_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid JSON: {exc}") from exc
-
-        raw_points = (
-            data.get("interaction_points")
-            or data.get("new_interaction_points")
-            or data.get("points")
-            or []
-        )
-        if not isinstance(raw_points, list):
-            raise ValueError("interaction_points must be a list")
-
-        cleaned: List[Dict[str, Any]] = []
-        for entry in raw_points:
-            if not isinstance(entry, dict):
-                continue
-            object_id = entry.get("object_id")
-            affordance = entry.get("affordance") or entry.get("label")
-            if not object_id or not affordance:
-                continue
-            cleaned.append(
-                {
-                    "object_id": object_id,
-                    "affordance": affordance,
-                    "position_2d": entry.get("position_2d") or entry.get("point"),
-                    "position_3d": entry.get("position_3d"),
-                    "confidence": entry.get("confidence"),
-                    "rationale": entry.get("rationale") or entry.get("reason"),
-                    "source": entry.get("source") or "gemini_robotics_er_1_5",
-                }
-            )
-        return cleaned
-
-    def _attach_candidate_points(self, plan: SkillPlan, candidates: List[Dict[str, Any]]) -> None:
-        """
-        Thread newly proposed interaction points back into primitive metadata for executors.
-        """
-        if not candidates:
-            return
-
-        by_object: Dict[str, List[Dict[str, Any]]] = {}
-        by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for point in candidates:
-            object_id = point.get("object_id")
-            affordance = point.get("affordance")
-            if not object_id or not affordance:
-                continue
-            by_object.setdefault(object_id, []).append(point)
-            by_key[(object_id, affordance)] = point
-
-        for primitive in plan.primitives:
-            ref_id = primitive.references.get("object_id")
-            if not ref_id:
-                continue
-            ip_label = primitive.references.get("interaction_point")
-            candidate = None
-            if ip_label:
-                candidate = by_key.get((ref_id, ip_label))
-            if candidate is None:
-                obj_candidates = by_object.get(ref_id)
-                if obj_candidates:
-                    candidate = obj_candidates[0]
-            if candidate:
-                primitive.metadata.setdefault("proposed_interaction_point", candidate)
+            payload = json.loads(det_path.read_text())
+        except Exception:
+            return []
+        detections = payload.get("objects") or []
+        for det in detections:
+            det.setdefault("snapshot_id", snapshot_id)
+        return detections

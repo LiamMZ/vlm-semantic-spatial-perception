@@ -89,7 +89,7 @@ def main() -> None:
 
     execute = not args.dry_run
     executor = PrimitiveExecutor(
-        planner=_build_planner(execute, args.robot_ip),
+        primitives=_build_primitives_interface(execute, args.robot_ip),
         perception_pool_dir=world_dir / "perception_pool",
     )
     result_payload = executor.execute_plan(
@@ -115,7 +115,7 @@ def main() -> None:
         print(output_json)
 
 
-def _build_planner(execute: bool, robot_ip: Optional[str]):
+def _build_primitives_interface(execute: bool, robot_ip: Optional[str]):
     if not execute:
         return None
     from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
