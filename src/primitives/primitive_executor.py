@@ -12,9 +12,18 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.perception.utils.coordinates import compute_3d_position, normalized_to_pixel, pixel_to_normalized
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+from src.perception.utils.coordinates import compute_3d_position
 from src.primitives.skill_plan_types import PRIMITIVE_LIBRARY, PrimitiveCall, SkillPlan
 from src.planning.utils.snapshot_utils import SnapshotArtifacts, SnapshotCache, load_snapshot_artifacts
+
+
+@dataclass
+class SnapshotCameraPose:
+    position: np.ndarray
+    rotation: Rotation
 
 
 @dataclass
@@ -102,7 +111,6 @@ class PrimitiveExecutor:
             cache=self._snapshot_cache,
             snapshot_id=getattr(plan, "source_snapshot_id", None),
         )
-        warnings.extend(self._robot_pose_warnings(world_state, artifacts))
         if getattr(plan, "source_snapshot_id", None) and plan.source_snapshot_id != artifacts.snapshot_id:
             warnings.append(
                 f"Plan snapshot {plan.source_snapshot_id} missing on disk; "
@@ -121,33 +129,11 @@ class PrimitiveExecutor:
     # ------------------------------------------------------------------ #
     def _translate_plan(self, plan: SkillPlan, artifacts: SnapshotArtifacts) -> List[str]:
         warnings: List[str] = []
+        cam_pose = self._snapshot_camera_pose(artifacts)
         for primitive in plan.primitives:
             warnings.extend(self._translate_helper_parameters(primitive, artifacts))
-        return warnings
-
-    def _robot_pose_warnings(
-        self,
-        world_state: Dict[str, Any],
-        artifacts: SnapshotArtifacts,
-    ) -> List[str]:
-        """
-        Surface potential transform mismatch when replaying cached perception with a moved robot.
-        """
-        warnings: List[str] = []
-        snapshot_state = artifacts.robot_state or {}
-        live_state = world_state.get("robot_state") or {}
-        snap_joints = snapshot_state.get("joints")
-        live_joints = live_state.get("joints")
-        if snap_joints and live_joints and len(snap_joints) == len(live_joints):
-            try:
-                max_delta = max(abs(a - b) for a, b in zip(snap_joints, live_joints))
-                if max_delta > 0.1:
-                    warnings.append(
-                        f"Snapshot robot joints differ from current by up to {max_delta:.3f} rad; "
-                        "camera transform may be stale for this cached perception."
-                    )
-            except Exception:
-                pass
+            if cam_pose:
+                self._reframe_to_base(primitive, cam_pose)
         return warnings
 
     def _translate_helper_parameters(
@@ -160,7 +146,6 @@ class PrimitiveExecutor:
 
         # Prefer resolved interaction point (snapshot-grounded) when available
         rip = (primitive.metadata or {}).get("resolved_interaction_point") or {}
-        color_shape = artifacts.color_shape or (artifacts.depth.shape[:2] if artifacts.depth is not None else None)
         pos3d = rip.get("position_3d")
         if isinstance(pos3d, (list, tuple)) and len(pos3d) >= 3:
             primitive.parameters["target_position"] = [float(pos3d[0]), float(pos3d[1]), float(pos3d[2])]
@@ -169,31 +154,25 @@ class PrimitiveExecutor:
         if (
             isinstance(pos2d, (list, tuple))
             and len(pos2d) >= 2
-            and color_shape is not None
             and "target_pixel_yx" not in primitive.parameters
         ):
-            try:
-                # position_2d stored as [x, y] normalized (0-1000); convert to pixel [y, x]
-                norm_yx = [float(pos2d[1]), float(pos2d[0])]
-                pixel_yx = normalized_to_pixel(norm_yx, color_shape)
-                primitive.parameters["target_pixel_yx"] = [int(pixel_yx[0]), int(pixel_yx[1])]
-            except Exception:
-                warnings.append(f"{primitive.name}: unable to convert resolved_interaction_point.position_2d -> pixels")
+            # position_2d stored as normalized [y, x] (0-1000)
+            primitive.parameters["target_pixel_yx"] = [float(pos2d[0]), float(pos2d[1])]
 
-        helper_map: Tuple[Tuple[str, str, bool, bool], ...] = (
-            ("target_pixel_yx", "target_position", True, True),
-            ("pivot_pixel_yx", "pivot_point", False, True),
+        helper_map: Tuple[Tuple[str, str, bool], ...] = (
+            ("target_pixel_yx", "target_position", True),
+            ("pivot_pixel_yx", "pivot_point", False),
         )
-        for helper_key, target_field, apply_offset, is_pixel in helper_map:
+        for helper_key, target_field, apply_offset in helper_map:
             pixel = primitive.parameters.pop(helper_key, None)
             if pixel is None:
                 continue
             if target_field == "target_position" and seeded_target_position:
                 continue
-            point = self._back_project(pixel, artifacts, is_pixel=is_pixel)
+            point = self._back_project(pixel, artifacts)
             if point is None:
                 warnings.append(
-                    f"{primitive.name}: unable to back-project pixel {pixel} (missing depth/intrinsics)"
+                    f"{primitive.name}: unable to back-project normalized {pixel} (missing depth/intrinsics)"
                 )
                 continue
             if apply_offset:
@@ -208,23 +187,50 @@ class PrimitiveExecutor:
         self,
         pixel_yx: List[int],
         artifacts: SnapshotArtifacts,
-        *,
-        is_pixel: bool = True,
     ) -> Optional[List[float]]:
         if artifacts.depth is None or artifacts.intrinsics is None:
             return None
-        coords = pixel_yx
-        if is_pixel:
-            image_shape = artifacts.color_shape
-            if image_shape is None and artifacts.depth is not None:
-                image_shape = artifacts.depth.shape[:2]
-            if image_shape is None:
-                return None
-            coords = pixel_to_normalized((int(pixel_yx[0]), int(pixel_yx[1])), image_shape)
+        coords = [float(pixel_yx[0]), float(pixel_yx[1])]
         point = compute_3d_position(coords, artifacts.depth, artifacts.intrinsics)
         if point is None:
             return None
         return [float(point[0]), float(point[1]), float(point[2])]
+
+    def _snapshot_camera_pose(self, artifacts: SnapshotArtifacts) -> Optional[SnapshotCameraPose]:
+        """
+        Fetch camera pose for the snapshot's robot joints using the primitives driver if available.
+        """
+        joints = (artifacts.robot_state or {}).get("joints")
+        if not joints or not self.primitives:
+            return None
+        helper = getattr(self.primitives, "camera_pose_from_joints", None)
+        if not callable(helper):
+            return None
+        try:
+            pos, rot = helper(joints)
+            if pos is None or rot is None:
+                return None
+            return SnapshotCameraPose(position=np.asarray(pos, dtype=float), rotation=rot)
+        except Exception:
+            return None
+
+    def _reframe_to_base(self, primitive: PrimitiveCall, cam_pose: SnapshotCameraPose) -> None:
+        """
+        Convert camera-frame positions to base using the snapshot camera pose.
+        """
+        if primitive.frame != "camera":
+            return
+
+        for key in ("target_position", "pivot_point"):
+            pos = primitive.parameters.get(key)
+            if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+                continue
+            base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
+            primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
+
+        # Prevent downstream double transforms in CuRobo interface
+        primitive.parameters["is_camera_frame"] = False
+        primitive.frame = "base"
 
     # ------------------------------------------------------------------ #
     # Result normalization

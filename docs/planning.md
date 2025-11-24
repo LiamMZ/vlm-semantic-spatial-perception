@@ -55,7 +55,7 @@ result = executor.execute_plan(plan, world_state, dry_run=True)
 print(result.warnings)
 ```
 
-Helper fields expected from the LLM (`target_pixel_yx`, `pivot_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) are pixel `[y, x]` inputs that the executor converts to metric parameters; when `metadata.resolved_interaction_point.position_3d` is present the executor prefers that 3D point over recomputing from depth. Leave metric-only fields unset unless already known in meters.
+Helper fields expected from the LLM (`target_pixel_yx`, `pivot_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) are normalized `[y, x]` inputs (0–1000, Robotics-ER style) that the executor converts to metric parameters; when `metadata.resolved_interaction_point.position_3d` is present the executor prefers that 3D point over recomputing from depth. Leave metric-only fields unset unless already known in meters.
 
 ## Cached Plans and Replay
 - Translation and LLM plans from the pick pipeline live under `tests/artifacts/translation_pick/` and `tests/artifacts/llm_pick/`.

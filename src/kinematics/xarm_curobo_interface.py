@@ -155,6 +155,46 @@ class CuRoboMotionPlanner:
         if self.static_camera_tf is not None:
             print('Using static camera transform for pose conversions')
             print(f"Transform: \n {self.static_camera_tf}")
+
+    def camera_pose_from_joints(self, joints: List[float]) -> Optional[Tuple[np.ndarray, Rotation]]:
+        """
+        Compute camera pose (position + Rotation) for an arbitrary joint state using motion_gen kinematics.
+
+        Args:
+            joints: Joint angles in radians matching the configured robot DOF.
+
+        Returns:
+            (position, rotation) where position is np.ndarray shape (3,) and rotation is scipy Rotation,
+            or None on failure.
+        """
+        try:
+            if self.motion_gen is None or not getattr(self.motion_gen, "kinematics", None):
+                return None
+            config = torch.tensor([joints], device=self.tensor_args.device, dtype=torch.float32)
+            state = self.motion_gen.kinematics.get_state(config)
+            camera_pose = state.links_position.cpu().numpy()[0][1]  # [x, y, z]
+            camera_quat_raw = state.links_quaternion.cpu().numpy()[0][1]
+
+            if camera_quat_raw.shape[-1] != 4:
+                return None
+
+            # Reorder to [x, y, z, w] to match convert_cam_pose_to_base
+            quat = np.array(
+                [
+                    camera_quat_raw[1],
+                    camera_quat_raw[2],
+                    camera_quat_raw[3],
+                    camera_quat_raw[0],
+                ],
+                dtype=float,
+            )
+
+            rot = Rotation.from_quat(quat)
+            camera_pose = np.asarray(camera_pose, dtype=float)
+            camera_pose[1] += 0.01  # mirror convert_cam_pose_to_base offset
+            return camera_pose, rot
+        except Exception:
+            return None
             
     def get_robot_state(self) -> Dict[str, Any]:
         """
@@ -2939,5 +2979,3 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Error configuring initial sensitivity: {e}")
             return False
-
-

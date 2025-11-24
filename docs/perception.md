@@ -46,7 +46,7 @@ asyncio.run(detect_once())
 Run the demo: `uv run python examples/object_tracker_demo.py`.
 
 ## Coordinate Conventions
-- VLM outputs normalized `[y, x]` in the `0–1000` range. Registry fields keep both the normalized points and 3D positions when depth + intrinsics are provided; helper fields handed to primitives are pixel `[y, x]` and get converted back to normalized/metric during execution.
+- VLM outputs normalized `[y, x]` in the `0–1000` range. Registry fields keep both the normalized points and 3D positions when depth + intrinsics are provided; helper fields handed to primitives are normalized `[y, x]` and get converted back to metric during execution.
 - `compute_3d_position(...)` back-projects normalized coordinates using intrinsics and a depth frame.
 - Perception and primitives share this convention: the executor back-projects helper fields like `target_pixel_yx` from pixel `[y, x]` inputs using the snapshot depth/intrinsics.
 

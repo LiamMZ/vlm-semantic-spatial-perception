@@ -69,8 +69,8 @@ def _cloth_interaction(world_state: dict) -> dict:
 def _mock_llm_response(world_state: dict) -> str:
     """LLM stub grounded in fixture data; returns cloth pick plan JSON."""
     cloth = _cloth_interaction(world_state)
-    # position_2d is stored as [x, y]; executor helper expects pixel_yx
-    target_pixel_yx = [cloth["position_2d"][1], cloth["position_2d"][0]]
+    # position_2d is stored as normalized [y, x]; executor helper expects the same
+    target_pixel_yx = cloth["position_2d"]
     return json.dumps(
         {
             "primitives": [
