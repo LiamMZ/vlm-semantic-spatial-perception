@@ -14,12 +14,14 @@ from typing import Dict
 from unittest.mock import patch
 
 import pytest
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.primitives import PrimitiveExecutor, SkillDecomposer  # noqa: E402
+from src.perception.utils.coordinates import compute_3d_position, pixel_to_normalized  # noqa: E402
 
 
 FIXTURE_DIR = Path("tests/assets/continuous_pick_fixture")
@@ -178,6 +180,11 @@ def test_pick_plan_translates_to_xarm_calls(action_parameters):
     assert logged[0]["method"] == "move_to_pose_with_preparation"
     assert "target_position" in logged[0]["parameters"]
     assert len(logged[0]["parameters"]["target_position"]) == 3
+    # Target position should align with the resolved interaction point 3D from detections
+    cloth = _cloth_interaction(world_state)
+    assert logged[0]["parameters"]["target_position"] == pytest.approx(
+        cloth["position_3d"], rel=1e-5, abs=1e-5
+    )
     assert all(
         primitive.references.get("object_id") == "black_fabric_garment"
         for primitive in plan.primitives

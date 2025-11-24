@@ -18,7 +18,7 @@ import yaml
 from google import genai
 from google.genai import types
 
-from src.perception.utils import pixel_to_normalized
+from src.perception.utils import normalized_to_pixel, pixel_to_normalized
 from src.primitives.skill_plan_types import (
     PrimitiveCall,
     SkillPlan,
@@ -259,16 +259,20 @@ class SkillDecomposer:
             for name, point in sorted(i_points.items()):
                 snap = point.get("snapshot_id") or detection.get("snapshot_id") or obj.get("latest_observation")
                 norm_yx = None
+                pixel_yx = None
                 pos2d = point.get("position_2d")
                 if isinstance(pos2d, (list, tuple)) and len(pos2d) >= 2:
-                    # position_2d from perception is already normalized [x, y]; convert to [y, x] for the prompt
+                    # position_2d from perception is normalized [x, y]; convert to [y, x]
                     norm_yx = [float(pos2d[1]), float(pos2d[0])]
-                if norm_yx:
-                    label = (
-                        f"{name}@{snap}: yx_norm=[{norm_yx[0]:.1f}, {norm_yx[1]:.1f}]"
-                        if color_shape
-                        else f"{name}@{snap}: yx=[{norm_yx[0]}, {norm_yx[1]}]"
-                    )
+                    if color_shape:
+                        try:
+                            pixel_yx = normalized_to_pixel(norm_yx, color_shape)
+                        except Exception:
+                            pixel_yx = None
+                if pixel_yx:
+                    label = f"{name}@{snap}: yx_px=[{pixel_yx[0]}, {pixel_yx[1]}]; yx_norm=[{norm_yx[0]:.1f}, {norm_yx[1]:.1f}]"
+                elif norm_yx:
+                    label = f"{name}@{snap}: yx_norm=[{norm_yx[0]:.1f}, {norm_yx[1]:.1f}]"
                 else:
                     label = f"{name}@{snap}"
                 ip_entries.append(label)

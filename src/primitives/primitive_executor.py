@@ -1,9 +1,9 @@
 """
 Primitive executor that translates Gemini-friendly parameters before calling CuRobo primitives.
 
-LLM outputs reference image-grounded cues (normalized [y, x] pixels, normals, standoffs).
-This executor back-projects those cues into metric coordinates using the latest snapshot depth
-and camera intrinsics, validates the plan, and optionally drives the configured motion planner.
+LLM outputs reference image-grounded cues (pixel [y, x] pointers, normals, standoffs).
+This executor back-projects those cues into metric coordinates using the latest snapshot depth and
+camera intrinsics, validates the plan, and optionally drives the configured motion planner.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.perception.utils.coordinates import compute_3d_position
+from src.perception.utils.coordinates import compute_3d_position, normalized_to_pixel, pixel_to_normalized
 from src.primitives.skill_plan_types import PRIMITIVE_LIBRARY, PrimitiveCall, SkillPlan
 from src.planning.utils.snapshot_utils import SnapshotArtifacts, SnapshotCache, load_snapshot_artifacts
 
@@ -156,15 +156,41 @@ class PrimitiveExecutor:
         artifacts: SnapshotArtifacts,
     ) -> List[str]:
         warnings: List[str] = []
-        helper_map: Tuple[Tuple[str, str, bool], ...] = (
-            ("target_pixel_yx", "target_position", True),
-            ("pivot_pixel_yx", "pivot_point", False),
+        seeded_target_position = False
+
+        # Prefer resolved interaction point (snapshot-grounded) when available
+        rip = (primitive.metadata or {}).get("resolved_interaction_point") or {}
+        color_shape = artifacts.color_shape or (artifacts.depth.shape[:2] if artifacts.depth is not None else None)
+        pos3d = rip.get("position_3d")
+        if isinstance(pos3d, (list, tuple)) and len(pos3d) >= 3:
+            primitive.parameters["target_position"] = [float(pos3d[0]), float(pos3d[1]), float(pos3d[2])]
+            seeded_target_position = True
+        pos2d = rip.get("position_2d")
+        if (
+            isinstance(pos2d, (list, tuple))
+            and len(pos2d) >= 2
+            and color_shape is not None
+            and "target_pixel_yx" not in primitive.parameters
+        ):
+            try:
+                # position_2d stored as [x, y] normalized (0-1000); convert to pixel [y, x]
+                norm_yx = [float(pos2d[1]), float(pos2d[0])]
+                pixel_yx = normalized_to_pixel(norm_yx, color_shape)
+                primitive.parameters["target_pixel_yx"] = [int(pixel_yx[0]), int(pixel_yx[1])]
+            except Exception:
+                warnings.append(f"{primitive.name}: unable to convert resolved_interaction_point.position_2d -> pixels")
+
+        helper_map: Tuple[Tuple[str, str, bool, bool], ...] = (
+            ("target_pixel_yx", "target_position", True, True),
+            ("pivot_pixel_yx", "pivot_point", False, True),
         )
-        for helper_key, target_field, apply_offset in helper_map:
-            pixel = primitive.parameters.get(helper_key)
+        for helper_key, target_field, apply_offset, is_pixel in helper_map:
+            pixel = primitive.parameters.pop(helper_key, None)
             if pixel is None:
                 continue
-            point = self._back_project(pixel, artifacts)
+            if target_field == "target_position" and seeded_target_position:
+                continue
+            point = self._back_project(pixel, artifacts, is_pixel=is_pixel)
             if point is None:
                 warnings.append(
                     f"{primitive.name}: unable to back-project pixel {pixel} (missing depth/intrinsics)"
@@ -175,7 +201,6 @@ class PrimitiveExecutor:
                 if depth_offset:
                     point = [point[0], point[1], point[2] + depth_offset]
             primitive.parameters[target_field] = point
-            primitive.parameters.pop(helper_key, None)
         primitive.parameters.pop("depth_offset_m", None)
         return warnings
 
@@ -183,10 +208,20 @@ class PrimitiveExecutor:
         self,
         pixel_yx: List[int],
         artifacts: SnapshotArtifacts,
+        *,
+        is_pixel: bool = True,
     ) -> Optional[List[float]]:
         if artifacts.depth is None or artifacts.intrinsics is None:
             return None
-        point = compute_3d_position(pixel_yx, artifacts.depth, artifacts.intrinsics)
+        coords = pixel_yx
+        if is_pixel:
+            image_shape = artifacts.color_shape
+            if image_shape is None and artifacts.depth is not None:
+                image_shape = artifacts.depth.shape[:2]
+            if image_shape is None:
+                return None
+            coords = pixel_to_normalized((int(pixel_yx[0]), int(pixel_yx[1])), image_shape)
+        point = compute_3d_position(coords, artifacts.depth, artifacts.intrinsics)
         if point is None:
             return None
         return [float(point[0]), float(point[1]), float(point[2])]
