@@ -674,3 +674,109 @@ class PDDLDomainMaintainer:
                         )
             except Exception as e:
                 print(f"⚠ Failed to parse goal predicate '{goal_pred}': {e}")
+
+    async def refine_domain_from_error(
+        self,
+        error_message: str,
+        current_domain_pddl: Optional[str] = None
+    ) -> None:
+        """
+        Refine the PDDL domain based on a planning error.
+
+        Uses the LLM to analyze the error and fix domain issues like:
+        - Predicate arity mismatches
+        - Missing predicates
+        - Action definition errors
+        - Type mismatches
+
+        Args:
+            error_message: The error message from the planner
+            current_domain_pddl: Optional current domain PDDL for context
+        """
+        if not self.llm_analyzer:
+            print("⚠ No LLM analyzer available for refinement")
+            return
+
+        print("  • Analyzing planning error...")
+
+        # Create refinement prompt
+        task_desc = self.current_task if self.current_task else 'Unknown'
+
+        refinement_prompt = f"""
+I have a PDDL planning task that failed with the following error:
+
+ERROR: {error_message}
+
+Task Description: {task_desc}
+
+Current PDDL Domain (excerpt):
+{current_domain_pddl[:2000] if current_domain_pddl else 'Not available'}
+
+Please analyze this error and identify what needs to be fixed in the PDDL domain.
+
+Common issues to check:
+1. Predicate arity mismatches - predicates used with wrong number of arguments
+2. Missing predicate definitions
+3. Action preconditions/effects using undefined or incorrectly-typed predicates
+4. Type mismatches in parameters
+
+Provide specific fixes needed. Focus on the exact error mentioned.
+"""
+
+        try:
+            # Get LLM's analysis of the error
+            response = await asyncio.to_thread(
+                self.llm_analyzer.client.generate_content,
+                refinement_prompt
+            )
+
+            analysis = response.text.strip()
+            print(f"\n  LLM Analysis:\n{analysis}\n")
+
+            # Now apply fixes based on the analysis
+            # Check if it's a predicate arity issue
+            if "arity" in error_message.lower() or "wrong number of arguments" in error_message.lower():
+                print("  • Detected predicate arity issue")
+                await self._fix_predicate_arity_from_error(error_message, analysis)
+
+            # Check if it's a missing predicate
+            elif "undefined" in error_message.lower() or "unknown predicate" in error_message.lower():
+                print("  • Detected missing predicate")
+                await self._add_missing_predicate_from_error(error_message, analysis)
+
+            # General action validation and fixing
+            else:
+                print("  • Running general action validation")
+                await self.validate_and_fix_action_predicates()
+
+        except Exception as e:
+            print(f"⚠ Error during refinement: {e}")
+
+    async def _fix_predicate_arity_from_error(
+        self,
+        error_message: str,
+        llm_analysis: str
+    ) -> None:
+        """Fix predicate arity issues based on error message."""
+        # Extract predicate name from error if possible
+        # Example error: "wrong number of arguments for predicate empty-hand..."
+
+        # Run action validation which will fix arity issues
+        fixes = await self.validate_and_fix_action_predicates()
+
+        if fixes:
+            print(f"  ✓ Applied {sum(len(v) for v in fixes.values())} predicate fixes")
+
+    async def _add_missing_predicate_from_error(
+        self,
+        error_message: str,
+        llm_analysis: str
+    ) -> None:
+        """Add missing predicates based on error message."""
+        # Extract predicate name from error message
+        # This is a placeholder - in production you'd parse the error more carefully
+
+        # For now, trigger a re-validation
+        await self.validate_and_fix_action_predicates()
+
+        print("  ✓ Re-validated predicates")

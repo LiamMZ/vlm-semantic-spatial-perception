@@ -75,6 +75,8 @@ class ObjectTracker:
         pddl_predicates: Optional[List[str]] = None,
         prompts_config_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
+        task_context: Optional[str] = None,
+        available_actions: Optional[List[Dict[str, Any]]] = None
     ):
         """
         Initialize object tracker.
@@ -90,6 +92,8 @@ class ObjectTracker:
             fast_mode: Skip detailed interaction points, only detect affordances
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
             prompts_config_path: Path to prompts config YAML file (defaults to config/prompts_config.yaml)
+            task_context: Optional task description to ground object detection (e.g., "make coffee")
+            available_actions: Optional list of available PDDL actions for context
         """
         self.logger = logger or get_structured_logger("ObjectTracker")
 
@@ -101,6 +105,10 @@ class ObjectTracker:
 
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
+
+        # Task context for grounding
+        self.task_context: Optional[str] = task_context
+        self.available_actions: List[Dict[str, Any]] = available_actions or []
         
         # Load prompts configuration
         if prompts_config_path is None:
@@ -184,9 +192,97 @@ class ObjectTracker:
             self.pddl_predicates.remove(predicate)
             self.logger.info("Removed PDDL predicate: %s", predicate)
 
+    def set_task_context(
+        self,
+        task_description: Optional[str] = None,
+        available_actions: Optional[List[Dict[str, Any]]] = None
+    ) -> None:
+        """
+        Set or update the task context for grounded object detection.
+
+        This helps the VLM understand what objects are relevant for the current task
+        and what actions can be performed on them.
+
+        Args:
+            task_description: Natural language task description (e.g., "make coffee")
+            available_actions: List of available PDDL actions with their parameters and descriptions
+
+        Example:
+            >>> tracker.set_task_context(
+            ...     task_description="make coffee",
+            ...     available_actions=[
+            ...         {"name": "fill_water", "params": ["?machine", "?source"], "description": "Fill machine with water"},
+            ...         {"name": "insert_pod", "params": ["?pod", "?machine"], "description": "Insert coffee pod"}
+            ...     ]
+            ... )
+        """
+        if task_description is not None:
+            self.task_context = task_description
+            print(f"ℹ Task context updated: \"{task_description}\"")
+
+        if available_actions is not None:
+            self.available_actions = available_actions
+            print(f"ℹ Available actions updated: {len(available_actions)} actions")
+
+    def clear_task_context(self) -> None:
+        """Clear the task context and available actions."""
+        self.task_context = None
+        self.available_actions = []
+        print("ℹ Task context cleared")
+
     def get_pddl_predicates(self) -> List[str]:
         """Get the current list of tracked PDDL predicates."""
         return self.pddl_predicates.copy()
+
+    def _format_task_context_for_detection(self) -> Tuple[str, str]:
+        """
+        Format task context for detection prompts.
+
+        Returns:
+            Tuple of (task_context_section, task_priority_note)
+        """
+        if not self.task_context:
+            return ("", "")
+
+        task_context_section = self.prompts['task_context']['detection_section_template'].format(
+            task_description=self.task_context
+        )
+
+        task_priority_note = self.prompts['task_context']['detection_priority_template'].format(
+            task_description=self.task_context
+        )
+
+        return (task_context_section, task_priority_note)
+
+    def _format_task_context_for_analysis(self) -> str:
+        """
+        Format task context for object analysis prompts.
+
+        Returns:
+            Formatted task context section
+        """
+        if not self.task_context and not self.available_actions:
+            return ""
+
+        # Format available actions
+        actions_list = ""
+        if self.available_actions:
+            actions_summary = []
+            for action in self.available_actions[:10]:  # Limit to 10 actions to avoid token overflow
+                name = action.get('name', 'unknown')
+                desc = action.get('description', '')
+                if desc:
+                    actions_summary.append(f"- {name}: {desc}")
+                else:
+                    actions_summary.append(f"- {name}")
+            actions_list = "\n       ".join(actions_summary)
+
+        task_desc = self.task_context or "General manipulation"
+
+        return self.prompts['task_context']['analysis_section_template'].format(
+            task_description=task_desc,
+            actions_list=actions_list if actions_list else "General manipulation actions"
+        )
 
     async def detect_objects(
         self,
@@ -398,6 +494,13 @@ class ObjectTracker:
             _, prompt = self._format_detection_prompt_sections(
                 self.registry.get_all_objects()
             )
+        # Format task context for detection
+        task_context_section, task_priority_note = self._format_task_context_for_detection()
+
+        prompt = self.prompts['detection']['streaming'].format(
+            task_context_section=task_context_section,
+            task_priority_note=task_priority_note
+        )
 
         try:
             response_text = await self._generate_content(
@@ -489,13 +592,17 @@ class ObjectTracker:
             pddl_section = self.prompts['pddl']['section_template'].format(pddl_list=pddl_list)
             pddl_example = self.prompts['pddl']['example_template']
 
+        # Format task context for analysis
+        task_context_section = self._format_task_context_for_analysis()
+
         if self.fast_mode:
             # Fast mode: only detect affordances and properties, no interaction points
             prompt = self.prompts['analysis']['fast_mode'].format(
                 object_name=object_name,
                 crop_note=crop_note,
                 pddl_section=pddl_section,
-                pddl_example=pddl_example
+                pddl_example=pddl_example,
+                task_context_section=task_context_section
             )
         elif cached_data:
             # Use cached affordances, only detect interaction points
@@ -511,7 +618,8 @@ class ObjectTracker:
                 object_name=object_name,
                 crop_note=crop_note,
                 pddl_section=pddl_section,
-                pddl_example=pddl_example
+                pddl_example=pddl_example,
+                task_context_section=task_context_section
             )
 
         try:

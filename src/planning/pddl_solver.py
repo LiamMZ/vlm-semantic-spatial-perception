@@ -140,9 +140,9 @@ class PDDLSolver:
     def _select_best_backend(self) -> SolverBackend:
         """Select best available backend (preference order)."""
         preference_order = [
+            SolverBackend.PYPERPLAN,                # Pure Python, no permissions needed
             SolverBackend.FAST_DOWNWARD_APPTAINER,  # Fastest, no overhead
             SolverBackend.FAST_DOWNWARD_DOCKER,     # Fast, some overhead
-            SolverBackend.PYPERPLAN,                # Fallback
         ]
 
         for backend in preference_order:
