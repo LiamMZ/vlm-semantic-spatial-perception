@@ -212,8 +212,7 @@ class TaskOrchestrator:
             fast_mode=self.config.fast_mode,
             update_interval=self.config.update_interval,
             on_detection_complete=self._on_detection_callback,
-            scene_change_threshold=self.config.scene_change_threshold,
-            enable_scene_change_detection=self.config.enable_scene_change_detection
+            logger=self.logger.getChild("ObjectTracker"),
         )
 
         # Set frame provider
@@ -316,7 +315,7 @@ class TaskOrchestrator:
         # Seed perception with predicates
         if self.tracker:
             self.logger.info("  • Configuring perception with %s predicates...", len(self.task_analysis.relevant_predicates))
-            self.tracker.tracker.set_pddl_predicates(self.task_analysis.relevant_predicates)
+            self.tracker.set_pddl_predicates(self.task_analysis.relevant_predicates)
 
         self.logger.info("%s", "=" * 70)
 
@@ -868,8 +867,8 @@ class TaskOrchestrator:
             }
 
         # Add registry stats (from tracker's registry)
-        if self.tracker and self.tracker.tracker:
-            registry = self.tracker.tracker.registry
+        if self.tracker:
+            registry = self.tracker.registry
             status["registry"] = {
                 "num_objects": len(registry),
                 "object_types": list(set(obj.object_type for obj in registry.get_all_objects())),
@@ -910,20 +909,20 @@ class TaskOrchestrator:
 
     def get_detected_objects(self) -> List[DetectedObject]:
         """Get all detected objects from tracker's registry."""
-        if self.tracker and self.tracker.tracker:
-            return self.tracker.tracker.registry.get_all_objects()
+        if self.tracker:
+            return self.tracker.registry.get_all_objects()
         return []
 
     def get_objects_by_type(self, object_type: str) -> List[DetectedObject]:
         """Get objects of a specific type."""
-        if self.tracker and self.tracker.tracker:
-            return self.tracker.tracker.registry.get_objects_by_type(object_type)
+        if self.tracker:
+            return self.tracker.registry.get_objects_by_type(object_type)
         return []
 
     def get_objects_with_affordance(self, affordance: str) -> List[DetectedObject]:
         """Get objects with a specific affordance."""
-        if self.tracker and self.tracker.tracker:
-            return self.tracker.tracker.registry.get_objects_with_affordance(affordance)
+        if self.tracker:
+            return self.tracker.registry.get_objects_with_affordance(affordance)
         return []
     
     def get_new_objects(self) -> List[DetectedObject]:
@@ -1039,7 +1038,7 @@ class TaskOrchestrator:
         Returns:
             Dict with registry data including snapshot references
         """
-        if not self.tracker or not self.tracker.tracker:
+        if not self.tracker:
             return {"num_objects": 0, "detection_timestamp": datetime.now().isoformat(), "objects": []}
         
         # Load perception pool index to get snapshot references
@@ -1051,7 +1050,7 @@ class TaskOrchestrator:
                 snapshot_refs = pool_index.get("objects", {})
         
         # Build enhanced object entries
-        registry = self.tracker.tracker.registry
+        registry = self.tracker.registry
         objects_data = []
 
         with registry._lock:
@@ -1105,7 +1104,7 @@ class TaskOrchestrator:
 
         # Save enhanced registry with snapshot references
         registry_path = path.parent / "registry.json"
-        if self.tracker and self.tracker.tracker:
+        if self.tracker:
             enhanced_registry = self._build_enhanced_registry()
             with open(registry_path, 'w') as f:
                 json.dump(enhanced_registry, f, indent=2)
@@ -1168,9 +1167,9 @@ class TaskOrchestrator:
 
         # Load object registry into tracker's registry
         registry_path = state_data["files"]["registry"]
-        if Path(registry_path).exists() and self.tracker and self.tracker.tracker:
-            self.tracker.tracker.registry.load_from_json(registry_path)
-            self.logger.info("  • Loaded %s objects", len(self.tracker.tracker.registry))
+        if Path(registry_path).exists() and self.tracker:
+            self.tracker.registry.load_from_json(registry_path)
+            self.logger.info("  • Loaded %s objects", len(self.tracker.registry))
 
         # Load task information
         self.current_task = state_data.get("current_task")
@@ -1256,7 +1255,7 @@ class TaskOrchestrator:
 
     def __repr__(self) -> str:
         """String representation."""
-        num_objects = len(self.tracker.tracker.registry) if self.tracker and self.tracker.tracker else 0
+        num_objects = len(self.tracker.registry) if self.tracker else 0
         return (
             f"TaskOrchestrator("
             f"state={self._state.value}, "

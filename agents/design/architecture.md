@@ -4,7 +4,7 @@ Agents sit on top of the production `TaskOrchestrator` pipeline plus the primiti
 
 ## Current Stack (code-backed)
 1. **Task analysis + PDDL maintenance** – `PDDLDomainMaintainer` (`llm_task_analyzer.py`) seeds and updates `PDDLRepresentation`; `TaskStateMonitor` gates readiness.
-2. **Continuous perception** – `ContinuousObjectTracker` (prompted `ObjectTracker`) streams detections into `DetectedObjectRegistry`, honoring `scene_change_threshold` and `fast_mode`.
+2. **Continuous perception** – `ContinuousObjectTracker` (subclass of `ObjectTracker`) streams detections into `DetectedObjectRegistry` on an interval, with a simple `should_detect` hook (currently always true) and `fast_mode` for lighter calls.
 3. **State persistence + snapshots** – `TaskOrchestrator` writes `state.json`, `registry.json` (v2.0 with `observations`), PDDL outputs, and a perception pool (`color.png`, optional `depth.npz`, `intrinsics.json`, `detections.json`, `manifest.json`, optional `robot_state.json`) indexed by `perception_pool/index.json`.
 4. **World-state export** – `get_world_state_snapshot()` bundles registry + `snapshot_index` + `last_snapshot_id` + `robot_state` for downstream planners.
 5. **Primitive planning/execution** – `SkillDecomposer` (Gemini ER) + `PrimitiveExecutor` live under `src/primitives/`; they use `config/primitive_descriptions.md`, `config/skill_decomposer_prompts.yaml`, and snapshot utils to turn symbolic steps into validated primitive calls and (optionally) execute via `CuRoboMotionPlanner`.

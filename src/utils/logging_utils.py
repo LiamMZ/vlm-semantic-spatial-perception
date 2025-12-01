@@ -14,14 +14,24 @@ from typing import Callable, Optional
 class CallbackLogHandler(logging.Handler):
     """Logging handler that forwards formatted messages to a callback."""
 
-    def __init__(self, callback: Callable[[str], None], level: int = logging.NOTSET):
+    def __init__(
+        self,
+        callback: Callable[..., None],
+        level: int = logging.NOTSET,
+        *,
+        pass_record: bool = False,
+    ):
         super().__init__(level)
         self.callback = callback
+        self.pass_record = pass_record
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            self.callback(msg)
+            if self.pass_record:
+                self.callback(msg, record)
+            else:
+                self.callback(msg)
         except Exception:
             self.handleError(record)
 
@@ -44,7 +54,8 @@ def configure_logging(
     logger = logging.getLogger()
     logger.setLevel(level)
 
-    formatter = logging.Formatter("[%(levelname)s:%(name)s] %(message)s")
+    # Include filename and line number to make debugging easier.
+    formatter = logging.Formatter("[%(levelname)s:%(name)s:%(filename)s:%(lineno)d] %(message)s")
 
     if include_console and not any(
         isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stdout
@@ -69,7 +80,7 @@ def configure_logging(
             file_handler.setLevel(level)
             file_handler.setFormatter(
                 logging.Formatter(
-                    "%(asctime)s [%(levelname)s:%(name)s] %(message)s",
+                    "%(asctime)s [%(levelname)s:%(name)s:%(filename)s:%(lineno)d] %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S",
                 )
             )

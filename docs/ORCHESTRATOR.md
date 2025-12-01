@@ -43,7 +43,7 @@ asyncio.run(main())
 Or run the interactive TUI demo (representation only) via `uv run python examples/orchestrator_demo.py` to step through task analysis, continuous detection, snapshotting, and PDDL generation without issuing robot commands.
 
 ## Configuration Highlights (`config/orchestrator_config.py`)
-- Detection cadence and gating: `update_interval`, `min_observations`, `fast_mode`, `scene_change_threshold`, `enable_scene_change_detection`.
+- Detection cadence: `update_interval`, `min_observations`, `fast_mode`.
 - Persistence knobs: `state_dir`, `auto_save`, `auto_save_on_detection`, `auto_save_on_state_change`.
 - Snapshot controls: `enable_snapshots`, `snapshot_every_n_detections`, `perception_pool_dir`, `max_snapshot_count`, `depth_encoding`.
 - Robot provider: attach a duck-typed planner with `get_robot_state()` for snapshot context; if none is provided, the orchestrator attempts to attach `CuRoboMotionPlanner` by default.

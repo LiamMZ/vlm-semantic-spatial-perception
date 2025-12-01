@@ -188,7 +188,7 @@ class SimpleContinuousDemo:
                 print(f"    ... and {len(analysis.relevant_predicates) - 5} more")
 
             # Seed perception
-            self.tracker.tracker.set_pddl_predicates(analysis.relevant_predicates)
+            self.tracker.set_pddl_predicates(analysis.relevant_predicates)
 
             # Step 2: Start continuous tracking
             print(f"\n{'#'*70}")
@@ -258,9 +258,6 @@ class SimpleContinuousDemo:
             print(f"📈 Statistics:")
             print(f"  • Detection cycles: {self.cycle_count}")
             print(f"  • Total frames processed: {tracker_stats.total_frames}")
-            print(f"  • Frames with detection: {tracker_stats.total_frames - tracker_stats.skipped_frames}")
-            print(f"  • Frames skipped (no scene change): {tracker_stats.skipped_frames}")
-            print(f"  • Cache hit rate: {tracker_stats.cache_hit_rate:.1%}")
             print(f"  • Avg detection time: {tracker_stats.avg_detection_time:.2f}s")
             print(f"  • Total objects: {len(self.tracker.get_all_objects())}")
             print(f"  • Ready for planning: {'YES ✅' if self.ready_for_planning else 'NO ⚠️'}")

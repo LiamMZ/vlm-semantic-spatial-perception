@@ -287,7 +287,7 @@ class PDDLPredicateTrackingDemo:
         )
 
         # Seed tracker with predicates from PDDL (extracted by LLM)
-        self.tracker.tracker.set_pddl_predicates(self.predicates)
+        self.tracker.set_pddl_predicates(self.predicates)
 
         print(f"  ✓ Tracker seeded with {len(self.predicates)} PDDL predicates")
         print(f"    Predicates: {', '.join(self.predicates)}")
@@ -395,7 +395,7 @@ class PDDLPredicateTrackingDemo:
                 """Simulate gradual object detection."""
                 for i, obj in enumerate(simulated_objects):
                     # Add object to tracker's registry
-                    self.tracker.tracker.registry.add_or_update(obj)
+                    self.tracker.registry.add_or_update(obj)
 
                     # Trigger callback
                     await self.on_objects_detected(i + 1)
@@ -689,8 +689,8 @@ class PDDLPredicateTrackingDemo:
             if self.tracker and self.tracker.is_running():
                 await self.tracker.stop()
             # Close async client to prevent warnings
-            if self.tracker and hasattr(self.tracker.tracker, 'aclose'):
-                await self.tracker.tracker.aclose()
+            if self.tracker and hasattr(self.tracker, 'aclose'):
+                await self.tracker.aclose()
             if self.camera:
                 self.camera.stop()
             cv2.destroyAllWindows()
