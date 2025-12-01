@@ -155,6 +155,46 @@ class CuRoboMotionPlanner:
         if self.static_camera_tf is not None:
             print('Using static camera transform for pose conversions')
             print(f"Transform: \n {self.static_camera_tf}")
+
+    def camera_pose_from_joints(self, joints: List[float]) -> Optional[Tuple[np.ndarray, Rotation]]:
+        """
+        Compute camera pose (position + Rotation) for an arbitrary joint state using motion_gen kinematics.
+
+        Args:
+            joints: Joint angles in radians matching the configured robot DOF.
+
+        Returns:
+            (position, rotation) where position is np.ndarray shape (3,) and rotation is scipy Rotation,
+            or None on failure.
+        """
+        try:
+            if self.motion_gen is None or not getattr(self.motion_gen, "kinematics", None):
+                return None
+            config = torch.tensor([joints], device=self.tensor_args.device, dtype=torch.float32)
+            state = self.motion_gen.kinematics.get_state(config)
+            camera_pose = state.links_position.cpu().numpy()[0][1]  # [x, y, z]
+            camera_quat_raw = state.links_quaternion.cpu().numpy()[0][1]
+
+            if camera_quat_raw.shape[-1] != 4:
+                return None
+
+            # Reorder to [x, y, z, w] to match convert_cam_pose_to_base
+            quat = np.array(
+                [
+                    camera_quat_raw[1],
+                    camera_quat_raw[2],
+                    camera_quat_raw[3],
+                    camera_quat_raw[0],
+                ],
+                dtype=float,
+            )
+
+            rot = Rotation.from_quat(quat)
+            camera_pose = np.asarray(camera_pose, dtype=float)
+            camera_pose[1] += 0.01  # mirror convert_cam_pose_to_base offset
+            return camera_pose, rot
+        except Exception:
+            return None
             
     def get_robot_state(self) -> Dict[str, Any]:
         """
@@ -1409,11 +1449,10 @@ class CuRoboMotionPlanner:
             if is_place:
                 target_position[2] += 0.1
                 
-            if type(target_orientation) is not tuple and type(target_orientation[0]) is not float:
-                for i in range(len(target_orientation[0])):
-                    print(target_orientation)
-                    if abs(target_orientation[0][i]) < 0.001: 
-                        target_orientation[0][i] = 0.00
+            target_orientation = self._coerce_orientation_vector(target_orientation)
+            target_orientation = [
+                0.0 if abs(val) < 1e-6 else val for val in target_orientation
+            ]
             
             # Plan the motion with converted pose
             success, trajectory, dt = self.move_to_pose(
@@ -2378,6 +2417,32 @@ class CuRoboMotionPlanner:
             print(f"Error ensuring robot readiness: {e}")
             return False
 
+    def _coerce_orientation_vector(self, orientation):
+        """
+        Ensure orientation is a flat list[float] of length >= 1.
+        Handles nested lists/tuples/np arrays produced by upstream planners.
+        """
+        if orientation is None:
+            return [0.0, 1.0, 0.0, 0.0]
+
+        if isinstance(orientation, np.ndarray):
+            orientation = orientation.flatten().tolist()
+        elif isinstance(orientation, (list, tuple)):
+            if len(orientation) and isinstance(orientation[0], (list, tuple, np.ndarray)):
+                first = orientation[0]
+                orientation = (
+                    first.flatten().tolist()
+                    if isinstance(first, np.ndarray)
+                    else list(first)
+                )
+            else:
+                orientation = list(orientation)
+        else:
+            orientation = [float(orientation)]
+
+        orientation = [float(val) for val in orientation]
+        return orientation
+
 
     def _plan_arc_motion_around_pivot(
         self,
@@ -2914,5 +2979,3 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Error configuring initial sensitivity: {e}")
             return False
-
-

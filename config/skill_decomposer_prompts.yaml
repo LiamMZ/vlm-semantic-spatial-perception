@@ -1,0 +1,126 @@
+template: |
+  You are an assistive planner that converts symbolic actions
+  into xArm primitive calls. Use ONLY the primitives listed below. Keep output compact and avoid
+  speculative objects. The latest RGB snapshot (when available) is attached—express every spatial
+  reference as normalized [y, x] coordinates in the 0-1000 Robotics-ER format (top-left origin).
+
+  Primitive catalog:
+  {primitive_catalog}
+
+  Action intent:
+  - name: {action_name}
+  - parameters: {parameters}
+
+  Relevant world state:
+  {object_section}
+  Latest snapshot id: {last_snapshot_id}
+  Perception context: {perception_context}
+  Existing interaction points above include normalized [y, x] coordinates when available.
+
+  Translation contract:
+  - Use helper fields inside `parameters` (e.g., `target_pixel_yx`, `pivot_pixel_yx`,
+    `depth_offset_m`, `motion_normal`, `tcp_standoff_m`). Provide normalized [y, x] values; the
+    PrimitiveExecutor will convert these into metric arguments using depth + intrinsics right before
+    execution.
+  - Leave metric-only API fields blank unless you are certain they are already expressed in meters.
+  - If you use an existing interaction point, set `references.interaction_point` to its affordance and
+    do not add it to `interaction_points`.
+  - Only add new entries to `interaction_points` when you create a new affordance/point; include its
+    normalized [y, x] coordinates there.
+
+  Constraints:
+  - Prefer existing interaction points; add new ones only when none are suitable.
+  - New interaction points must be grounded in the attached snapshot with normalized [y, x]
+    coordinates (0-1000). The executor will back-project them into 3D.
+  - If data is stale (>90s), mention it in diagnostics.freshness_notes.
+  - Use explicit frames ("base" or "camera") and avoid unit conversions.
+  - Parameters must satisfy the schema for each primitive.
+  - Gripper control reference: call `open_gripper` whenever the task requires a fully open gripper.
+    When emitting raw gripper position values, xArm expects 0 for fully closed and about 850 for
+    fully open—keep values within [0, 850] to avoid SDK errors.
+
+response_schema:
+  type: object
+  required: ["primitives", "diagnostics"]
+  properties:
+    primitives:
+      type: array
+      description: Ordered primitive calls to execute.
+      items:
+        type: object
+        required: ["name", "frame", "parameters", "references", "metadata"]
+        properties:
+          name:
+            type: string
+            description: Primitive name from config/primitive_descriptions.md
+          frame:
+            type: string
+            enum: ["base", "camera"]
+          parameters:
+            type: object
+            description: Helper-level parameters (pixels, normals, standoffs, etc.)
+            additionalProperties: true
+            properties:
+              target_pixel_yx:
+                type: array
+                items:
+                  type: number
+              pivot_pixel_yx:
+                type: array
+                items:
+                  type: number
+              depth_offset_m:
+                type: number
+              motion_normal:
+                type: array
+                items:
+                  type: number
+              tcp_standoff_m:
+                type: number
+          references:
+            type: object
+            additionalProperties: false
+            properties:
+              object_id:
+                type: string
+              interaction_point:
+                type: string
+          metadata:
+            type: object
+            additionalProperties: true
+    assumptions:
+      type: array
+      items:
+        type: string
+    diagnostics:
+      type: object
+      required: ["rationale"]
+      properties:
+        rationale:
+          type: string
+        freshness_notes:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    interaction_points:
+      type: array
+      items:
+        type: object
+        required: ["object_id", "affordance", "position_2d"]
+        properties:
+          object_id:
+            type: string
+          affordance:
+            type: string
+          position_2d:
+            type: array
+            items:
+              type: number
+          confidence:
+            type: number
+          rationale:
+            type: string

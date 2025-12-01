@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "timestamp": 1764016583.7545078,
+  "orchestrator_state": "paused",
+  "current_task": "grab the towel",
+  "detection_count": 14,
+  "last_snapshot_id": "20251124_203623_678-011046",
+  "task_analysis": {
+    "goal_objects": [
+      "towel_1"
+    ],
+    "relevant_predicates": [
+      "is_towel",
+      "on",
+      "graspable",
+      "clear",
+      "holding",
+      "empty-hand"
+    ],
+    "estimated_steps": 1,
+    "complexity": "simple"
+  },
+  "files": {
+    "registry": "outputs/demos/20251124_153419/registry.json",
+    "domain": "outputs/demos/20251124_153419/pddl/task_execution.pddl",
+    "problem": "outputs/demos/20251124_153419/pddl/current_task.pddl",
+    "perception_pool_index": "outputs/demos/20251124_153419/perception_pool/index.json"
+  }
+}

@@ -64,3 +64,6 @@ htmlcov/
 calibration/*.yaml
 calibration/*.json
 .claude
+
+# Test artifacts
+tests/artifacts/

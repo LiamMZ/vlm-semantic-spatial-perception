@@ -1,0 +1,523 @@
+{
+  "version": "2.0",
+  "num_objects": 15,
+  "detection_timestamp": "2025-11-24T15:36:23.754055",
+  "objects": [
+    {
+      "object_type": "Nespresso coffee machine",
+      "object_id": "dark_grey_nespresso_coffee_machine",
+      "affordances": [
+        "insert_capsule",
+        "pushable",
+        "closable",
+        "pullable",
+        "dispense_liquid",
+        "graspable",
+        "supportable",
+        "openable"
+      ],
+      "properties": {
+        "color": "dark grey, black, silver",
+        "material": "plastic, metal",
+        "size": "medium",
+        "state": "upright, idle, clean"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016558.790757,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Light grey kitchen countertop",
+      "object_id": "light_grey_kitchen_countertop",
+      "affordances": [
+        "supportable"
+      ],
+      "properties": {
+        "color": "light grey",
+        "material": "laminate or stone-like",
+        "size": "large",
+        "state": "fixed, horizontal"
+      },
+      "confidence": 0.98,
+      "timestamp": 1764016545.8951247,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Black electric stove cooktop",
+      "object_id": "black_electric_stove_cooktop",
+      "affordances": [
+        "cleanable",
+        "supportable"
+      ],
+      "properties": {
+        "color": "black",
+        "material": "enamel/metal",
+        "size": "large",
+        "state": "idle",
+        "occupancy": "occupied"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016549.400575,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "stove control panel",
+      "object_id": "white_stove_control_panel",
+      "affordances": [
+        "graspable",
+        "pushable",
+        "supportable"
+      ],
+      "properties": {
+        "color": "white (panel), silver (knobs)",
+        "material": "enameled metal (panel), metal/plastic (knobs)",
+        "size": "medium",
+        "state": "clean, knobs in off/low position"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016554.161488,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "stove knob",
+      "object_id": "left_silver_stove_knob",
+      "affordances": [
+        "graspable",
+        "pushable"
+      ],
+      "properties": {
+        "color": "dark grey",
+        "material": "plastic",
+        "size": "medium",
+        "state": "set to function"
+      },
+      "confidence": 0.8,
+      "timestamp": 1764016556.9656897,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "stove knob",
+      "object_id": "right_silver_stove_knob",
+      "affordances": [
+        "selectable",
+        "graspable",
+        "turnable"
+      ],
+      "properties": {
+        "color": "silver",
+        "material": "metal",
+        "size": "small",
+        "state": "off_or_low_setting",
+        "texture": "smooth"
+      },
+      "confidence": 0.98,
+      "timestamp": 1764016548.5138834,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "electric burner",
+      "object_id": "front_left_black_electric_burner",
+      "affordances": [
+        "cleanable",
+        "supportable"
+      ],
+      "properties": {
+        "color": "metallic gray (element), black (surrounding)",
+        "material": "metal",
+        "size": "medium",
+        "state": "off, possibly dirty"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016554.9155817,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Brown paper bag",
+      "object_id": "brown_paper",
+      "affordances": [
+        "pushable",
+        "graspable",
+        "supportable",
+        "pullable",
+        "containable"
+      ],
+      "properties": {
+        "color": "brown",
+        "material": "paper",
+        "size": "medium",
+        "state": "open, containing an object, slightly crumpled"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016547.5752487,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Black fabric garment",
+      "object_id": "black_fabric_garment",
+      "affordances": [
+        "graspable",
+        "pushable",
+        "pullable"
+      ],
+      "properties": {
+        "color": "black",
+        "material": "fabric (possibly fleece or knit)",
+        "size": "medium to large garment",
+        "state": "bunched/folded, partially contained within a light brown bag"
+      },
+      "confidence": 0.9,
+      "timestamp": 1764016553.8281841,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Black metal C-clamp",
+      "object_id": "black_metal_c-clamp",
+      "affordances": [
+        "pushable",
+        "closable",
+        "pullable",
+        "graspable",
+        "supportable",
+        "openable"
+      ],
+      "properties": {
+        "color": "black and metallic",
+        "material": "metal",
+        "size": "medium",
+        "state": "clamping a bottle, stationary"
+      },
+      "confidence": 0.98,
+      "timestamp": 1764016556.530056,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "White Nespresso machine cable",
+      "object_id": "white_nespresso_machine_cable",
+      "affordances": [
+        "graspable",
+        "pushable",
+        "pullable"
+      ],
+      "properties": {
+        "color": "white",
+        "material": "plastic/rubber (insulation)",
+        "size": "medium (typical thickness for a power or data cable)",
+        "state": "curved, resting on a white surface, and possibly connected to a device (the grey object on the right) or wall. A small metallic object (possibly a key or connector) is visible near the cable."
+      },
+      "confidence": 0.85,
+      "timestamp": 1764016559.5575376,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Black coiled power cable",
+      "object_id": "black_coiled_power_cable",
+      "affordances": [
+        "graspable",
+        "pushable",
+        "pullable"
+      ],
+      "properties": {
+        "color": "black",
+        "material": "plastic/rubber insulation",
+        "size": "thin, medium length (partially visible)",
+        "state": "plugged in, partially coiled/tangled on the counter"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016549.0664525,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "White paper label on black cable",
+      "object_id": "white_paper_label_on_black_cable",
+      "affordances": [
+        "removable",
+        "readable",
+        "pushable",
+        "graspable",
+        "pullable"
+      ],
+      "properties": {
+        "color": "white",
+        "size": "small",
+        "material": "paper",
+        "state": "attached to cable, slightly crumpled"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016550.3044004,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "Dark grey wall panel",
+      "object_id": "dark_grey_wall_panel",
+      "affordances": [
+        "supportable"
+      ],
+      "properties": {
+        "color": "dark grey",
+        "material": "panel material (e.g., painted wood, drywall, laminate)",
+        "size": "large (occupies a significant background area)",
+        "state": "fixed, vertical surface"
+      },
+      "confidence": 0.9,
+      "timestamp": 1764016555.2880943,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    },
+    {
+      "object_type": "White kitchen wall",
+      "object_id": "white_kitchen_wall",
+      "affordances": [
+        "cleanable",
+        "supportable"
+      ],
+      "properties": {
+        "color": "white",
+        "material": "wall (likely painted drywall)",
+        "size": "large",
+        "state": "fixed, vertical, clean"
+      },
+      "confidence": 0.95,
+      "timestamp": 1764016547.6138878,
+      "observations": [
+        "20251124_203559_566-91c89b",
+        "20251124_203559_661-92b3e5",
+        "20251124_203601_662-1cda43",
+        "20251124_203603_663-064eaf",
+        "20251124_203605_665-290ca1",
+        "20251124_203607_667-fef36a",
+        "20251124_203609_668-db5170",
+        "20251124_203611_669-7539c9",
+        "20251124_203613_671-ee6d7b",
+        "20251124_203615_672-7ba98d",
+        "20251124_203617_674-c70b9c",
+        "20251124_203619_675-bc65b0",
+        "20251124_203621_676-6b02cc",
+        "20251124_203623_678-011046"
+      ],
+      "latest_observation": "20251124_203623_678-011046"
+    }
+  ]
+}
