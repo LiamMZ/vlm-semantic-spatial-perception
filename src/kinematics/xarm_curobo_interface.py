@@ -1099,7 +1099,6 @@ class CuRoboMotionPlanner:
         """
         if self.arm is None:
             print("Robot not connected")
-            return False
             
         try:
             with self.arm_lock:
@@ -1226,6 +1225,27 @@ class CuRoboMotionPlanner:
         )
         
         return orientation
+
+    def create_side_orientation(self):
+        """Create a quaternion for side orientation (end-effector parallel to ground)
+
+        The intent is to align the tool such that its approach axis is
+        horizontal/parallel to the ground. This uses a simple predefined
+        quaternion consistent with the class's internal quaternion ordering
+        used by `create_top_down_orientation`.
+        """
+        # Compute orientation via Euler for clarity:
+        # - Rotate +90° about Y to face forward (parallel to ground)
+        # - Rotate +180° about Z to flip the tool right-side-up
+        # Convert to quaternion in [x, y, z, w], then reorder to [w, x, y, z]
+        rot = Rotation.from_euler('y', 90, degrees=True) * Rotation.from_euler('z', 180, degrees=True)
+        qxyzw = rot.as_quat()  # [x, y, z, w]
+        orientation = [float(qxyzw[3]), float(qxyzw[0]), float(qxyzw[1]), float(qxyzw[2])]  # [w, x, y, z]
+        print(
+            f"Created side orientation: [w={orientation[0]}, x={orientation[1]}, "
+            f"y={orientation[2]}, z={orientation[3]}]"
+        )
+        return orientation
     
     
 
@@ -1276,6 +1296,7 @@ class CuRoboMotionPlanner:
         target_position,
         target_orientation=None,
         force_top_down=False,
+        preset_orientation="top_down",
         unconstrained_orientation=False,
         planning_timeout=5.0,   # Reduced from 10.0 seconds
         execute=False,
@@ -1289,9 +1310,18 @@ class CuRoboMotionPlanner:
             print("Using top-down orientation for target")
             unconstrained_orientation = False
         elif target_orientation is None:
-            target_orientation = self.create_top_down_orientation()
-            print("No orientation provided, using top-down orientation")
-            unconstrained_orientation = False
+            if preset_orientation == "top_down":
+                target_orientation = self.create_top_down_orientation()
+                print("No orientation provided, using top-down preset")
+                unconstrained_orientation = False
+            elif preset_orientation == "side":
+                target_orientation = self.create_side_orientation()
+                print("No orientation provided, using side preset")
+                # Keep unconstrained_orientation as provided, default False
+            else:
+                target_orientation = self.create_top_down_orientation()
+                print("Unknown preset, defaulting to top-down")
+                unconstrained_orientation = False
         else:
             # Validate the provided orientation
             quat_norm = np.sqrt(sum(x**2 for x in target_orientation))
@@ -1392,6 +1422,7 @@ class CuRoboMotionPlanner:
             target_position,
             target_orientation=None,
             force_top_down=False,
+            preset_orientation="top_down",
             unconstrained_orientation=False,
             planning_timeout=5.0,   # Reduced from 10.0 seconds
             execute=False,
@@ -1406,16 +1437,26 @@ class CuRoboMotionPlanner:
         ):
             """Plan movement to a target pose with improved robot preparation"""
             
+            # Apply preset orientation if none explicitly provided
+            if target_orientation is None:
+                if preset_orientation == "top_down":
+                    target_orientation = self.create_top_down_orientation()
+                    force_top_down = True
+                elif preset_orientation == "side":
+                    target_orientation = self.create_side_orientation()
+                    # Do not force top-down; keep as provided side orientation
+                    force_top_down = False
+                else:
+                    # Fallback to top_down for unknown presets
+                    target_orientation = self.create_top_down_orientation()
+                    force_top_down = True
+            
             # Convert from camera frame to base frame if needed
             if is_camera_frame:
                 print(f"Converting pose from camera frame to base frame...")
                 print(f"Original position: {target_position}, orientation: {target_orientation}")
                 
-                # Handle case where orientation is None
-                if target_orientation is None:
-                    # Use identity quaternion if no orientation specified
-                    target_orientation = [0, 1, 0, 0]  # [x, y, z, w]
-                    force_top_down = True
+                # Orientation already selected above if None; keep as-is
                 # Convert pose using the transformation
                 converted_position, converted_orientation = self.convert_cam_pose_to_base(
                     target_position, target_orientation
@@ -2979,3 +3020,5 @@ class CuRoboMotionPlanner:
         except Exception as e:
             print(f"Error configuring initial sensitivity: {e}")
             return False
+
+

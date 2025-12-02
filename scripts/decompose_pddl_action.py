@@ -29,9 +29,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.primitives import PrimitiveExecutor, SkillDecomposer  # noqa: E402
 from scripts.affordance_viz import visualize_primitives  # noqa: E402
 
-DEFAULT_WORLD = "tests/assets/continuous_pick_fixture"
+DEFAULT_WORLD = "outputs/demos/20251201_210900"
 DEFAULT_ACTION = "pick"
-DEFAULT_OBJECT_ID = "black_fabric_garment"
+DEFAULT_OBJECT_ID = "black_cloth"
 DEFAULT_INTERACTION = "graspable"
 DEFAULT_OUTPUT_DIR = "outputs/llm_decompositions"
 

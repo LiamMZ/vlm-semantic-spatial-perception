@@ -247,6 +247,7 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "planning_timeout",
             "execute",
             "speed_factor",
+            "preset_orientation",
         ),
         description="Cartesian move to pose; orientation defaults to top-down when omitted.",
         param_validators={
@@ -271,6 +272,7 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "adjust_tcp_for_surface",
             "tcp_standoff_m",
             "search_radius_m",
+            "preset_orientation",
         ),
         description="Camera-frame aware pose move with optional TCP adjustment and place offset.",
         param_validators={
