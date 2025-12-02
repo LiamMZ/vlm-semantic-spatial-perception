@@ -4,73 +4,42 @@
 # Object Detection Prompts
 detection:
   # Streaming detection prompt (preferred method)
-  streaming: |-
-    You are a robotic vision system. Identify all distinct objects in this image.
-    Attached media: the first image is the current frame; subsequent images (if any) are prior observations listed below.
-    
-    Previously detected objects (reuse these EXACT ids if visible; omit them if occluded/out of frame):
-    {existing_objects_section}
+  streaming:
+    prior: |-
+      You are a robotic vision system.  CONTEXT TURN ONLY (do NOT run detection yet).
+      Use this turn to memorize prior IDs and reference images for re-identification when the current frame arrives next.
+      Images in this turn are ONLY for context; the next turn will include the new frame for detection.
 
-    Prior observations (attached images listed below for re-identification; use them to match ids before creating new ones):
-    [
-    image: image content (see attached), id
-    objects within: list of object label, position within the image
-    ]
-    {prior_images_section}
-    
-    For each object, provide a descriptive name and bounding box.
-    
-    Return object info ONE PER LINE in this format:
-    OBJECT: red cup | [400, 280, 500, 360]
-    OBJECT: blue bottle | [200, 450, 550, 620]
-    OBJECT: white bowl | [150, 100, 300, 250]
-    END
-    
-    Important:
-    - If you see a listed object, reuse the same id as the object name with an updated bounding box
-    - Only introduce a new id when no listed object clearly matches what you see
-    - Never duplicate the same real object with multiple ids
-    - Include color or distinguishing features in names
-    - Be specific (e.g., "red cup" not just "cup")
-    - Bounding box format: [y1, x1, y2, x2] in 0-1000 normalized coordinates
-    - Each object on a new line: "OBJECT: name | [y1, x1, y2, x2]"
-    - End with "END" on its own line
-    - Focus on manipulatable objects and surfaces
+      Previously detected objects (reuse these EXACT ids if visible later; omit them if occluded/out of frame):
+      {existing_objects_section}
 
-  # Batch detection prompt (fallback)
-  batch: |-
-    You are a robotic vision system. Identify all distinct objects in this image.
-    Attached media: the first image is the current frame; subsequent images (if any) are prior observations listed below.
-    
-    Previously detected objects (reuse these EXACT ids if visible; omit them if occluded/out of frame):
-    {existing_objects_section}
-
-    Prior observations (attached images listed below for re-identification; use them to match ids before creating new ones):
-    [
-    image: image content (see attached), id
-    objects within: list of object label, position within the image
-    ]
-    {prior_images_section}
-    
-    For each object, provide a descriptive name and bounding box.
-    
-    Return ONLY a JSON array with object info:
-    {{
-      "objects": [
-        {{"name": "red cup", "bbox": [400, 280, 500, 360]}},
-        {{"name": "blue bottle", "bbox": [200, 450, 550, 620]}},
-        {{"name": "white bowl", "bbox": [150, 100, 300, 250]}}
+      Prior observations (attached images listed below for re-identification; use them to match ids before creating new ones):
+      [
+      image: image content (see attached), id
+      objects within: list of object label, position within the image
       ]
-    }}
-    
-    Important:
-    - If you see a listed object, reuse the same id as the object name with an updated bounding box
-    - Only introduce a new id when no listed object clearly matches what you see
-    - Never duplicate the same real object with multiple ids
-    - Include color or distinguishing features in names
-    - Be specific (e.g., "red cup" not just "cup")
-    - Bounding box format: [y1, x1, y2, x2] in 0-1000 normalized coordinates
-    - Focus on manipulatable objects and surfaces
+      {prior_images_section}
+
+      Wait for the next turn with the current frame before performing detection.
+
+    current: |-
+      You are a robotic vision system. CURRENT FRAME TURN: perform detection ONLY on the newly attached image below.
+      Image order for this turn: the final attached image is the current frame for detection. Ignore any earlier turns and run detection ONLY on that last image.
+
+      Previously detected objects (reuse these EXACT ids if visible; omit them if occluded/out of frame):
+      {existing_objects_section}
+
+      Instructions:
+      - Return bounding boxes as a JSON array with labels. Never return masks or code fencing.
+      - Include all objects you can identify, focusing on new objects that are not in context turn. 
+      - If the current image is similar or identical to context image with no new objects, it is fine to not return new detections
+      - If an object from previous images is visible, re-use the exact id as the "label"; otherwise create a descriptive, unique label (colors, size, position, distinctive traits).
+      - Box format: [ymin, xmin, ymax, xmax] normalized to 0-1000. All values MUST be integers.
+      - Prefer tight boxes around each object instance. The bounding box may have moved compared to last capture, so make sure to update all bounding boxes and not just return the same bounding box for existing objects.
+      - Output ONLY the JSON array in this format (no prose):
+      [
+        {{"box_2d": [ymin, xmin, ymax, xmax], "label": "<object label>"}}
+      ]
 
 # Object Analysis Prompts
 analysis:

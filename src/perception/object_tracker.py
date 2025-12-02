@@ -5,10 +5,12 @@ This module provides async object detection, affordance analysis, and interactio
 point detection for robotic manipulation tasks using Google Gen AI's native async support.
 """
 
+import copy
 import time
 import asyncio
 import logging
 import hashlib
+import threading
 from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from pathlib import Path
 from dataclasses import dataclass
@@ -142,6 +144,14 @@ class ObjectTracker:
         self._recent_observations: List[Dict[str, Any]] = []
         self._max_recent_observations = 3
 
+        # Latest detection bundle for snapshotting (protected by lock)
+        self._last_detection_lock = threading.RLock()
+        self._last_detection_objects: List[DetectedObject] = []
+        self._last_detection_png: Optional[bytes] = None
+        self._last_detection_depth: Optional[np.ndarray] = None
+        self._last_detection_intrinsics: Optional[Any] = None
+        self._last_detection_timestamp: Optional[float] = None
+
     def set_pddl_predicates(self, predicates: List[str]) -> None:
         """
         Set the list of PDDL predicates to track for objects.
@@ -228,16 +238,33 @@ class ObjectTracker:
 
         # Build detection prompts with existing objects and prior observations for re-identification
         existing_objects = self.registry.get_all_objects()
-        prior_observations = list(self._recent_observations)
+        prior_observations = self._select_latest_reid_observations(
+            existing_objects,
+            list(self._recent_observations)
+        )
         additional_image_parts = [
             types.Part.from_bytes(data=obs["image_bytes"], mime_type="image/png")
             for obs in prior_observations
             if obs.get("image_bytes")
         ]
-        streaming_prompt = self._format_detection_prompt(
+        prior_prompt, current_prompt = self._format_detection_prompt_sections(
             existing_objects,
             prior_observations=prior_observations
         )
+        prior_parts = list(additional_image_parts)
+        prior_parts.append(types.Part.from_text(text=prior_prompt))
+        current_image_part = types.Part.from_bytes(
+            data=self._encoded_image_cache,
+            mime_type="image/png"
+        )
+        current_parts = [
+            current_image_part,
+            types.Part.from_text(text=current_prompt)
+        ]
+        content_sequence = [
+            types.Content(role="user", parts=prior_parts),
+            types.Content(role="user", parts=current_parts),
+        ]
         existing_ids = {obj.object_id for obj in existing_objects}
 
         # Step 1: Stream object names and collect them
@@ -257,8 +284,10 @@ class ObjectTracker:
             pil_image,
             temperature,
             on_object_detected,
-            prompt=streaming_prompt,
-            additional_image_parts=additional_image_parts
+            prompt=current_prompt,
+            additional_image_parts=None,
+            content_parts_override=None,
+            contents_override=content_sequence
         )
 
         if not object_data_list:
@@ -312,6 +341,19 @@ class ObjectTracker:
         parallel_time = time.time() - parallel_start
         total_time = time.time() - start_time
 
+        # Cache the latest detection bundle for snapshot alignment
+        with self._last_detection_lock:
+            self._last_detection_timestamp = time.time()
+            self._last_detection_objects = [copy.deepcopy(obj) for obj in detected_objects]
+            if self._encoded_image_cache:
+                self._last_detection_png = bytes(self._encoded_image_cache)
+            else:
+                buf = io.BytesIO()
+                pil_image.save(buf, format="PNG")
+                self._last_detection_png = buf.getvalue()
+            self._last_detection_depth = np.array(depth_frame, copy=True) if depth_frame is not None else None
+            self._last_detection_intrinsics = self._coerce_intrinsics_snapshot(camera_intrinsics)
+
         # Record observation for re-identification prompts
         self._store_recent_observation(self._encoded_image_cache, detected_objects)
 
@@ -340,7 +382,9 @@ class ObjectTracker:
         temperature: Optional[float],
         callback,
         prompt: Optional[str] = None,
-        additional_image_parts: Optional[List[types.Part]] = None
+        additional_image_parts: Optional[List[types.Part]] = None,
+        content_parts_override: Optional[List[Any]] = None,
+        contents_override: Optional[List[Any]] = None
     ):
         """
         Detect names and bounding boxes with async streaming.
@@ -350,44 +394,24 @@ class ObjectTracker:
             temperature: Generation temperature
             callback: Async function called with (object_name, bounding_box)
         """
-        prompt = prompt or self._format_detection_prompt(
-            self.registry.get_all_objects()
-        )
+        if prompt is None:
+            _, prompt = self._format_detection_prompt_sections(
+                self.registry.get_all_objects()
+            )
 
         try:
-            # Use async streaming API
-            async for chunk in self._generate_content_streaming(
+            response_text = await self._generate_content(
                 image,
                 prompt,
                 temperature,
-                additional_image_parts=additional_image_parts
-            ):
-                # Parse streaming chunks for object names and bounding boxes
-                lines = chunk.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith('OBJECT:'):
-                        # Parse format: "OBJECT: name | [y1, x1, y2, x2]"
-                        content = line[7:].strip()
-                        if '|' in content:
-                            parts = content.split('|')
-                            object_name = parts[0].strip()
-                            try:
-                                import json
-                                bbox_str = parts[1].strip()
-                                bounding_box = json.loads(bbox_str)
-                                if object_name and isinstance(bounding_box, list) and len(bounding_box) == 4:
-                                    await callback(object_name, bounding_box)
-                            except:
-                                # If bbox parsing fails, use None
-                                if object_name:
-                                    await callback(object_name, None)
-                        else:
-                            # No bbox provided, use None
-                            if content:
-                                await callback(content, None)
-                    elif line == 'END':
-                        break
+                additional_image_parts=additional_image_parts,
+                content_parts=content_parts_override,
+                contents=contents_override
+            )
+
+            detections = self._parse_detection_response(response_text)
+            for object_name, bounding_box in detections[:25]:
+                await callback(object_name, bounding_box)
 
         except Exception as e:
             self.logger.exception("Streaming detection failed: %s", e)
@@ -676,6 +700,34 @@ class ObjectTracker:
         """
         return self.registry.get_objects_with_affordance(affordance)
 
+    def get_last_detection_bundle(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the most recent detection frame and objects for snapshotting.
+
+        Returns:
+            Dict with PNG bytes, depth, intrinsics, objects, and timestamp; None if unavailable.
+        """
+        with self._last_detection_lock:
+            if self._last_detection_png is None:
+                return None
+
+            depth_copy = (
+                np.array(self._last_detection_depth, copy=True)
+                if self._last_detection_depth is not None else None
+            )
+            intrinsics_copy = copy.deepcopy(self._last_detection_intrinsics)
+            objects_copy = [
+                copy.deepcopy(obj) for obj in (self._last_detection_objects or [])
+            ]
+
+            return {
+                "timestamp": self._last_detection_timestamp,
+                "color_png": self._last_detection_png,
+                "depth": depth_copy,
+                "intrinsics": intrinsics_copy,
+                "objects": objects_copy,
+            }
+
     def clear_registry(self):
         """Clear object registry (thread-safe)."""
         self.registry.clear()
@@ -792,6 +844,25 @@ class ObjectTracker:
         """Generate unique object ID (thread-safe)."""
         return self.registry.generate_unique_id(object_name, object_type)
 
+    def _coerce_intrinsics_snapshot(self, intrinsics: Any) -> Optional[Dict[str, Any]]:
+        """
+        Build a JSON-serializable intrinsics payload for snapshot persistence.
+
+        Returns a dict (or empty dict) when conversion fails, None when no intrinsics provided.
+        """
+        if intrinsics is None:
+            return None
+        try:
+            return copy.deepcopy(intrinsics.to_dict())
+        except Exception:
+            pass
+        if isinstance(intrinsics, dict):
+            return copy.deepcopy(intrinsics)
+        try:
+            return dict(intrinsics)
+        except Exception:
+            return {}
+
     def _prepare_image(self, image: Union[np.ndarray, Image.Image, str, Path]) -> Image.Image:
         """Convert image to PIL Image format."""
         if isinstance(image, (str, Path)):
@@ -803,17 +874,12 @@ class ObjectTracker:
         else:
             raise ValueError(f"Unsupported image type: {type(image)}")
 
-    def _format_detection_prompt(
+    def _build_detection_context_sections(
         self,
         existing_objects: List[DetectedObject],
         prior_observations: Optional[List[Dict[str, Any]]] = None
-    ) -> str:
-        """
-        Build a detection prompt that includes previously detected objects to encourage
-        re-identification instead of minting new IDs.
-        """
-        template = self.prompts['detection']['streaming']
-
+    ) -> tuple[str, str]:
+        """Create text sections for existing IDs and prior observations."""
         if existing_objects:
             lines = []
             for obj in existing_objects[:20]:
@@ -852,10 +918,188 @@ class ObjectTracker:
         else:
             prior_section = "None available."
 
+        return existing_section, prior_section
+
+    def _select_latest_reid_observations(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Choose the minimal set of prior observations that cover the latest sighting of
+        each known object. Newest frames are considered first so we keep only the last
+        frame that contains each object ID.
+        """
+        if not prior_observations:
+            return []
+
+        object_ids = {obj.object_id for obj in existing_objects}
+        # If registry is empty, fall back to all IDs present in observations
+        if not object_ids:
+            for obs in prior_observations:
+                for obj in obs.get("objects", []):
+                    oid = obj.get("id")
+                    if oid:
+                        object_ids.add(oid)
+
+        selected_indices: set[int] = set()
+        seen_ids: set[str] = set()
+
+        # Walk from newest to oldest, selecting the first frame that contains each ID.
+        for idx in range(len(prior_observations) - 1, -1, -1):
+            obs = prior_observations[idx]
+            includes_new_id = False
+            for obj in obs.get("objects", []):
+                oid = obj.get("id")
+                if not oid:
+                    continue
+                if object_ids and oid not in object_ids:
+                    continue
+                if oid not in seen_ids:
+                    seen_ids.add(oid)
+                    includes_new_id = True
+            if includes_new_id:
+                selected_indices.add(idx)
+            if object_ids and seen_ids.issuperset(object_ids):
+                break
+
+        if not selected_indices:
+            return []
+
+        return [prior_observations[i] for i in sorted(selected_indices)]
+
+    def _format_detection_prompt(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """
+        Build a detection prompt that includes previously detected objects to encourage
+        re-identification instead of minting new IDs.
+        """
+        existing_section, prior_section = self._build_detection_context_sections(
+            existing_objects, prior_observations
+        )
+
+        streaming = self.prompts['detection']['streaming']
+        if isinstance(streaming, dict):
+            template = streaming.get('current') or streaming.get('prior') or ""
+        else:
+            template = streaming
+
         return template.format(
             existing_objects_section=existing_section,
             prior_images_section=prior_section
         )
+
+    def _format_detection_prompt_sections(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: Optional[List[Dict[str, Any]]] = None
+    ) -> tuple[str, str]:
+        """
+        Build a two-turn detection prompt to separate reference media from the current frame.
+        Turn 1: Prior IDs/images for re-ID (no detection yet).
+        Turn 2: Current frame + detection instructions.
+        """
+        existing_section, prior_section = self._build_detection_context_sections(
+            existing_objects, prior_observations
+        )
+
+        streaming = self.prompts['detection']['streaming']
+        if isinstance(streaming, dict):
+            prior_template = streaming.get('prior') or ""
+            current_template = streaming.get('current') or ""
+        else:
+            prior_template = ""
+            current_template = streaming
+
+        prior_prompt = prior_template.format(
+            existing_objects_section=existing_section,
+            prior_images_section=prior_section
+        ).strip()
+        current_prompt = current_template.format(
+            existing_objects_section=existing_section,
+            prior_images_section=prior_section
+        ).strip()
+
+        # Ensure turn semantics are explicit even if templates are missing.
+        if not prior_prompt:
+            prior_prompt = "PRIOR CONTEXT ONLY: reuse IDs if visible. Await current frame for detection."
+        if not current_prompt:
+            current_prompt = (
+                "CURRENT FRAME: Perform detection ONLY on this image, reusing IDs from prior context."
+            )
+
+        return prior_prompt, current_prompt
+
+    def _parse_detection_response(
+        self,
+        response_text: str
+    ) -> List[Tuple[str, List[int]]]:
+        """
+        Parse detection output. Preferred format: JSON array of objects with
+        {"box_2d": [ymin, xmin, ymax, xmax], "label": "<id or name>"}.
+        Falls back to legacy line-based parsing if JSON parsing fails.
+        """
+        detections: List[Tuple[str, List[int]]] = []
+
+        def _coerce_bbox(bbox: Any) -> Optional[List[int]]:
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                return None
+            try:
+                coords = [int(round(float(v))) for v in bbox]
+                # Clamp to 0-1000 normalized range
+                return [max(0, min(1000, c)) for c in coords]
+            except (TypeError, ValueError):
+                return None
+
+        parsed = self._parse_json_response(response_text)
+        candidates: List[Any] = []
+        if isinstance(parsed, list):
+            candidates = parsed
+        elif isinstance(parsed, dict):
+            for key in ("objects", "detections", "items", "results"):
+                if key in parsed and isinstance(parsed[key], list):
+                    candidates = parsed[key]
+                    break
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") or item.get("name") or item.get("id")
+            bbox = item.get("box_2d") or item.get("bounding_box") or item.get("bbox")
+            coerced = _coerce_bbox(bbox)
+            if label and coerced:
+                detections.append((label, coerced))
+
+        if detections:
+            return detections
+
+        # Fallback: legacy line-based parse (OBJECT: name | [bbox])
+        lines = response_text.splitlines()
+        for line in lines:
+            line = line.strip()
+            if not line.startswith('OBJECT:'):
+                continue
+            content = line[7:].strip()
+            if '|' in content:
+                parts = content.split('|')
+                object_name = parts[0].strip()
+                try:
+                    bbox_str = parts[1].strip()
+                    bounding_box = json.loads(bbox_str)
+                    coerced = _coerce_bbox(bounding_box)
+                    if object_name and coerced:
+                        detections.append((object_name, coerced))
+                except Exception:
+                    if object_name:
+                        detections.append((object_name, None))
+            else:
+                if content:
+                    detections.append((content, None))
+
+        return detections
 
     def _store_recent_observation(
         self,
@@ -897,7 +1141,9 @@ class ObjectTracker:
         image: Image.Image,
         prompt: str,
         temperature: Optional[float],
-        additional_image_parts: Optional[List[types.Part]] = None
+        additional_image_parts: Optional[List[types.Part]] = None,
+        content_parts: Optional[List[Any]] = None,
+        contents: Optional[List[Any]] = None
     ) -> str:
         """
         Generate content using async streaming API and collect all chunks.
@@ -908,7 +1154,9 @@ class ObjectTracker:
             image,
             prompt,
             temperature,
-            additional_image_parts=additional_image_parts
+            additional_image_parts=additional_image_parts,
+            content_parts=content_parts,
+            contents=contents
         ):
             chunks.append(chunk)
         return ''.join(chunks)
@@ -918,7 +1166,9 @@ class ObjectTracker:
         image: Image.Image,
         prompt: str,
         temperature: Optional[float],
-        additional_image_parts: Optional[List[types.Part]] = None
+        additional_image_parts: Optional[List[types.Part]] = None,
+        content_parts: Optional[List[Any]] = None,
+        contents: Optional[List[Any]] = None
     ):
         """
         Generate content with async streaming support using client.aio.
@@ -933,10 +1183,12 @@ class ObjectTracker:
             image.save(img_byte_arr, format='PNG')
             img_bytes = img_byte_arr.getvalue()
 
-        content_parts = [types.Part.from_bytes(data=img_bytes, mime_type='image/png')]
-        if additional_image_parts:
-            content_parts.extend(additional_image_parts)
-        content_parts.append(prompt)
+        if contents is None and content_parts is None:
+            content_parts = [types.Part.from_bytes(data=img_bytes, mime_type='image/png')]
+            if additional_image_parts:
+                content_parts.extend(additional_image_parts)
+            content_parts.append(prompt)
+        payload = contents if contents is not None else content_parts
 
         temp = temperature if temperature is not None else self.default_temperature
         config = types.GenerateContentConfig(
@@ -949,7 +1201,7 @@ class ObjectTracker:
         # Use async streaming via client.aio
         stream = await self.client.aio.models.generate_content_stream(
             model=self.model_name,
-            contents=content_parts,
+            contents=payload,
             config=config
         )
         async for chunk in stream:

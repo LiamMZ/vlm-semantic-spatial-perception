@@ -13,6 +13,7 @@ This class is optimized for actual execution and provides:
 """
 
 import os
+import io
 import asyncio
 import time
 from pathlib import Path
@@ -493,11 +494,14 @@ class TaskOrchestrator:
         shortid = uuid.uuid4().hex[:6]
         return f"{ts_prefix}-{shortid}"
 
-    def _serialize_detections_for_snapshot(self) -> Tuple[Dict[str, Any], List[str]]:
+    def _serialize_detections_for_snapshot(
+        self,
+        objects: Optional[List[DetectedObject]] = None
+    ) -> Tuple[Dict[str, Any], List[str]]:
         """
-        Build detections.json payload from current registry and return (payload, object_ids).
+        Build detections.json payload from provided objects (or current registry) and return (payload, object_ids).
         """
-        objects = self.get_detected_objects()
+        objects = objects if objects is not None else self.get_detected_objects()
         object_ids: List[str] = []
         det_objects: List[Dict[str, Any]] = []
         for obj in objects:
@@ -652,9 +656,28 @@ class TaskOrchestrator:
         """
         # Serialize writes with a dedicated pool lock
         async with self._perception_pool_lock:
-            color, depth, intrinsics = self._get_camera_frames()
-            if color is None or intrinsics is None:
-                raise RuntimeError("Cannot capture snapshot: camera frames unavailable")
+            detection_bundle = self.tracker.get_last_detection_bundle() if self.tracker else None
+            bundle_color_bytes = bundle_depth = bundle_intrinsics = None
+            bundle_objects = None
+            bundle_timestamp = None
+            if detection_bundle:
+                bundle_color_bytes = detection_bundle.get("color_png")
+                bundle_depth = detection_bundle.get("depth")
+                bundle_intrinsics = detection_bundle.get("intrinsics")
+                bundle_objects = detection_bundle.get("objects")
+                bundle_timestamp = detection_bundle.get("timestamp")
+
+            color = depth = intrinsics = None
+            color_img = None
+
+            if bundle_color_bytes is not None:
+                depth = bundle_depth
+                intrinsics = bundle_intrinsics
+            else:
+                color, depth, intrinsics = self._get_camera_frames()
+                if color is None or intrinsics is None:
+                    raise RuntimeError("Cannot capture snapshot: camera frames unavailable")
+                color_img = Image.fromarray(color) if isinstance(color, np.ndarray) else color
 
             self._ensure_pool_dirs()
             pool_dir = self._get_perception_pool_dir()
@@ -663,9 +686,13 @@ class TaskOrchestrator:
             snapshot_dir.mkdir(parents=True, exist_ok=True)
 
             # Save color
-            color_img = Image.fromarray(color) if isinstance(color, np.ndarray) else color
             color_path = snapshot_dir / "color.png"
-            color_img.save(str(color_path), format="PNG")
+            if bundle_color_bytes is not None:
+                color_path.write_bytes(bundle_color_bytes)
+                if color_img is None:
+                    color_img = Image.open(io.BytesIO(bundle_color_bytes))
+            else:
+                color_img.save(str(color_path), format="PNG")
 
             # Save depth (optional)
             depth_path = None
@@ -684,7 +711,9 @@ class TaskOrchestrator:
                 json.dump(intr_dict, f, indent=2)
 
             # Save detections
-            det_payload, object_ids = self._serialize_detections_for_snapshot()
+            det_payload, object_ids = self._serialize_detections_for_snapshot(objects=bundle_objects)
+            if bundle_timestamp is not None:
+                det_payload["stamp"] = bundle_timestamp
             det_path = snapshot_dir / "detections.json"
             # Stamp snapshot_id into interaction points for grounding
             for dobj in det_payload.get("objects", []):
@@ -703,8 +732,9 @@ class TaskOrchestrator:
 
             # Manifest
             recorded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            # captured_at: fallback to recorded_at (no camera-specific timestamp available here)
             captured_at = recorded_at
+            if bundle_timestamp is not None:
+                captured_at = datetime.fromtimestamp(bundle_timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
             manifest = {
                 "snapshot_id": snapshot_id,
                 "captured_at": captured_at,

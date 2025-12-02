@@ -19,8 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -76,7 +77,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=None,
-        help="Optional output JSON path (defaults to stdout).",
+        help="Output JSON path (defaults to outputs/cached_plan_execution_log/<timestamp>.json).",
     )
     args = parser.parse_args()
 
@@ -108,11 +109,20 @@ def main() -> None:
         result["primitive_results"] = result_payload.primitive_results
 
     output_json = json.dumps(result, indent=2)
+    
+    # Determine output path: use provided path or generate timestamped default
     if args.output:
-        Path(args.output).write_text(output_json)
-        print(f"Saved executor output to {args.output}")
+        output_path = Path(args.output)
     else:
-        print(output_json)
+        # Generate timestamped filename in default directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = PROJECT_ROOT / "outputs" / "cached_plan_execution_log"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{timestamp}.json"
+    
+    # Write to file
+    output_path.write_text(output_json)
+    print(f"Saved executor output to {output_path}")
 
 
 def _build_primitives_interface(execute: bool, robot_ip: Optional[str]):
