@@ -82,6 +82,46 @@ def load_snapshot_artifacts(
     return artifacts
 
 
+def latest_snapshot_for_object_ids(
+    world_state: Dict[str, Any],
+    perception_pool_dir: Path,
+    object_ids: list[str],
+    cache: Optional[SnapshotCache] = None,
+) -> Optional[str]:
+    """
+    Pick the newest snapshot that contains any of the provided object ids.
+    Falls back to None if index data is missing or no snapshots match.
+    """
+    if not object_ids:
+        return None
+
+    index = _resolve_snapshot_index(world_state, perception_pool_dir, cache)
+    if not index:
+        return None
+
+    objects_map = index.get("objects") or {}
+    snapshots_meta = index.get("snapshots") or {}
+
+    def _snapshot_timestamp(sid: str) -> str:
+        meta = snapshots_meta.get(sid) or {}
+        return meta.get("recorded_at") or meta.get("captured_at") or ""
+
+    candidates: list[str] = []
+    for oid in object_ids:
+        if not oid:
+            continue
+        snaps = objects_map.get(oid)
+        if snaps:
+            # Assume index lists snapshots chronologically; take the last as newest.
+            candidates.append(snaps[-1])
+
+    if not candidates:
+        return None
+
+    # Pick the candidate with the latest recorded/captured timestamp (lexicographic ISO sort).
+    return max(candidates, key=_snapshot_timestamp)
+
+
 def _resolve_snapshot_index(
     world_state: Dict[str, Any],
     perception_pool_dir: Path,
