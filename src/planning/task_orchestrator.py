@@ -1067,7 +1067,8 @@ class TaskOrchestrator:
         self.logger.info("%s", "=" * 70)
 
         # Sync objects from tracker to PDDL representation
-        if self.tracker and hasattr(self.tracker, 'tracker'):
+        # Ensure the tracker has a registry before trying to read objects
+        if self.tracker and getattr(self.tracker, 'registry', None) is not None:
             self.logger.info("  • Syncing objects from tracker to PDDL...")
             registry = self.tracker.registry
             all_objects = registry.get_all_objects()
@@ -1146,7 +1147,7 @@ class TaskOrchestrator:
         timeout: Optional[float] = None,
         generate_files: bool = True,
         output_dir: Optional[Path] = None,
-        wait_for_objects: bool = False,
+        wait_for_objects: bool = True,
         max_wait_seconds: float = 30.0
     ) -> SolverResult:
         """
@@ -1349,7 +1350,7 @@ class TaskOrchestrator:
         algorithm: Optional[SearchAlgorithm] = None,
         timeout: Optional[float] = None,
         output_dir: Optional[Path] = None,
-        wait_for_objects: bool = False,
+        wait_for_objects: bool = True,
         max_wait_seconds: float = 30.0
     ) -> SolverResult:
         """
@@ -1544,7 +1545,13 @@ class TaskOrchestrator:
         # Save PDDL files
         pddl_dir = path.parent / "pddl"
         if self.pddl:
-            await self.pddl.generate_files_async(str(pddl_dir))
+            # Generate files and capture actual paths to avoid mismatches
+            try:
+                pddl_paths = await self.pddl.generate_files_async(str(pddl_dir))
+            except Exception:
+                # Fall back to attempting generation without capturing paths
+                await self.pddl.generate_files_async(str(pddl_dir))
+                pddl_paths = None
 
         # Save orchestrator state
         state_data = {
@@ -1562,8 +1569,8 @@ class TaskOrchestrator:
             } if self.task_analysis else None,
             "files": {
                 "registry": str(registry_path),
-                "domain": str(pddl_dir / f"{self.pddl.domain_name}.pddl") if self.pddl else None,
-                "problem": str(pddl_dir / f"{self.pddl.problem_name}.pddl") if self.pddl else None,
+                "domain": (pddl_paths.get("domain_path") if pddl_paths else str(pddl_dir / f"{self.pddl.domain_name}_domain.pddl")) if self.pddl else None,
+                "problem": (pddl_paths.get("problem_path") if pddl_paths else str(pddl_dir / f"{self.pddl.domain_name}_problem.pddl")) if self.pddl else None,
                 "perception_pool_index": str(self._get_pool_index_path()) if (self._get_pool_index_path().exists()) else None
             }
         }

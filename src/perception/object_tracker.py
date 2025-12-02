@@ -92,6 +92,7 @@ class ObjectTracker:
             available_actions: Optional list of available PDDL actions for context
         """
         self.logger = logger or get_structured_logger("ObjectTracker")
+        self.logger.setLevel(logging.INFO)
         self.api_key = api_key
         self.max_parallel_requests = max_parallel_requests
         self.crop_target_size = crop_target_size

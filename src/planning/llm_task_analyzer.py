@@ -222,10 +222,10 @@ IMPORTANT PDDL RULES:
 1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
 2. Preconditions and effects use ONLY variables - NO quoted strings or constants
 3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
-   - WRONG: is-empty ?machine "water_reservoir"
-   - RIGHT: water-reservoir-empty ?machine
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine)
 4. All predicates should be predicates applied to variables, not string constants
-5. Predicates should not be returned with parenthases
+5. GLOBAL Predicates should not be returned with parenthases
 
 Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
 
@@ -294,10 +294,10 @@ CRITICAL PDDL FORMATTING RULES:
    - Predicate names (e.g., graspable, empty-hand, has-water)
 3. NEVER use quoted strings or constants in preconditions/effects
 4. If referencing a component, make it a predicate:
-   - WRONG: is-empty ?machine "water_reservoir"
-   - RIGHT: water-reservoir-empty ?machine or reservoir-has-water ?machine
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
 5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
-6. Predicates should not be returned with parenthases
+6. GLOBAL Predicates should not be returned with parenthases
 
 
 IMPORTANT: Global Predicates
