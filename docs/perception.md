@@ -5,8 +5,7 @@ Perception is built around Gemini Robotics-ER prompts loaded from `config/prompt
 **Code**: `src/perception/`
 
 ## Components
-- `object_tracker.py` – async detector using Gemini (`gemini-robotics-er-1.5-preview` by default). Loads prompts from YAML, supports `fast_mode`, PDDL predicate extraction, and reuses cached affordances.
-- `continuous_tracker.py` – wraps `ObjectTracker` for background detection with `update_interval`, `scene_change_threshold`, and an `on_detection_complete` callback used by the orchestrator.
+- `object_tracker.py` – async detector using Gemini (`gemini-robotics-er-1.5-preview` by default). Loads prompts from YAML, supports `fast_mode`, PDDL predicate extraction, and reuses cached affordances. Also houses `ContinuousObjectTracker` for background detection with `update_interval` and an optional `on_detection_complete` callback used by the orchestrator.
 - `object_registry.py` – registry with snapshot-friendly fields (`observations`, `latest_observation`, `latest_position_*`); query by id/type/affordance and serialize to JSON.
 - `utils/coordinates.py` – conversions between normalized `[y, x]` (0–1000), pixels, and 3D using depth + intrinsics.
 
@@ -30,12 +29,15 @@ async def detect_once():
 
 async def continuous_loop():
     cam = RealSenseCamera(enable_depth=True, auto_start=True)
+    def frames():
+        color, depth = cam.get_aligned_frames()
+        return color, depth, cam.get_camera_intrinsics()
+
     co = ContinuousObjectTracker(
         api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
         update_interval=1.5,
-        scene_change_threshold=0.15,
     )
-    co.set_frame_provider(cam.get_aligned_frames)
+    co.set_frame_provider(frames)
     co.start()
     await asyncio.sleep(3.0)
     await co.stop()
@@ -46,9 +48,9 @@ asyncio.run(detect_once())
 Run the demo: `uv run python examples/object_tracker_demo.py`.
 
 ## Coordinate Conventions
-- VLM outputs normalized `[y, x]` in the `0–1000` range. Registry fields keep both the normalized points and 3D positions when depth + intrinsics are provided.
+- VLM outputs normalized `[y, x]` in the `0–1000` range. Registry fields keep both the normalized points and 3D positions when depth + intrinsics are provided; helper fields handed to primitives are normalized `[y, x]` and get converted back to metric during execution.
 - `compute_3d_position(...)` back-projects normalized coordinates using intrinsics and a depth frame.
-- Perception and primitives share this convention: the executor back-projects helper fields like `target_pixel_yx` from the same normalized scale.
+- Perception and primitives share this convention: the executor back-projects helper fields like `target_pixel_yx` from pixel `[y, x]` inputs using the snapshot depth/intrinsics.
 
 ## Integration Points
 - The orchestrator uses `ContinuousObjectTracker` and emits registry v2.0 plus perception pool snapshots; `get_world_state_snapshot()` bundles `registry`, `snapshot_index`, and `last_snapshot_id` for downstream planners.
@@ -58,6 +60,9 @@ Run the demo: `uv run python examples/object_tracker_demo.py`.
 ## Configuration + Environment
 - API key: `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
 - Prompts: `config/prompts_config.yaml` (keep it in sync with `agents/design/prompts_configuration.md`).
-- Tuning: `fast_mode`, `max_parallel_requests`, `crop_target_size`, `scene_change_threshold`, and `enable_affordance_caching` on the trackers.
+- Detection runs streaming-only; there is no batch prompt or fallback path.
+- Detection output uses a Gemini cookbook-style JSON array: `[{"box_2d": [ymin, xmin, ymax, xmax], "label": "<id or descriptive name>"}]` with integer coords in 0–1000, up to 25 objects. Reuse registry IDs in `label` when visible, otherwise create descriptive labels.
+- Tuning: `fast_mode`, `max_parallel_requests`, `crop_target_size`, and `enable_affordance_caching` on the trackers.
+- Detection prompt includes prior registry entries (`existing_objects_section`) and attached recent frames (`prior_images_section`) to keep IDs stable across frames. The YAML now has two templates (`detection.streaming.prior` and `.current`), and the tracker sends them as two explicit content turns: prior images + prior prompt first (context only), then a second turn with ONLY the current frame appended last; Gemini must run detection solely on that final image. Ensure object names in the registry are descriptive enough for re-identification.
 
-Keep perception snippets in docs aligned with the concrete function signatures in `src/perception/object_tracker.py` and `continuous_tracker.py`.
+Keep perception snippets in docs aligned with the concrete function signatures in `src/perception/object_tracker.py`.

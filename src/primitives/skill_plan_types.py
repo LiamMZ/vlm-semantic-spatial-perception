@@ -158,7 +158,7 @@ class SkillPlanDiagnostics:
     freshness_notes: List[str] = field(default_factory=list)
     freshness: Dict[str, float] = field(default_factory=dict)
     rationale: str = ""
-    new_interaction_points: List[Dict[str, Any]] = field(default_factory=list)
+    interaction_points: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -167,7 +167,7 @@ class SkillPlanDiagnostics:
             "freshness_notes": self.freshness_notes,
             "freshness": self.freshness,
             "rationale": self.rationale,
-            "new_interaction_points": self.new_interaction_points,
+            "interaction_points": self.interaction_points,
         }
 
     @classmethod
@@ -178,7 +178,7 @@ class SkillPlanDiagnostics:
             freshness_notes=data.get("freshness_notes") or [],
             freshness=data.get("freshness") or {},
             rationale=data.get("rationale") or "",
-            new_interaction_points=data.get("new_interaction_points") or [],
+            interaction_points=data.get("interaction_points") or [],
         )
 
 
@@ -247,6 +247,8 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "planning_timeout",
             "execute",
             "speed_factor",
+            "preset_orientation",
+            "is_place",
         ),
         description="Cartesian move to pose; orientation defaults to top-down when omitted.",
         param_validators={
@@ -271,6 +273,7 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "adjust_tcp_for_surface",
             "tcp_standoff_m",
             "search_radius_m",
+            "preset_orientation",
         ),
         description="Camera-frame aware pose move with optional TCP adjustment and place offset.",
         param_validators={

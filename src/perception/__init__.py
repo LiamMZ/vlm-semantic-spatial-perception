@@ -10,13 +10,12 @@ Gemini Robotics-ER for:
 """
 
 
-from .object_tracker import ObjectTracker
+from .object_tracker import ObjectTracker, ContinuousObjectTracker, TrackingStats
 from .object_registry import (
     DetectedObject,
     InteractionPoint,
     DetectedObjectRegistry
 )
-from .continuous_tracker import ContinuousObjectTracker, TrackingStats
 
 __all__ = [
     # Object tracking system (focused on detection & affordances)

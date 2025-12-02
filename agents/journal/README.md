@@ -29,7 +29,7 @@ This directory contains daily logs of agent experiments, bug investigations, and
 ```markdown
 ### YYYY-MM-DD-HHMM – Short descriptive title
 
-- **Owner**: AI Agent (or name) + role (e.g., "bug fix", "refactoring", "UI polish")
+- **Owner**: AI Agent (e.g. GPT-5 via Codex CLI or Composer-1 via Cursor) + role (e.g., "bug fix", "refactoring", "UI polish")
 - **Agents affected**: Which components/modules were touched
 - **Git commit(s)**: Based on <commit-hash> (use `git log -1 --format="%H"`)
 - **Context**: Brief why/background (1-2 sentences for small changes, paragraph for large)

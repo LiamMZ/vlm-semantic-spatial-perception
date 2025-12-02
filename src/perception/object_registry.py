@@ -249,24 +249,10 @@ class DetectedObjectRegistry:
                     "object_type": obj.object_type,
                     "object_id": obj.object_id,
                     "affordances": list(obj.affordances),
-                    "position_2d": obj.position_2d,
-                    "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None,
-                    "bounding_box_2d": obj.bounding_box_2d,
                     "properties": obj.properties,
                     "confidence": obj.confidence,
                     "timestamp": obj.timestamp,
-                    "interaction_points": {}
                 }
-
-                # Serialize interaction points
-                for affordance, point in obj.interaction_points.items():
-                    obj_dict["interaction_points"][affordance] = {
-                        "position_2d": point.position_2d,
-                        "position_3d": point.position_3d.tolist() if point.position_3d is not None else None,
-                        "confidence": point.confidence,
-                        "reasoning": point.reasoning,
-                        "alternative_points": point.alternative_points
-                    }
 
                 objects_data.append(obj_dict)
 
@@ -308,40 +294,14 @@ class DetectedObjectRegistry:
         loaded_objects = []
         with self._lock:
             for obj_dict in data.get("objects", []):
-                # Reconstruct interaction points
-                interaction_points = {}
-                for affordance, point_data in obj_dict.get("interaction_points", {}).items():
-                    pos_3d = point_data.get("position_3d")
-                    if pos_3d is not None:
-                        pos_3d = np.array(pos_3d, dtype=np.float32)
-
-                    interaction_points[affordance] = InteractionPoint(
-                        position_2d=point_data["position_2d"],
-                        position_3d=pos_3d,
-                        confidence=point_data.get("confidence", 0.0),
-                        reasoning=point_data.get("reasoning", ""),
-                        alternative_points=point_data.get("alternative_points", [])
-                    )
-
-                # Use latest_position_* fields
-                position_2d = obj_dict.get("latest_position_2d")
-                position_3d_raw = obj_dict.get("latest_position_3d")
-                bounding_box_2d = obj_dict.get("latest_bounding_box_2d")
-                
-                # Reconstruct position_3d
-                pos_3d = None
-                if position_3d_raw is not None:
-                    pos_3d = np.array(position_3d_raw, dtype=np.float32)
-
-                # Create DetectedObject
                 obj = DetectedObject(
                     object_type=obj_dict["object_type"],
                     object_id=obj_dict["object_id"],
                     affordances=set(obj_dict.get("affordances", [])),
-                    interaction_points=interaction_points,
-                    position_2d=position_2d,
-                    position_3d=pos_3d,
-                    bounding_box_2d=bounding_box_2d,
+                    interaction_points={},
+                    position_2d=None,
+                    position_3d=None,
+                    bounding_box_2d=None,
                     properties=obj_dict.get("properties", {}),
                     confidence=obj_dict.get("confidence", 1.0),
                     timestamp=obj_dict.get("timestamp", time.time())

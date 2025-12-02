@@ -24,6 +24,7 @@ class SnapshotArtifacts:
     depth: Optional[np.ndarray] = None
     intrinsics: Optional[Any] = None
     color_shape: Optional[Tuple[int, int]] = None
+    robot_state: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -65,6 +66,7 @@ def load_snapshot_artifacts(
     artifacts.color_bytes = _read_optional_bytes(perception_pool_dir, files.get("color"))
     artifacts.depth = _read_depth_array(perception_pool_dir, files.get("depth_npz"))
     artifacts.intrinsics = _read_intrinsics(perception_pool_dir, files.get("intrinsics"))
+    artifacts.robot_state = _read_robot_state(perception_pool_dir, files.get("robot_state"))
 
     if artifacts.color_bytes is not None and files.get("color"):
         try:
@@ -78,6 +80,46 @@ def load_snapshot_artifacts(
     if cache:
         cache.artifacts[snapshot_id] = artifacts
     return artifacts
+
+
+def latest_snapshot_for_object_ids(
+    world_state: Dict[str, Any],
+    perception_pool_dir: Path,
+    object_ids: list[str],
+    cache: Optional[SnapshotCache] = None,
+) -> Optional[str]:
+    """
+    Pick the newest snapshot that contains any of the provided object ids.
+    Falls back to None if index data is missing or no snapshots match.
+    """
+    if not object_ids:
+        return None
+
+    index = _resolve_snapshot_index(world_state, perception_pool_dir, cache)
+    if not index:
+        return None
+
+    objects_map = index.get("objects") or {}
+    snapshots_meta = index.get("snapshots") or {}
+
+    def _snapshot_timestamp(sid: str) -> str:
+        meta = snapshots_meta.get(sid) or {}
+        return meta.get("recorded_at") or meta.get("captured_at") or ""
+
+    candidates: list[str] = []
+    for oid in object_ids:
+        if not oid:
+            continue
+        snaps = objects_map.get(oid)
+        if snaps:
+            # Assume index lists snapshots chronologically; take the last as newest.
+            candidates.append(snaps[-1])
+
+    if not candidates:
+        return None
+
+    # Pick the candidate with the latest recorded/captured timestamp (lexicographic ISO sort).
+    return max(candidates, key=_snapshot_timestamp)
 
 
 def _resolve_snapshot_index(
@@ -141,3 +183,14 @@ def _read_intrinsics(perception_pool_dir: Path, relative_path: Optional[str]) ->
     except Exception:
         return None
 
+
+def _read_robot_state(perception_pool_dir: Path, relative_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not relative_path:
+        return None
+    path = Path(perception_pool_dir) / relative_path
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None

@@ -1,9 +1,9 @@
 """
 Primitive executor that translates Gemini-friendly parameters before calling CuRobo primitives.
 
-LLM outputs reference image-grounded cues (normalized [y, x] pixels, normals, standoffs).
-This executor back-projects those cues into metric coordinates using the latest snapshot depth
-and camera intrinsics, validates the plan, and optionally drives the configured motion planner.
+LLM outputs reference image-grounded cues (pixel [y, x] pointers, normals, standoffs).
+This executor back-projects those cues into metric coordinates using the latest snapshot depth and
+camera intrinsics, validates the plan, and optionally drives the configured motion planner.
 """
 
 from __future__ import annotations
@@ -12,9 +12,18 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+from scipy.spatial.transform import Rotation
+
 from src.perception.utils.coordinates import compute_3d_position
 from src.primitives.skill_plan_types import PRIMITIVE_LIBRARY, PrimitiveCall, SkillPlan
 from src.planning.utils.snapshot_utils import SnapshotArtifacts, SnapshotCache, load_snapshot_artifacts
+
+
+@dataclass
+class SnapshotCameraPose:
+    position: np.ndarray
+    rotation: Rotation
 
 
 @dataclass
@@ -28,10 +37,10 @@ class PrimitiveExecutionResult:
 
 
 class PrimitiveExecutor:
-    """Translate and execute primitive plans against the CuRobo motion planner."""
+    """Translate and execute primitive plans against the configured primitives interface."""
 
-    def __init__(self, planner: Optional[Any], perception_pool_dir: Path):
-        self.planner = planner
+    def __init__(self, primitives: Optional[Any], perception_pool_dir: Path):
+        self.primitives = primitives
         self.perception_pool_dir = Path(perception_pool_dir)
         self._snapshot_cache = SnapshotCache()
 
@@ -50,7 +59,7 @@ class PrimitiveExecutor:
         translated_plan, warnings, errors = self.prepare_plan(plan, world_state)
         if errors:
             return PrimitiveExecutionResult(executed=False, warnings=warnings, errors=errors)
-        if dry_run or self.planner is None:
+        if dry_run or self.primitives is None:
             return PrimitiveExecutionResult(executed=False, warnings=warnings)
 
         primitive_results: List[Any] = []
@@ -58,15 +67,15 @@ class PrimitiveExecutor:
         for idx, primitive in enumerate(translated_plan.primitives):
             schema = PRIMITIVE_LIBRARY.get(primitive.name)
             if (
-                self.planner is not None
+                self.primitives is not None
                 and not dry_run
                 and schema is not None
                 and "execute" in schema.optional_params
             ):
                 primitive.parameters.setdefault("execute", True)
-            method = getattr(self.planner, primitive.name, None)
+            method = getattr(self.primitives, primitive.name, None)
             if not callable(method):
-                runtime_errors.append(f"[{idx}] planner missing primitive '{primitive.name}'")
+                runtime_errors.append(f"[{idx}] primitives missing primitive '{primitive.name}'")
                 break
             try:
                 raw_result = method(**primitive.parameters)
@@ -107,22 +116,32 @@ class PrimitiveExecutor:
                 f"Plan snapshot {plan.source_snapshot_id} missing on disk; "
                 f"using {artifacts.snapshot_id or 'latest available'} instead"
             )
-        warnings.extend(self._translate_plan(plan, artifacts))
+        if self.primitives:
+            joints = (artifacts.robot_state or {}).get("joints")
+            helper = getattr(self.primitives, "camera_pose_from_joints", None)
+            pos, rot = helper(joints)
+            cam_pose =  SnapshotCameraPose(position=np.asarray(pos, dtype=float), rotation=rot)
+            for primitive in plan.primitives:
+                warnings.extend(self._translate_helper_parameters(primitive, artifacts))
+                if cam_pose:
+                    for key in ("target_position", "pivot_point"):
+                        pos = primitive.parameters.get(key)
+                        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+                            continue
+                        base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
+                        primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
 
-        validation_errors = plan.validate(PRIMITIVE_LIBRARY)
-        if validation_errors:
-            errors.extend(validation_errors)
+            validation_errors = plan.validate(PRIMITIVE_LIBRARY)
+            if validation_errors:
+                errors.extend(validation_errors)
 
-        return plan, warnings, errors
+            return plan, warnings, errors
+        else:
+            return None, None, None
 
     # ------------------------------------------------------------------ #
     # Translation
     # ------------------------------------------------------------------ #
-    def _translate_plan(self, plan: SkillPlan, artifacts: SnapshotArtifacts) -> List[str]:
-        warnings: List[str] = []
-        for primitive in plan.primitives:
-            warnings.extend(self._translate_helper_parameters(primitive, artifacts))
-        return warnings
 
     def _translate_helper_parameters(
         self,
@@ -130,18 +149,37 @@ class PrimitiveExecutor:
         artifacts: SnapshotArtifacts,
     ) -> List[str]:
         warnings: List[str] = []
+        seeded_target_position = False
+
+        # Prefer resolved interaction point (snapshot-grounded) when available
+        rip = (primitive.metadata or {}).get("resolved_interaction_point") or {}
+        pos3d = rip.get("position_3d")
+        if isinstance(pos3d, (list, tuple)) and len(pos3d) >= 3:
+            primitive.parameters["target_position"] = [float(pos3d[0]), float(pos3d[1]), float(pos3d[2])]
+            seeded_target_position = True
+        pos2d = rip.get("position_2d")
+        if (
+            isinstance(pos2d, (list, tuple))
+            and len(pos2d) >= 2
+            and "target_pixel_yx" not in primitive.parameters
+        ):
+            # position_2d stored as normalized [y, x] (0-1000)
+            primitive.parameters["target_pixel_yx"] = [float(pos2d[0]), float(pos2d[1])]
+
         helper_map: Tuple[Tuple[str, str, bool], ...] = (
             ("target_pixel_yx", "target_position", True),
             ("pivot_pixel_yx", "pivot_point", False),
         )
         for helper_key, target_field, apply_offset in helper_map:
-            pixel = primitive.parameters.get(helper_key)
+            pixel = primitive.parameters.pop(helper_key, None)
             if pixel is None:
+                continue
+            if target_field == "target_position" and seeded_target_position:
                 continue
             point = self._back_project(pixel, artifacts)
             if point is None:
                 warnings.append(
-                    f"{primitive.name}: unable to back-project pixel {pixel} (missing depth/intrinsics)"
+                    f"{primitive.name}: unable to back-project normalized {pixel} (missing depth/intrinsics)"
                 )
                 continue
             if apply_offset:
@@ -149,7 +187,6 @@ class PrimitiveExecutor:
                 if depth_offset:
                     point = [point[0], point[1], point[2] + depth_offset]
             primitive.parameters[target_field] = point
-            primitive.parameters.pop(helper_key, None)
         primitive.parameters.pop("depth_offset_m", None)
         return warnings
 
@@ -160,7 +197,8 @@ class PrimitiveExecutor:
     ) -> Optional[List[float]]:
         if artifacts.depth is None or artifacts.intrinsics is None:
             return None
-        point = compute_3d_position(pixel_yx, artifacts.depth, artifacts.intrinsics)
+        coords = [float(pixel_yx[0]), float(pixel_yx[1])]
+        point = compute_3d_position(coords, artifacts.depth, artifacts.intrinsics)
         if point is None:
             return None
         return [float(point[0]), float(point[1]), float(point[2])]

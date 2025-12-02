@@ -5,11 +5,17 @@ This module provides async object detection, affordance analysis, and interactio
 point detection for robotic manipulation tasks using Google Gen AI's native async support.
 """
 
+import copy
 import time
 import asyncio
-from typing import Dict, List, Optional, Tuple, Any, Union
+import logging
+import hashlib
+import threading
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from pathlib import Path
+from dataclasses import dataclass
 import io
+import json
 import yaml
 
 import numpy as np
@@ -29,6 +35,7 @@ from .utils.coordinates import (
 
 # Import object registry
 from .object_registry import DetectedObject, InteractionPoint, DetectedObjectRegistry
+from ..utils.logging_utils import get_structured_logger
 
 
 class ObjectTracker:
@@ -66,7 +73,8 @@ class ObjectTracker:
         enable_affordance_caching: bool = True,
         fast_mode: bool = False,
         pddl_predicates: Optional[List[str]] = None,
-        prompts_config_path: Optional[str] = None
+        prompts_config_path: Optional[str] = None,
+        logger: Optional[logging.Logger] = None,
     ):
         """
         Initialize object tracker.
@@ -83,6 +91,8 @@ class ObjectTracker:
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
             prompts_config_path: Path to prompts config YAML file (defaults to config/prompts_config.yaml)
         """
+        self.logger = logger or get_structured_logger("ObjectTracker")
+
         self.api_key = api_key
         self.max_parallel_requests = max_parallel_requests
         self.crop_target_size = crop_target_size
@@ -99,18 +109,18 @@ class ObjectTracker:
         with open(prompts_config_path, 'r') as f:
             self.prompts = yaml.safe_load(f)
         
-        print(f"✓ Loaded prompts from {prompts_config_path}")
+        self.logger.info("Loaded prompts from %s", prompts_config_path)
 
         # Auto-select best model
         if model_name == "auto":
             self.model_name = self.ROBOTICS_MODEL
-            print(f"ℹ ObjectTracker using: {self.model_name}")
+            self.logger.info("ObjectTracker using: %s", self.model_name)
         else:
             self.model_name = model_name
 
         # Initialize GenAI SDK
         self.client = genai.Client(api_key=api_key)
-        print(f"✓ ObjectTracker initialized with GenAI SDK")
+        self.logger.info("ObjectTracker initialized with GenAI SDK")
 
         self.default_temperature = default_temperature
         self.thinking_budget = thinking_budget
@@ -130,6 +140,18 @@ class ObjectTracker:
         # Affordance caching: object_type -> {affordances, properties}
         self._affordance_cache: Dict[str, Dict[str, Any]] = {}
 
+        # Recent observations for re-identification prompts
+        self._recent_observations: List[Dict[str, Any]] = []
+        self._max_recent_observations = 3
+
+        # Latest detection bundle for snapshotting (protected by lock)
+        self._last_detection_lock = threading.RLock()
+        self._last_detection_objects: List[DetectedObject] = []
+        self._last_detection_png: Optional[bytes] = None
+        self._last_detection_depth: Optional[np.ndarray] = None
+        self._last_detection_intrinsics: Optional[Any] = None
+        self._last_detection_timestamp: Optional[float] = None
+
     def set_pddl_predicates(self, predicates: List[str]) -> None:
         """
         Set the list of PDDL predicates to track for objects.
@@ -138,7 +160,7 @@ class ObjectTracker:
             predicates: List of predicate names (e.g., ["clean", "dirty", "opened", "filled"])
         """
         self.pddl_predicates = predicates
-        print(f"ℹ PDDL predicates updated: {predicates}")
+        self.logger.info("PDDL predicates updated: %s", predicates)
 
     def add_pddl_predicate(self, predicate: str) -> None:
         """
@@ -149,7 +171,7 @@ class ObjectTracker:
         """
         if predicate not in self.pddl_predicates:
             self.pddl_predicates.append(predicate)
-            print(f"ℹ Added PDDL predicate: {predicate}")
+            self.logger.info("Added PDDL predicate: %s", predicate)
 
     def remove_pddl_predicate(self, predicate: str) -> None:
         """
@@ -160,7 +182,7 @@ class ObjectTracker:
         """
         if predicate in self.pddl_predicates:
             self.pddl_predicates.remove(predicate)
-            print(f"ℹ Removed PDDL predicate: {predicate}")
+            self.logger.info("Removed PDDL predicate: %s", predicate)
 
     def get_pddl_predicates(self) -> List[str]:
         """Get the current list of tracked PDDL predicates."""
@@ -194,7 +216,7 @@ class ObjectTracker:
         Returns:
             List of detected objects with full information
         """
-        print("🔍 Detecting objects in scene (async)...")
+        self.logger.info("Detecting objects in scene (async)...")
         start_time = time.time()
 
         # Prepare image
@@ -214,29 +236,72 @@ class ObjectTracker:
         self._encoded_image_cache = img_byte_arr.getvalue()
         encode_time = time.time() - encode_start
 
+        # Build detection prompts with existing objects and prior observations for re-identification
+        existing_objects = self.registry.get_all_objects()
+        prior_observations = self._select_latest_reid_observations(
+            existing_objects,
+            list(self._recent_observations)
+        )
+        additional_image_parts = [
+            types.Part.from_bytes(data=obs["image_bytes"], mime_type="image/png")
+            for obs in prior_observations
+            if obs.get("image_bytes")
+        ]
+        prior_prompt, current_prompt = self._format_detection_prompt_sections(
+            existing_objects,
+            prior_observations=prior_observations
+        )
+        prior_parts = list(additional_image_parts)
+        prior_parts.append(types.Part.from_text(text=prior_prompt))
+        current_image_part = types.Part.from_bytes(
+            data=self._encoded_image_cache,
+            mime_type="image/png"
+        )
+        current_parts = [
+            current_image_part,
+            types.Part.from_text(text=current_prompt)
+        ]
+        content_sequence = [
+            types.Content(role="user", parts=prior_parts),
+            types.Content(role="user", parts=current_parts),
+        ]
+        existing_ids = {obj.object_id for obj in existing_objects}
+
         # Step 1: Stream object names and collect them
         names_start = time.time()
-        print(f"   → Detecting objects (async streaming)...")
+        self.logger.debug("Detecting objects (async streaming)...")
 
         object_data_list = []
 
         async def on_object_detected(object_name: str, bounding_box: Optional[List[int]]):
             """Callback when object detected"""
             bbox_str = f"bbox={bounding_box}" if bounding_box else "no bbox"
-            print(f"      • Found: {object_name} ({bbox_str})")
+            self.logger.debug("Found object: %s (%s)", object_name, bbox_str)
             object_data_list.append((object_name, bounding_box))
 
         # Use async streaming detection
-        await self._detect_object_names_streaming(pil_image, temperature, on_object_detected)
+        await self._detect_object_names_streaming(
+            pil_image,
+            temperature,
+            on_object_detected,
+            prompt=current_prompt,
+            additional_image_parts=None,
+            content_parts_override=None,
+            contents_override=content_sequence
+        )
 
         if not object_data_list:
-            print("   ⚠ No objects detected")
+            self.logger.warning("No objects detected")
             self._encoded_image_cache = None
             return []
 
         names_time = time.time() - names_start
-        print(f"   ✓ Detection phase complete in {names_time:.1f}s ({len(object_data_list)} objects)")
-        print(f"   → Analyzing objects concurrently (async)...")
+        self.logger.info(
+            "Detection phase complete in %.1fs (%s objects)",
+            names_time,
+            len(object_data_list),
+        )
+        self.logger.debug("Analyzing objects concurrently (async)...")
 
         # Step 2: Analyze all objects concurrently using asyncio.gather
         parallel_start = time.time()
@@ -248,7 +313,8 @@ class ObjectTracker:
                 depth_frame,
                 camera_intrinsics,
                 temperature,
-                bounding_box
+                bounding_box,
+                existing_object_id=object_name if object_name in existing_ids else None
             )
             for object_name, bounding_box in object_data_list
         ]
@@ -261,27 +327,52 @@ class ObjectTracker:
         for i, result in enumerate(results):
             object_name = object_data_list[i][0]
             if isinstance(result, Exception):
-                print(f"      ⚠ Failed to analyze {object_name}: {result}")
+                self.logger.warning("Failed to analyze %s: %s", object_name, result)
             elif result is not None:
                 detected_objects.append(result)
                 self.registry.add_object(result)
-                print(f"      ✓ {object_name}: {len(result.affordances)} affordances, {len(result.interaction_points)} points")
+                self.logger.debug(
+                    "Analyzed %s: %s affordances, %s points",
+                    object_name,
+                    len(result.affordances),
+                    len(result.interaction_points),
+                )
 
         parallel_time = time.time() - parallel_start
         total_time = time.time() - start_time
+
+        # Cache the latest detection bundle for snapshot alignment
+        with self._last_detection_lock:
+            self._last_detection_timestamp = time.time()
+            self._last_detection_objects = [copy.deepcopy(obj) for obj in detected_objects]
+            if self._encoded_image_cache:
+                self._last_detection_png = bytes(self._encoded_image_cache)
+            else:
+                buf = io.BytesIO()
+                pil_image.save(buf, format="PNG")
+                self._last_detection_png = buf.getvalue()
+            self._last_detection_depth = np.array(depth_frame, copy=True) if depth_frame is not None else None
+            self._last_detection_intrinsics = self._coerce_intrinsics_snapshot(camera_intrinsics)
+
+        # Record observation for re-identification prompts
+        self._store_recent_observation(self._encoded_image_cache, detected_objects)
 
         # Clear encoding cache
         self._encoded_image_cache = None
         self._cache_image_id = None
 
         # Performance summary
-        print(f"   ✓ Detection complete in {total_time:.1f}s")
-        print(f"      • Image encoding: {encode_time*1000:.0f}ms")
-        print(f"      • Object names: {names_time:.1f}s")
-        print(f"      • Async analysis: {parallel_time:.1f}s ({len(detected_objects)} objects)")
+        self.logger.info("Detection complete in %.1fs", total_time)
+        self.logger.debug(
+            "Timing breakdown: encoding=%dms, names=%.1fs, analysis=%.1fs (%s objects)",
+            int(encode_time * 1000),
+            names_time,
+            parallel_time,
+            len(detected_objects),
+        )
         if len(detected_objects) > 0:
             avg_time = parallel_time / len(detected_objects)
-            print(f"      • Average per object: {avg_time:.1f}s (effective with async)")
+            self.logger.debug("Average per object: %.1fs", avg_time)
 
         return detected_objects
 
@@ -289,7 +380,11 @@ class ObjectTracker:
         self,
         image: Image.Image,
         temperature: Optional[float],
-        callback
+        callback,
+        prompt: Optional[str] = None,
+        additional_image_parts: Optional[List[types.Part]] = None,
+        content_parts_override: Optional[List[Any]] = None,
+        contents_override: Optional[List[Any]] = None
     ):
         """
         Detect names and bounding boxes with async streaming.
@@ -299,58 +394,27 @@ class ObjectTracker:
             temperature: Generation temperature
             callback: Async function called with (object_name, bounding_box)
         """
-        prompt = self.prompts['detection']['streaming']
+        if prompt is None:
+            _, prompt = self._format_detection_prompt_sections(
+                self.registry.get_all_objects()
+            )
 
         try:
-            # Use async streaming API
-            async for chunk in self._generate_content_streaming(image, prompt, temperature):
-                # Parse streaming chunks for object names and bounding boxes
-                lines = chunk.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith('OBJECT:'):
-                        # Parse format: "OBJECT: name | [y1, x1, y2, x2]"
-                        content = line[7:].strip()
-                        if '|' in content:
-                            parts = content.split('|')
-                            object_name = parts[0].strip()
-                            try:
-                                import json
-                                bbox_str = parts[1].strip()
-                                bounding_box = json.loads(bbox_str)
-                                if object_name and isinstance(bounding_box, list) and len(bounding_box) == 4:
-                                    await callback(object_name, bounding_box)
-                            except:
-                                # If bbox parsing fails, use None
-                                if object_name:
-                                    await callback(object_name, None)
-                        else:
-                            # No bbox provided, use None
-                            if content:
-                                await callback(content, None)
-                    elif line == 'END':
-                        break
+            response_text = await self._generate_content(
+                image,
+                prompt,
+                temperature,
+                additional_image_parts=additional_image_parts,
+                content_parts=content_parts_override,
+                contents=contents_override
+            )
+
+            detections = self._parse_detection_response(response_text)
+            for object_name, bounding_box in detections[:25]:
+                await callback(object_name, bounding_box)
 
         except Exception as e:
-            print(f"   ⚠ Streaming object detection failed, falling back to batch: {e}")
-            # Fallback: use non-streaming batch detection
-            prompt = self.prompts['detection']['batch']
-
-            try:
-                response_text = await self._generate_content(image, prompt, temperature)
-                data = self._parse_json_response(response_text)
-                objects_data = data.get("objects", [])
-                for obj_data in objects_data:
-                    if isinstance(obj_data, dict):
-                        name = obj_data.get("name")
-                        bbox = obj_data.get("bbox")
-                        if name:
-                            await callback(name, bbox)
-                    elif isinstance(obj_data, str):
-                        # Fallback if old format returned
-                        await callback(obj_data, None)
-            except Exception as fallback_error:
-                print(f"   ⚠ Batch fallback also failed: {fallback_error}")
+            self.logger.exception("Streaming detection failed: %s", e)
 
     async def _analyze_single_object(
         self,
@@ -359,7 +423,8 @@ class ObjectTracker:
         depth_frame: Optional[np.ndarray],
         camera_intrinsics: Optional[Any],
         temperature: Optional[float],
-        bounding_box: Optional[List[int]] = None
+        bounding_box: Optional[List[int]] = None,
+        existing_object_id: Optional[str] = None
     ) -> Optional[DetectedObject]:
         """
         Analyze a single object: affordances, properties, and interaction points.
@@ -450,7 +515,11 @@ class ObjectTracker:
             )
 
         try:
-            response_text = await self._generate_content(analysis_image, prompt, temperature)
+            response_text = await self._generate_content(
+                analysis_image,
+                prompt,
+                temperature
+            )
             data = self._parse_json_response(response_text)
 
             if not data:
@@ -458,14 +527,31 @@ class ObjectTracker:
 
             # Handle case where VLM returns a list instead of dict
             if isinstance(data, list):
-                print(f"      ⚠ Unexpected list response for {object_name}, skipping")
+                self.logger.warning("Unexpected list response for %s, skipping", object_name)
                 return None
 
             # Extract affordances (use cached if available)
             if cached_data:
                 affordances = set(cached_data["affordances"])
             else:
-                affordances = set(data.get("affordances", []))
+                raw_affordances = data.get("affordances", []) or []
+                affordances: set[str] = set()
+
+                def _coerce_affordance(item: Any) -> None:
+                    """Normalize affordance entries into strings to avoid unhashable dicts."""
+                    if isinstance(item, str):
+                        affordances.add(item)
+                    elif isinstance(item, dict):
+                        for key in item.keys():
+                            if isinstance(key, str):
+                                affordances.add(key)
+                    elif isinstance(item, (list, tuple)):
+                        for sub in item:
+                            if isinstance(sub, str):
+                                affordances.add(sub)
+
+                for aff in raw_affordances:
+                    _coerce_affordance(aff)
 
             # Helper function to back-project coordinates from crop to full image
             def backproject_to_full_image(crop_pos_2d: List[int]) -> List[int]:
@@ -555,7 +641,7 @@ class ObjectTracker:
             # Create DetectedObject
             detected_obj = DetectedObject(
                 object_type=object_type,
-                object_id=object_id,
+                object_id=existing_object_id or object_id,
                 affordances=affordances,
                 interaction_points=interaction_points,
                 position_2d=pos_2d,
@@ -569,9 +655,7 @@ class ObjectTracker:
             return detected_obj
 
         except Exception as e:
-            print(f"      ⚠ Failed to analyze {object_name}: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.exception("Failed to analyze %s: %s", object_name, e)
             return None
 
     def get_object(self, object_id: str) -> Optional[DetectedObject]:
@@ -615,6 +699,34 @@ class ObjectTracker:
             List of objects with the affordance
         """
         return self.registry.get_objects_with_affordance(affordance)
+
+    def get_last_detection_bundle(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the most recent detection frame and objects for snapshotting.
+
+        Returns:
+            Dict with PNG bytes, depth, intrinsics, objects, and timestamp; None if unavailable.
+        """
+        with self._last_detection_lock:
+            if self._last_detection_png is None:
+                return None
+
+            depth_copy = (
+                np.array(self._last_detection_depth, copy=True)
+                if self._last_detection_depth is not None else None
+            )
+            intrinsics_copy = copy.deepcopy(self._last_detection_intrinsics)
+            objects_copy = [
+                copy.deepcopy(obj) for obj in (self._last_detection_objects or [])
+            ]
+
+            return {
+                "timestamp": self._last_detection_timestamp,
+                "color_png": self._last_detection_png,
+                "depth": depth_copy,
+                "intrinsics": intrinsics_copy,
+                "objects": objects_copy,
+            }
 
     def clear_registry(self):
         """Clear object registry (thread-safe)."""
@@ -668,11 +780,11 @@ class ObjectTracker:
         """
         obj = self.get_object(object_id)
         if not obj:
-            print(f"Object {object_id} not found in registry")
+            self.logger.warning("Object %s not found in registry", object_id)
             return None
 
         if self._current_color_frame is None:
-            print("No current frame cached")
+            self.logger.warning("No current frame cached")
             return None
 
         # Build prompt for specific interaction point
@@ -721,7 +833,7 @@ class ObjectTracker:
             return interaction_point
 
         except Exception as e:
-            print(f"Failed to update interaction point: {e}")
+            self.logger.exception("Failed to update interaction point: %s", e)
             return None
 
     # ========================================================================
@@ -731,6 +843,25 @@ class ObjectTracker:
     def _generate_object_id(self, object_name: str, object_type: str) -> str:
         """Generate unique object ID (thread-safe)."""
         return self.registry.generate_unique_id(object_name, object_type)
+
+    def _coerce_intrinsics_snapshot(self, intrinsics: Any) -> Optional[Dict[str, Any]]:
+        """
+        Build a JSON-serializable intrinsics payload for snapshot persistence.
+
+        Returns a dict (or empty dict) when conversion fails, None when no intrinsics provided.
+        """
+        if intrinsics is None:
+            return None
+        try:
+            return copy.deepcopy(intrinsics.to_dict())
+        except Exception:
+            pass
+        if isinstance(intrinsics, dict):
+            return copy.deepcopy(intrinsics)
+        try:
+            return dict(intrinsics)
+        except Exception:
+            return {}
 
     def _prepare_image(self, image: Union[np.ndarray, Image.Image, str, Path]) -> Image.Image:
         """Convert image to PIL Image format."""
@@ -743,18 +874,290 @@ class ObjectTracker:
         else:
             raise ValueError(f"Unsupported image type: {type(image)}")
 
+    def _build_detection_context_sections(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: Optional[List[Dict[str, Any]]] = None
+    ) -> tuple[str, str]:
+        """Create text sections for existing IDs and prior observations."""
+        if existing_objects:
+            lines = []
+            for obj in existing_objects[:20]:
+                parts = [f"id={obj.object_id}"]
+                if obj.object_type:
+                    parts.append(f"type={obj.object_type}")
+                if obj.bounding_box_2d:
+                    parts.append(f"bbox={obj.bounding_box_2d}")
+                color = obj.properties.get("color") if obj.properties else None
+                if color:
+                    parts.append(f"color={color}")
+                lines.append("- " + ", ".join(parts))
+
+            if len(existing_objects) > 20:
+                lines.append(f"- ... {len(existing_objects) - 20} more previously seen objects not listed")
+            existing_section = "\n".join(lines)
+        else:
+            existing_section = "None observed yet."
+
+        observations = prior_observations or []
+        if observations:
+            sections = []
+            for idx, obs in enumerate(observations):
+                image_label = f"prior_obs_{idx + 1}"
+                sections.append(f"- image id: {image_label}")
+                sections.append("  objects within:")
+                if not obs.get("objects"):
+                    sections.append("    • (none recorded)")
+                else:
+                    for obj in obs["objects"]:
+                        pos = obj.get("position")
+                        sections.append(
+                            f"    • {obj.get('label', obj.get('id'))} (id={obj.get('id')}, position={pos})"
+                        )
+            prior_section = "\n".join(sections)
+        else:
+            prior_section = "None available."
+
+        return existing_section, prior_section
+
+    def _select_latest_reid_observations(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Choose the minimal set of prior observations that cover the latest sighting of
+        each known object. Newest frames are considered first so we keep only the last
+        frame that contains each object ID.
+        """
+        if not prior_observations:
+            return []
+
+        object_ids = {obj.object_id for obj in existing_objects}
+        # If registry is empty, fall back to all IDs present in observations
+        if not object_ids:
+            for obs in prior_observations:
+                for obj in obs.get("objects", []):
+                    oid = obj.get("id")
+                    if oid:
+                        object_ids.add(oid)
+
+        selected_indices: set[int] = set()
+        seen_ids: set[str] = set()
+
+        # Walk from newest to oldest, selecting the first frame that contains each ID.
+        for idx in range(len(prior_observations) - 1, -1, -1):
+            obs = prior_observations[idx]
+            includes_new_id = False
+            for obj in obs.get("objects", []):
+                oid = obj.get("id")
+                if not oid:
+                    continue
+                if object_ids and oid not in object_ids:
+                    continue
+                if oid not in seen_ids:
+                    seen_ids.add(oid)
+                    includes_new_id = True
+            if includes_new_id:
+                selected_indices.add(idx)
+            if object_ids and seen_ids.issuperset(object_ids):
+                break
+
+        if not selected_indices:
+            return []
+
+        return [prior_observations[i] for i in sorted(selected_indices)]
+
+    def _format_detection_prompt(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """
+        Build a detection prompt that includes previously detected objects to encourage
+        re-identification instead of minting new IDs.
+        """
+        existing_section, prior_section = self._build_detection_context_sections(
+            existing_objects, prior_observations
+        )
+
+        streaming = self.prompts['detection']['streaming']
+        if isinstance(streaming, dict):
+            template = streaming.get('current') or streaming.get('prior') or ""
+        else:
+            template = streaming
+
+        return template.format(
+            existing_objects_section=existing_section,
+            prior_images_section=prior_section
+        )
+
+    def _format_detection_prompt_sections(
+        self,
+        existing_objects: List[DetectedObject],
+        prior_observations: Optional[List[Dict[str, Any]]] = None
+    ) -> tuple[str, str]:
+        """
+        Build a two-turn detection prompt to separate reference media from the current frame.
+        Turn 1: Prior IDs/images for re-ID (no detection yet).
+        Turn 2: Current frame + detection instructions.
+        """
+        existing_section, prior_section = self._build_detection_context_sections(
+            existing_objects, prior_observations
+        )
+
+        streaming = self.prompts['detection']['streaming']
+        if isinstance(streaming, dict):
+            prior_template = streaming.get('prior') or ""
+            current_template = streaming.get('current') or ""
+        else:
+            prior_template = ""
+            current_template = streaming
+
+        prior_prompt = prior_template.format(
+            existing_objects_section=existing_section,
+            prior_images_section=prior_section
+        ).strip()
+        current_prompt = current_template.format(
+            existing_objects_section=existing_section,
+            prior_images_section=prior_section
+        ).strip()
+
+        # Ensure turn semantics are explicit even if templates are missing.
+        if not prior_prompt:
+            prior_prompt = "PRIOR CONTEXT ONLY: reuse IDs if visible. Await current frame for detection."
+        if not current_prompt:
+            current_prompt = (
+                "CURRENT FRAME: Perform detection ONLY on this image, reusing IDs from prior context."
+            )
+
+        return prior_prompt, current_prompt
+
+    def _parse_detection_response(
+        self,
+        response_text: str
+    ) -> List[Tuple[str, List[int]]]:
+        """
+        Parse detection output. Preferred format: JSON array of objects with
+        {"box_2d": [ymin, xmin, ymax, xmax], "label": "<id or name>"}.
+        Falls back to legacy line-based parsing if JSON parsing fails.
+        """
+        detections: List[Tuple[str, List[int]]] = []
+
+        def _coerce_bbox(bbox: Any) -> Optional[List[int]]:
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                return None
+            try:
+                coords = [int(round(float(v))) for v in bbox]
+                # Clamp to 0-1000 normalized range
+                return [max(0, min(1000, c)) for c in coords]
+            except (TypeError, ValueError):
+                return None
+
+        parsed = self._parse_json_response(response_text)
+        candidates: List[Any] = []
+        if isinstance(parsed, list):
+            candidates = parsed
+        elif isinstance(parsed, dict):
+            for key in ("objects", "detections", "items", "results"):
+                if key in parsed and isinstance(parsed[key], list):
+                    candidates = parsed[key]
+                    break
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label") or item.get("name") or item.get("id")
+            bbox = item.get("box_2d") or item.get("bounding_box") or item.get("bbox")
+            coerced = _coerce_bbox(bbox)
+            if label and coerced:
+                detections.append((label, coerced))
+
+        if detections:
+            return detections
+
+        # Fallback: legacy line-based parse (OBJECT: name | [bbox])
+        lines = response_text.splitlines()
+        for line in lines:
+            line = line.strip()
+            if not line.startswith('OBJECT:'):
+                continue
+            content = line[7:].strip()
+            if '|' in content:
+                parts = content.split('|')
+                object_name = parts[0].strip()
+                try:
+                    bbox_str = parts[1].strip()
+                    bounding_box = json.loads(bbox_str)
+                    coerced = _coerce_bbox(bounding_box)
+                    if object_name and coerced:
+                        detections.append((object_name, coerced))
+                except Exception:
+                    if object_name:
+                        detections.append((object_name, None))
+            else:
+                if content:
+                    detections.append((content, None))
+
+        return detections
+
+    def _store_recent_observation(
+        self,
+        image_bytes: Optional[bytes],
+        detected_objects: List[DetectedObject]
+    ) -> None:
+        """Cache recent observation frames with object positions for re-ID prompts."""
+        if not image_bytes or not detected_objects:
+            return
+
+        image_hash = hashlib.sha1(image_bytes).hexdigest()
+        objects_summary = []
+        for obj in detected_objects:
+            pos = obj.bounding_box_2d or obj.position_2d
+            objects_summary.append({
+                "id": obj.object_id,
+                "label": obj.object_type or obj.object_id,
+                "position": pos
+            })
+
+        # Remove any existing entry with same hash
+        self._recent_observations = [
+            obs for obs in self._recent_observations
+            if obs.get("image_hash") != image_hash
+        ]
+
+        self._recent_observations.append({
+            "image_hash": image_hash,
+            "image_bytes": image_bytes,
+            "objects": objects_summary
+        })
+
+        # Keep only the most recent N observations
+        if len(self._recent_observations) > self._max_recent_observations:
+            self._recent_observations = self._recent_observations[-self._max_recent_observations:]
+
     async def _generate_content(
         self,
         image: Image.Image,
         prompt: str,
-        temperature: Optional[float]
+        temperature: Optional[float],
+        additional_image_parts: Optional[List[types.Part]] = None,
+        content_parts: Optional[List[Any]] = None,
+        contents: Optional[List[Any]] = None
     ) -> str:
         """
         Generate content using async streaming API and collect all chunks.
         This is a convenience wrapper around _generate_content_streaming.
         """
         chunks = []
-        async for chunk in self._generate_content_streaming(image, prompt, temperature):
+        async for chunk in self._generate_content_streaming(
+            image,
+            prompt,
+            temperature,
+            additional_image_parts=additional_image_parts,
+            content_parts=content_parts,
+            contents=contents
+        ):
             chunks.append(chunk)
         return ''.join(chunks)
 
@@ -762,7 +1165,10 @@ class ObjectTracker:
         self,
         image: Image.Image,
         prompt: str,
-        temperature: Optional[float]
+        temperature: Optional[float],
+        additional_image_parts: Optional[List[types.Part]] = None,
+        content_parts: Optional[List[Any]] = None,
+        contents: Optional[List[Any]] = None
     ):
         """
         Generate content with async streaming support using client.aio.
@@ -777,10 +1183,12 @@ class ObjectTracker:
             image.save(img_byte_arr, format='PNG')
             img_bytes = img_byte_arr.getvalue()
 
-        content_parts = [
-            types.Part.from_bytes(data=img_bytes, mime_type='image/png'),
-            prompt
-        ]
+        if contents is None and content_parts is None:
+            content_parts = [types.Part.from_bytes(data=img_bytes, mime_type='image/png')]
+            if additional_image_parts:
+                content_parts.extend(additional_image_parts)
+            content_parts.append(prompt)
+        payload = contents if contents is not None else content_parts
 
         temp = temperature if temperature is not None else self.default_temperature
         config = types.GenerateContentConfig(
@@ -793,7 +1201,7 @@ class ObjectTracker:
         # Use async streaming via client.aio
         stream = await self.client.aio.models.generate_content_stream(
             model=self.model_name,
-            contents=content_parts,
+            contents=payload,
             config=config
         )
         async for chunk in stream:
@@ -817,8 +1225,8 @@ class ObjectTracker:
 
             return json.loads(response_text.strip())
         except json.JSONDecodeError as e:
-            print(f"Failed to parse JSON: {e}")
-            print(f"Response: {response_text[:500]}")
+            self.logger.warning("Failed to parse JSON: %s", e)
+            self.logger.debug("Response snippet: %s", response_text[:500])
             return {}
 
     async def aclose(self):
@@ -826,3 +1234,187 @@ class ObjectTracker:
         if self.client:
             await self.client.aio.aclose()
 
+
+@dataclass
+class TrackingStats:
+    """Statistics for the continuous tracker."""
+    total_frames: int = 0
+    total_detections: int = 0
+    skipped_frames: int = 0
+    avg_detection_time: float = 0.0
+    last_detection_time: float = 0.0
+    cache_hit_rate: float = 0.0
+    is_running: bool = False
+
+
+class ContinuousObjectTracker(ObjectTracker):
+    """
+    Background service for continuous object tracking.
+
+    Runs in the background to periodically call `detect_objects` and keep the
+    registry fresh.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "auto",
+        max_parallel_requests: int = 5,
+        crop_target_size: int = 512,
+        enable_affordance_caching: bool = True,
+        fast_mode: bool = False,
+        update_interval: float = 1.0,
+        on_detection_complete: Optional[Callable[[int], None]] = None,
+        logger: Optional[logging.Logger] = None
+    ):
+        super().__init__(
+            api_key=api_key,
+            model_name=model_name,
+            max_parallel_requests=max_parallel_requests,
+            crop_target_size=crop_target_size,
+            enable_affordance_caching=enable_affordance_caching,
+            fast_mode=fast_mode,
+            logger=logger,
+        )
+        self.update_interval = update_interval
+        self.on_detection_complete = on_detection_complete
+
+        # Async control
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
+
+        # Frame source
+        self._frame_provider: Optional[Callable[[], tuple]] = None
+
+        # Statistics
+        self.stats = TrackingStats()
+        self._last_detection_count: int = 0
+
+    @property
+    def should_detect(self) -> bool:
+        """Return whether detection should run for the current frame."""
+        return True
+
+    def set_frame_provider(
+        self,
+        provider: Callable[[], tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]]
+    ):
+        """Set the frame provider function returning (color, depth, intrinsics)."""
+        self._frame_provider = provider
+
+    def start(self):
+        """Start the background tracking task."""
+        if self._running:
+            self.logger.warning("Tracker already running")
+            return
+
+        if self._frame_provider is None:
+            raise ValueError("Frame provider not set. Call set_frame_provider() first.")
+
+        self._running = True
+        self.stats.is_running = True
+
+        loop = asyncio.get_event_loop()
+        self._task = loop.create_task(self._tracking_loop())
+        self.logger.info("Continuous tracker started")
+
+    async def stop(self):
+        """Stop the background tracking task."""
+        if not self._running:
+            return
+
+        self._running = False
+        self.stats.is_running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self.logger.info("Continuous tracker stopped")
+
+    async def _tracking_loop(self):
+        """Main tracking loop (runs as async task)."""
+        self.logger.debug("Tracking loop started")
+
+        while self._running:
+            loop_start = time.time()
+
+            try:
+                color_frame, depth_frame, intrinsics = self._frame_provider()
+
+                if not self.should_detect:
+                    async with self._lock:
+                        self.stats.total_frames += 1
+                        self.stats.skipped_frames += 1
+                        total_attempted = self.stats.total_frames
+                        self.stats.cache_hit_rate = (
+                            self.stats.skipped_frames / total_attempted
+                            if total_attempted > 0 else 0.0
+                        )
+
+                    if self.on_detection_complete:
+                        if asyncio.iscoroutinefunction(self.on_detection_complete):
+                            await self.on_detection_complete(self._last_detection_count)
+                        else:
+                            self.on_detection_complete(self._last_detection_count)
+                    continue
+
+                detection_start = time.time()
+                detected_objects = await self.detect_objects(
+                    color_frame,
+                    depth_frame,
+                    intrinsics
+                )
+                detection_time = time.time() - detection_start
+                self._last_detection_count = len(detected_objects)
+
+                async with self._lock:
+                    self.stats.total_frames += 1
+                    self.stats.total_detections += len(detected_objects)
+                    self.stats.last_detection_time = detection_time
+
+                    alpha = 0.1  # Smoothing factor
+                    self.stats.avg_detection_time = (
+                        alpha * detection_time +
+                        (1 - alpha) * self.stats.avg_detection_time
+                    )
+
+                    total_attempted = self.stats.total_frames
+                    self.stats.cache_hit_rate = (
+                        self.stats.skipped_frames / total_attempted
+                        if total_attempted > 0 else 0.0
+                    )
+
+                if self.on_detection_complete:
+                    if asyncio.iscoroutinefunction(self.on_detection_complete):
+                        await self.on_detection_complete(len(detected_objects))
+                    else:
+                        self.on_detection_complete(len(detected_objects))
+
+            except Exception as e:
+                self.logger.exception("Tracking loop error: %s", e)
+
+            elapsed = time.time() - loop_start
+            if elapsed < self.update_interval:
+                await asyncio.sleep(self.update_interval - elapsed)
+
+        self.logger.debug("Tracking loop stopped")
+
+    async def get_stats(self) -> TrackingStats:
+        """Get current tracking statistics (async-safe)."""
+        async with self._lock:
+            return TrackingStats(
+                total_frames=self.stats.total_frames,
+                total_detections=self.stats.total_detections,
+                skipped_frames=self.stats.skipped_frames,
+                avg_detection_time=self.stats.avg_detection_time,
+                last_detection_time=self.stats.last_detection_time,
+                cache_hit_rate=self.stats.cache_hit_rate,
+                is_running=self.stats.is_running
+            )
+
+    def is_running(self) -> bool:
+        """Check if tracker is currently running."""
+        return self._running

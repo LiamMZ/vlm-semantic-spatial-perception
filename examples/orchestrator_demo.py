@@ -22,6 +22,7 @@ import textwrap
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+import logging
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 
 from src.planning import TaskOrchestrator, OrchestratorState, TaskState
+from src.utils.logging_utils import CallbackLogHandler
 # Import config from config directory
 config_path = Path(__file__).parent.parent / "config"
 if str(config_path) not in sys.path:
@@ -106,10 +108,16 @@ class OrchestratorDemoApp(App):
         self._initializing: bool = True
         self._awaiting_task_input: bool = False
         self._init_failed: bool = False
+        self._logger_ui_level: int = logging.WARNING
         
         # Log file will be set up after system initialization
-        self.log_file: Optional[Path] = None
-        self._log_file_handle = None
+        self.outputs_log_file: Optional[Path] = None
+        self.debug_log_file: Optional[Path] = None
+        self._outputs_log_handle = None
+        self._log_callback_handler: Optional[CallbackLogHandler] = None
+        self._debug_file_handler: Optional[logging.Handler] = None
+        self._user_logger = logging.getLogger("OrchestratorDemoApp.User")
+        self._user_logger.propagate = True
         
         # Track new objects for demo reporting
         self._known_object_ids: set = set()
@@ -153,13 +161,13 @@ class OrchestratorDemoApp(App):
             self._write_log("⚠ GEMINI_API_KEY or GOOGLE_API_KEY is not set.")
             self._write_log("Please set it as an environment variable.")
             self._write_log("")
-            self._write_log("After setting the key, type 'restart' to retry.")
+            self._write_log("After setting the key, press Enter or type 'restart' to retry.")
             self._initializing = False
             self._awaiting_task_input = False
             self._init_failed = True
             if self._command_input:
                 self._command_input.disabled = False
-                self._command_input.placeholder = "Type 'restart' to retry..."
+                self._command_input.placeholder = "Press Enter or type 'restart' to retry..."
                 self._command_input.focus()
             self._update_status()
             self._update_commands_panel()
@@ -167,17 +175,81 @@ class OrchestratorDemoApp(App):
             # Start initialization after UI is rendered
             asyncio.create_task(self._delayed_initialization())
     
-    def _setup_log_file(self, output_dir: str):
-        """Set up log file in the same directory as PDDL outputs."""
+    def _setup_log_files(self, output_dir: str):
+        """Prepare user-facing and debug log files inside the output directory."""
         log_dir = Path(output_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
-        self.log_file = log_dir / "session.log"
-        
+        self.outputs_log_file = log_dir / "outputs.log"
+        self.debug_log_file = log_dir / "debug.log"
+
+        # Close any previous handles before creating new ones
+        if self._outputs_log_handle and not self._outputs_log_handle.closed:
+            try:
+                self._outputs_log_handle.close()
+            except Exception:
+                pass
+            finally:
+                self._outputs_log_handle = None
+
         try:
-            self._log_file_handle = open(self.log_file, 'w', encoding='utf-8')
-            self._write_log(f"✓ Log file: {self.log_file}")
-        except Exception as e:
-            self._write_log(f"⚠ Could not create log file: {e}")
+            self._outputs_log_handle = open(self.outputs_log_file, "w", encoding="utf-8")
+        except Exception as exc:
+            # We still surface the error to the UI so the user can take action.
+            self._outputs_log_handle = None
+            self._write_log(f"⚠ Could not create outputs.log: {exc}")
+
+    def _configure_logging_pipeline(self):
+        """Attach Python logging to the UI log stream."""
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG)
+
+        if self._log_callback_handler is None:
+            callback_handler = CallbackLogHandler(
+                self._handle_log_message,
+                pass_record=True,
+            )
+            callback_handler.setLevel(logging.DEBUG)
+            callback_handler.setFormatter(logging.Formatter("[%(levelname)s:%(name)s] %(message)s"))
+            root_logger.addHandler(callback_handler)
+            self._log_callback_handler = callback_handler
+
+        # Update the debug file handler every time the output directory changes.
+        if self._debug_file_handler:
+            root_logger.removeHandler(self._debug_file_handler)
+            try:
+                self._debug_file_handler.close()
+            except Exception:
+                pass
+        self._debug_file_handler = None
+
+        if self.debug_log_file:
+            debug_handler = logging.FileHandler(self.debug_log_file, mode="w", encoding="utf-8")
+            debug_handler.setLevel(logging.DEBUG)
+            debug_handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s [%(levelname)s:%(name)s] %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+            root_logger.addHandler(debug_handler)
+            self._debug_file_handler = debug_handler
+
+    def _handle_log_message(self, message: str, record: Optional[logging.LogRecord] = None):
+        """Forward log handler output into the UI without re-triggering logging."""
+        level = record.levelno if record else self._infer_log_level_from_message(message)
+        if level < self._logger_ui_level:
+            return
+        self._write_log(message, from_logger=True)
+
+    def _infer_log_level_from_message(self, message: str) -> int:
+        """Best-effort parsing of the log level from a formatted log line."""
+        if not message.startswith("["):
+            return logging.INFO
+        closing_bracket = message.find(":")
+        if closing_bracket == -1:
+            return logging.INFO
+        level_name = message[1:closing_bracket].upper()
+        return logging._nameToLevel.get(level_name, logging.INFO)
 
     async def on_input_submitted(self, event: Input.Submitted):
         """Handle user command submissions."""
@@ -185,13 +257,17 @@ class OrchestratorDemoApp(App):
         # Clear input immediately for responsive feedback
         event.input.value = ""
         
-        # Handle initialization failure state - only allow restart
+        # Handle initialization failure state - allow restart or empty input to restart
         if self._init_failed:
-            if command.lower() in ["restart", "quit", "exit"]:
-                await self.handle_command(command)
+            if not command or command.lower() in ["restart", "quit", "exit"]:
+                # Empty input or explicit restart command triggers restart
+                if not command or command.lower() == "restart":
+                    await self.handle_command("restart")
+                else:
+                    await self.handle_command(command)
             else:
                 self._write_log(f"> {command}")
-                self._write_log("⚠ System initialization failed. Use 'restart' to retry or 'quit' to exit.")
+                self._write_log("⚠ System initialization failed. Press Enter or type 'restart' to retry, or 'quit' to exit.")
             return
         
         # Handle initial task input
@@ -324,7 +400,7 @@ class OrchestratorDemoApp(App):
                 self._write_log("Please set it as an environment variable and try again.")
                 self._init_failed = True
                 if self._command_input:
-                    self._command_input.placeholder = "Type 'restart' to retry..."
+                    self._command_input.placeholder = "Press Enter or type 'restart' to retry..."
             else:
                 # Reinitialize
                 self._write_log("⚙ Reinitializing components...")
@@ -413,28 +489,18 @@ class OrchestratorDemoApp(App):
                 on_save_state=self._on_save_state
             )
             
-            # Set up log file early so we can capture initialization messages
-            self._setup_log_file(str(output_dir))
+            # Set up logging so user output and debug traces split cleanly
+            self._setup_log_files(str(output_dir))
+            self._configure_logging_pipeline()
+            if self.outputs_log_file:
+                self._write_log(f"✓ Outputs log: {self.outputs_log_file}")
+            if self.debug_log_file:
+                self._write_log(f"✓ Debug log: {self.debug_log_file}")
             
-            # Initialize orchestrator (capture stdout to log)
+            # Initialize orchestrator with logging routed to the UI
             self._write_log("⚙ Initializing components...")
             self.orchestrator = TaskOrchestrator(config)
-            
-            # Capture initialization messages by redirecting print statements
-            import io
-            import sys
-            old_stdout = sys.stdout
-            sys.stdout = captured_output = io.StringIO()
-            
-            try:
-                await self.orchestrator.initialize()
-            finally:
-                sys.stdout = old_stdout
-                init_output = captured_output.getvalue()
-                # Write captured output to log
-                for line in init_output.split('\n'):
-                    if line.strip():
-                        self._write_log(f"  {line}")
+            await self.orchestrator.initialize()
             
             self._write_log(f"✓ Output directory: {output_dir}")
             self._write_log("")
@@ -452,14 +518,14 @@ class OrchestratorDemoApp(App):
             self._write_log(f"⚠ Initialization failed: {exc}")
             self._write_log("Check: RealSense connection, device availability (rs-enumerate-devices)")
             self._write_log("")
-            self._write_log("Type 'restart' to retry initialization.")
+            self._write_log("Press Enter or type 'restart' to retry initialization.")
             self.orchestrator = None
             self._initializing = False
             self._awaiting_task_input = False
             self._init_failed = True
             if self._command_input:
                 self._command_input.disabled = False
-                self._command_input.placeholder = "Type 'restart' to retry..."
+                self._command_input.placeholder = "Press Enter or type 'restart' to retry..."
                 self._command_input.focus()
         
         self._update_status()
@@ -609,20 +675,45 @@ class OrchestratorDemoApp(App):
             # Orchestrator handles stopping detection and final save in shutdown()
             await self.orchestrator.shutdown()
             
-            # Close log file
-            if self._log_file_handle and not self._log_file_handle.closed:
-                try:
-                    self._write_log("")
-                    self._write_log(f"✓ All outputs saved to: {self.orchestrator.config.state_dir}")
-                    self._write_log("  • PDDL files (domain & problem)")
-                    self._write_log("  • Object registry")
-                    self._write_log(f"  • Session log: {self.log_file.name if self.log_file else 'session.log'}")
-                    self._log_file_handle.close()
-                except Exception:
-                    pass
-            
             self.orchestrator = None
         
+        # Always record where artifacts were saved and clean up handlers.
+        try:
+            self._write_log("")
+            if self.outputs_log_file or self.debug_log_file:
+                self._write_log(
+                    f"✓ All outputs saved to: {self.outputs_log_file.parent if self.outputs_log_file else self.debug_log_file.parent}"
+                )
+                self._write_log("  • PDDL files (domain & problem)")
+                self._write_log("  • Object registry")
+                if self.outputs_log_file:
+                    self._write_log(f"  • Outputs log: {self.outputs_log_file.name}")
+                if self.debug_log_file:
+                    self._write_log(f"  • Debug log: {self.debug_log_file.name}")
+        except Exception:
+            pass
+
+        if self._outputs_log_handle and not self._outputs_log_handle.closed:
+            try:
+                self._outputs_log_handle.close()
+            except Exception:
+                pass
+            finally:
+                self._outputs_log_handle = None
+
+        if self._debug_file_handler:
+            root_logger = logging.getLogger()
+            root_logger.removeHandler(self._debug_file_handler)
+            try:
+                self._debug_file_handler.close()
+            except Exception:
+                pass
+            finally:
+                self._debug_file_handler = None
+
+        self.outputs_log_file = None
+        self.debug_log_file = None
+
         self._update_status()
 
     async def action_shutdown(self):
@@ -645,18 +736,25 @@ class OrchestratorDemoApp(App):
         self._write_log("  • interval <seconds>   – Update detection interval")
         self._write_log("  • quit                 – Cleanup and exit")
 
-    def _write_log(self, message: str = ""):
-        """Write text to the log widget and file."""
+    def _write_log(self, message: str = "", *, from_logger: bool = False):
+        """Write text to the log widget and persist to the configured log files."""
         text = message or ""
         
-        # Write to file immediately (unwrapped)
-        if self._log_file_handle and not self._log_file_handle.closed:
+        # Persist user-facing log output
+        if self._outputs_log_handle and not self._outputs_log_handle.closed:
             try:
                 timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                self._log_file_handle.write(f"[{timestamp}] {text}\n")
-                self._log_file_handle.flush()
+                self._outputs_log_handle.write(f"[{timestamp}] {text}\n")
+                self._outputs_log_handle.flush()
             except Exception:
                 pass  # Fail gracefully
+
+        # Mirror manual messages into the debug logger so they appear in debug.log too.
+        if not from_logger and text and self._debug_file_handler:
+            try:
+                self._user_logger.info(text)
+            except Exception:
+                pass
         
         # Write to widget
         if self._log_widget is None:
@@ -709,7 +807,7 @@ class OrchestratorDemoApp(App):
         if self._initializing:
             status_text = "Initializing system components..."
         elif self._init_failed:
-            status_text = "Initialization failed - type 'restart' to retry"
+            status_text = "Initialization failed - press Enter or type 'restart' to retry"
         elif self._awaiting_task_input:
             status_text = "Waiting for task description..."
         else:
@@ -734,7 +832,7 @@ class OrchestratorDemoApp(App):
         if self._initializing:
             commands_text = "Initializing hardware and components..."
         elif self._init_failed:
-            commands_text = "Commands: restart | quit"
+            commands_text = "Commands: [Enter] restart | quit"
         elif self._awaiting_task_input:
             commands_text = "Input: task description"
         else:

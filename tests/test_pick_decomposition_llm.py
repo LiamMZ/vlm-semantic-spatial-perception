@@ -32,7 +32,6 @@ LLM_ARTIFACTS_DIR = Path("tests/artifacts/llm_pick")
 LLM_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 LLM_RESPONSE_PATH = LLM_ARTIFACTS_DIR / "pick_plan_llm_response.json"
 TRANSLATED_PLAN_PATH = LLM_ARTIFACTS_DIR / "pick_plan_llm_translated.json"
-NEW_IP_RESPONSE_PATH = LLM_ARTIFACTS_DIR / "new_interaction_points.json"
 
 
 def _load_world_state() -> Dict[str, Dict]:
@@ -49,36 +48,34 @@ def _load_world_state() -> Dict[str, Dict]:
 
 
 def _cloth_interaction(world_state: dict) -> dict:
-    """Extract the cloth graspable interaction point from the fixture registry."""
-    objects = world_state["registry"].get("objects", [])
-    for obj in objects:
-        if obj.get("object_id") == "black_folded_fabric/towel":
+    """Extract the cloth graspable interaction point from the latest snapshot detections."""
+    snapshot_id = world_state["last_snapshot_id"]
+    det_path = (
+        FIXTURE_DIR / "perception_pool" / "snapshots" / snapshot_id / "detections.json"
+    )
+    detections = json.loads(det_path.read_text())
+    for obj in detections.get("objects", []):
+        if obj.get("object_id") == "black_fabric_garment":
             grasp = (obj.get("interaction_points") or {}).get("graspable") or {}
-            pos2d = grasp.get("position_2d") or obj.get("latest_position_2d")
-            pos3d = grasp.get("position_3d") or obj.get("latest_position_3d")
+            pos2d = grasp.get("position_2d") or obj.get("position_2d")
+            pos3d = grasp.get("position_3d") or obj.get("position_3d")
             return {
                 "object_id": obj["object_id"],
-                "snapshot_id": grasp.get("snapshot_id") or obj.get("latest_observation"),
+                "snapshot_id": grasp.get("snapshot_id") or snapshot_id,
                 "position_2d": pos2d,
                 "position_3d": pos3d,
                 "confidence": grasp.get("confidence", obj.get("confidence")),
                 "reasoning": grasp.get("reasoning", ""),
             }
-    raise AssertionError("black_folded_fabric/towel not found in registry")
+    raise AssertionError("black_fabric_garment not found in detections")
 
 
 def _recording_llm_call(original_call):
     """Wrap the real LLM call to capture the raw response text to artifacts."""
 
-    call_idx = {"count": 0}
-
     def _wrapper(self, *args, **kwargs):
         response_text = original_call(self, *args, **kwargs)
-        call_idx["count"] += 1
-        if call_idx["count"] == 1:
-            LLM_RESPONSE_PATH.write_text(response_text)
-        else:
-            NEW_IP_RESPONSE_PATH.write_text(response_text)
+        LLM_RESPONSE_PATH.write_text(response_text)
         return response_text
 
     return _wrapper
@@ -88,8 +85,8 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
     """
     Source data: fixture registry/snapshots in tests/assets/continuous_pick_fixture; real Gemini call.
     Methods covered: SkillDecomposer.plan (real _call_llm wrapped for recording) and PrimitiveExecutor.prepare_plan.
-    Artifacts emitted: tests/artifacts/llm_pick/pick_plan_llm_response.json (plan),
-    new_interaction_points.json (affordance enrichment), and pick_plan_llm_translated.json.
+    Artifacts emitted: tests/artifacts/llm_pick/pick_plan_llm_response.json (plan) and
+    pick_plan_llm_translated.json.
     Assertions: plan includes cloth references and a graspable-like interaction point, helper params present,
     artifacts exist; also prepares translated plan without errors assertion beyond existence.
     """
@@ -98,7 +95,6 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
 
     decomposer = SkillDecomposer(
         api_key=genai_api_key,
-        cache_enabled=False,
     )
     decomposer._perception_pool_dir = FIXTURE_DIR / "perception_pool"
 
@@ -108,7 +104,6 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
             action_name="pick",
             parameters={"object_id": cloth["object_id"], "interaction": "graspable"},
             world_hint=world_state,
-            use_cache=False,
         )
 
     assert LLM_RESPONSE_PATH.exists()
@@ -128,7 +123,7 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
 
     # Translate helper parameters to executor/xArm-friendly payload and persist.
     executor = PrimitiveExecutor(
-        planner=None,
+        primitives=None,
         perception_pool_dir=FIXTURE_DIR / "perception_pool",
     )
     _, warnings, errors = executor.prepare_plan(plan, world_state)

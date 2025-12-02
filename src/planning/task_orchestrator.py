@@ -13,6 +13,7 @@ This class is optimized for actual execution and provides:
 """
 
 import os
+import io
 import asyncio
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from enum import Enum
 import json
 from datetime import datetime, timezone
 import uuid
+import logging
 
 import numpy as np
 from PIL import Image
@@ -32,6 +34,7 @@ from .llm_task_analyzer import TaskAnalysis
 from ..perception import ContinuousObjectTracker
 from ..perception.object_registry import DetectedObject
 from ..camera import RealSenseCamera
+from ..utils.logging_utils import get_structured_logger
 
 # Import config from config directory
 import sys
@@ -108,6 +111,7 @@ class TaskOrchestrator:
             pddl_representation: Optional PDDL representation (will create if None)
         """
         self.config = config
+        self.logger = get_structured_logger("TaskOrchestrator")
         self._state = OrchestratorState.UNINITIALIZED
         self._camera = camera
         self._external_camera = camera is not None  # Track if camera is externally managed
@@ -154,24 +158,30 @@ class TaskOrchestrator:
         This must be called before using the orchestrator.
         """
         if self._state != OrchestratorState.UNINITIALIZED:
-            print(f"⚠ Orchestrator already initialized (state: {self._state.value})")
+            self.logger.warning("Orchestrator already initialized (state: %s)", self._state.value)
             return
 
-        print("Initializing Task Orchestrator...")
+        self.logger.info("Initializing Task Orchestrator...")
 
         # Initialize camera if not provided
         if self._camera is None:
-            print(f"  • Initializing RealSense camera ({self.config.camera_width}x{self.config.camera_height} @ {self.config.camera_fps} FPS)...")
+            self.logger.info(
+                "  • Initializing RealSense camera (%sx%s @ %s FPS)...",
+                self.config.camera_width,
+                self.config.camera_height,
+                self.config.camera_fps,
+            )
             self._camera = RealSenseCamera(
                 width=self.config.camera_width,
                 height=self.config.camera_height,
                 fps=self.config.camera_fps,
                 enable_depth=self.config.enable_depth,
-                auto_start=True
+                auto_start=True,
+                logger=self.logger.getChild("RealSenseCamera"),
             )
-            print("    ✓ Camera initialized")
+            self.logger.info("    ✓ Camera initialized")
         else:
-            print("  • Using provided camera")
+            self.logger.info("  • Using provided camera")
 
         # Initialize PDDL representation if not provided
         if self.pddl is None:
@@ -179,7 +189,7 @@ class TaskOrchestrator:
                 domain_name="task_execution",
                 problem_name="current_task"
             )
-            print("  • PDDL representation created")
+            self.logger.info("  • PDDL representation created")
 
         # Initialize PDDL components
         self.maintainer = PDDLDomainMaintainer(
@@ -194,7 +204,7 @@ class TaskOrchestrator:
             min_observations_before_planning=self.config.min_observations,
             exploration_timeout_seconds=self.config.exploration_timeout
         )
-        print("  • PDDL domain maintainer and monitor initialized")
+        self.logger.info("  • PDDL domain maintainer and monitor initialized")
 
         # Initialize continuous tracker
         self.tracker = ContinuousObjectTracker(
@@ -203,22 +213,21 @@ class TaskOrchestrator:
             fast_mode=self.config.fast_mode,
             update_interval=self.config.update_interval,
             on_detection_complete=self._on_detection_callback,
-            scene_change_threshold=self.config.scene_change_threshold,
-            enable_scene_change_detection=self.config.enable_scene_change_detection
+            logger=self.logger.getChild("ObjectTracker"),
         )
 
         # Set frame provider
         self.tracker.set_frame_provider(self._get_camera_frames)
-        print("  • Continuous object tracker initialized")
+        self.logger.info("  • Continuous object tracker initialized")
 
         # Attach default robot provider if none supplied (xArm CuRobo interface)
         if getattr(self.config, "robot", None) is None:
             try:
                 from ..kinematics.xarm_curobo_interface import CuRoboMotionPlanner
                 self.config.robot = CuRoboMotionPlanner()
-                print("  • Default robot provider attached: CuRoboMotionPlanner")
+                self.logger.info("  • Default robot provider attached: CuRoboMotionPlanner")
             except Exception as e:
-                print(f"  • No robot provider attached (default xArm initialization failed: {e})")
+                self.logger.warning("  • No robot provider attached (default xArm initialization failed: %s)", e)
 
         # Configure auto-save (event-driven)
         if self.config.auto_save:
@@ -227,16 +236,16 @@ class TaskOrchestrator:
                 save_triggers.append("detection updates")
             if self.config.auto_save_on_state_change:
                 save_triggers.append("state changes")
-            print(f"  • Auto-save enabled on: {', '.join(save_triggers)}")
+            self.logger.info("  • Auto-save enabled on: %s", ", ".join(save_triggers))
 
         self._set_state(OrchestratorState.IDLE)
-        print("✓ Task Orchestrator initialized and ready\n")
+        self.logger.info("✓ Task Orchestrator initialized and ready")
 
     async def shutdown(self) -> None:
         """
         Shutdown the orchestrator and cleanup resources.
         """
-        print("\nShutting down Task Orchestrator...")
+        self.logger.info("Shutting down Task Orchestrator...")
 
         # Stop detection if running
         if self._detection_running:
@@ -249,10 +258,10 @@ class TaskOrchestrator:
         # Stop camera if we created it
         if self._camera and not self._external_camera:
             self._camera.stop()
-            print("  • Camera stopped")
+            self.logger.info("  • Camera stopped")
 
         self._set_state(OrchestratorState.UNINITIALIZED)
-        print("✓ Task Orchestrator shutdown complete")
+        self.logger.info("✓ Task Orchestrator shutdown complete")
 
     # ========================================================================
     # Task Management
@@ -279,38 +288,37 @@ class TaskOrchestrator:
             raise RuntimeError("Orchestrator not initialized. Call initialize() first.")
 
         self._set_state(OrchestratorState.ANALYZING_TASK)
-        print(f"\n{'='*70}")
-        print("PROCESSING TASK REQUEST")
-        print(f"{'='*70}")
-        print(f"Task: \"{task_description}\"")
-        print()
+        self.logger.info("%s", "=" * 70)
+        self.logger.info("PROCESSING TASK REQUEST")
+        self.logger.info("%s", "=" * 70)
+        self.logger.info('Task: "%s"', task_description)
 
         self.current_task = task_description
 
         # Capture environment image if not provided
         if environment_image is None and self._camera:
-            print("  • Capturing environment frame for context...")
+            self.logger.info("  • Capturing environment frame for context...")
             environment_image, _ = self._camera.get_aligned_frames()
 
         # Analyze task and initialize domain
-        print("  • Analyzing task with LLM...")
+        self.logger.info("  • Analyzing task with LLM...")
         self.task_analysis = await self.maintainer.initialize_from_task(
             task_description,
             environment_image=environment_image
         )
 
-        print(f"\n✓ Task analyzed!")
-        print(f"  • Goal objects: {', '.join(self.task_analysis.goal_objects)}")
-        print(f"  • Estimated steps: {self.task_analysis.estimated_steps}")
-        print(f"  • Complexity: {self.task_analysis.complexity}")
-        print(f"  • Required predicates: {len(self.task_analysis.relevant_predicates)}")
+        self.logger.info("✓ Task analyzed!")
+        self.logger.info("  • Goal objects: %s", ", ".join(self.task_analysis.goal_objects))
+        self.logger.info("  • Estimated steps: %s", self.task_analysis.estimated_steps)
+        self.logger.info("  • Complexity: %s", self.task_analysis.complexity)
+        self.logger.info("  • Required predicates: %s", len(self.task_analysis.relevant_predicates))
 
         # Seed perception with predicates
         if self.tracker:
-            print(f"\n  • Configuring perception with {len(self.task_analysis.relevant_predicates)} predicates...")
-            self.tracker.tracker.set_pddl_predicates(self.task_analysis.relevant_predicates)
+            self.logger.info("  • Configuring perception with %s predicates...", len(self.task_analysis.relevant_predicates))
+            self.tracker.set_pddl_predicates(self.task_analysis.relevant_predicates)
 
-        print(f"\n{'='*70}\n")
+        self.logger.info("%s", "=" * 70)
 
         self._set_state(OrchestratorState.IDLE)
         return self.task_analysis
@@ -338,7 +346,7 @@ class TaskOrchestrator:
 
         # Re-process existing observations with new task context
         if all_objects:
-            print(f"\n  • Re-processing {len(all_objects)} existing objects with new task...")
+            self.logger.info("  • Re-processing %s existing objects with new task...", len(all_objects))
             objects_dict = self._convert_objects_to_dict(all_objects)
             await self.maintainer.update_from_observations(objects_dict)
 
@@ -365,22 +373,21 @@ class TaskOrchestrator:
             raise RuntimeError("No task set. Call process_task_request() first.")
 
         if self._detection_running:
-            print("⚠ Detection already running")
+            self.logger.warning("Detection already running")
             return
 
-        print(f"\n{'='*70}")
-        print("STARTING CONTINUOUS DETECTION")
-        print(f"{'='*70}")
-        print(f"Update interval: {self.config.update_interval}s")
-        print(f"Minimum observations: {self.config.min_observations}")
-        print()
+        self.logger.info("%s", "=" * 70)
+        self.logger.info("STARTING CONTINUOUS DETECTION")
+        self.logger.info("%s", "=" * 70)
+        self.logger.info("Update interval: %ss", self.config.update_interval)
+        self.logger.info("Minimum observations: %s", self.config.min_observations)
 
         self.tracker.start()
         self._detection_running = True
         self._set_state(OrchestratorState.DETECTING)
 
-        print("✓ Continuous detection started")
-        print(f"{'='*70}\n")
+        self.logger.info("✓ Continuous detection started")
+        self.logger.info("%s", "=" * 70)
 
     async def stop_detection(self) -> None:
         """
@@ -389,11 +396,11 @@ class TaskOrchestrator:
         if not self._detection_running:
             return
 
-        print("\nStopping continuous detection...")
+        self.logger.info("Stopping continuous detection...")
         await self.tracker.stop()
         self._detection_running = False
         self._set_state(OrchestratorState.IDLE)
-        print("✓ Detection stopped")
+        self.logger.info("✓ Detection stopped")
 
     async def pause_detection(self) -> None:
         """
@@ -404,14 +411,14 @@ class TaskOrchestrator:
 
         await self.stop_detection()
         self._set_state(OrchestratorState.PAUSED)
-        print("✓ Detection paused")
+        self.logger.info("✓ Detection paused")
 
     async def resume_detection(self) -> None:
         """
         Resume paused detection.
         """
         if self._state != OrchestratorState.PAUSED:
-            print(f"⚠ Cannot resume from state: {self._state.value}")
+            self.logger.warning("Cannot resume from state: %s", self._state.value)
             return
 
         await self.start_detection()
@@ -423,7 +430,7 @@ class TaskOrchestrator:
             intrinsics = self._camera.get_camera_intrinsics()
             return color, depth, intrinsics
         except Exception as e:
-            print(f"⚠ Camera error: {e}")
+            self.logger.warning("Camera error: %s", e)
             return None, None, None
 
     # ========================================================================
@@ -487,11 +494,14 @@ class TaskOrchestrator:
         shortid = uuid.uuid4().hex[:6]
         return f"{ts_prefix}-{shortid}"
 
-    def _serialize_detections_for_snapshot(self) -> Tuple[Dict[str, Any], List[str]]:
+    def _serialize_detections_for_snapshot(
+        self,
+        objects: Optional[List[DetectedObject]] = None
+    ) -> Tuple[Dict[str, Any], List[str]]:
         """
-        Build detections.json payload from current registry and return (payload, object_ids).
+        Build detections.json payload from provided objects (or current registry) and return (payload, object_ids).
         """
-        objects = self.get_detected_objects()
+        objects = objects if objects is not None else self.get_detected_objects()
         object_ids: List[str] = []
         det_objects: List[Dict[str, Any]] = []
         for obj in objects:
@@ -501,6 +511,18 @@ class TaskOrchestrator:
                 "object_type": obj.object_type,
                 "affordances": list(obj.affordances),
                 "pddl_state": obj.pddl_state,
+                "interaction_points": {
+                    affordance: {
+                        "snapshot_id": None,  # filled by snapshot_id at write-time
+                        "position_2d": point.position_2d,
+                        "position_3d": point.position_3d.tolist() if point.position_3d is not None else None,
+                        "confidence": point.confidence,
+                        "reasoning": point.reasoning,
+                        "alternative_points": point.alternative_points,
+                    }
+                    for affordance, point in obj.interaction_points.items()
+                },
+                "position_2d": obj.position_2d,
                 "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None,
                 "bounding_box_2d": obj.bounding_box_2d
             })
@@ -634,9 +656,28 @@ class TaskOrchestrator:
         """
         # Serialize writes with a dedicated pool lock
         async with self._perception_pool_lock:
-            color, depth, intrinsics = self._get_camera_frames()
-            if color is None or intrinsics is None:
-                raise RuntimeError("Cannot capture snapshot: camera frames unavailable")
+            detection_bundle = self.tracker.get_last_detection_bundle() if self.tracker else None
+            bundle_color_bytes = bundle_depth = bundle_intrinsics = None
+            bundle_objects = None
+            bundle_timestamp = None
+            if detection_bundle:
+                bundle_color_bytes = detection_bundle.get("color_png")
+                bundle_depth = detection_bundle.get("depth")
+                bundle_intrinsics = detection_bundle.get("intrinsics")
+                bundle_objects = detection_bundle.get("objects")
+                bundle_timestamp = detection_bundle.get("timestamp")
+
+            color = depth = intrinsics = None
+            color_img = None
+
+            if bundle_color_bytes is not None:
+                depth = bundle_depth
+                intrinsics = bundle_intrinsics
+            else:
+                color, depth, intrinsics = self._get_camera_frames()
+                if color is None or intrinsics is None:
+                    raise RuntimeError("Cannot capture snapshot: camera frames unavailable")
+                color_img = Image.fromarray(color) if isinstance(color, np.ndarray) else color
 
             self._ensure_pool_dirs()
             pool_dir = self._get_perception_pool_dir()
@@ -645,9 +686,13 @@ class TaskOrchestrator:
             snapshot_dir.mkdir(parents=True, exist_ok=True)
 
             # Save color
-            color_img = Image.fromarray(color) if isinstance(color, np.ndarray) else color
             color_path = snapshot_dir / "color.png"
-            color_img.save(str(color_path), format="PNG")
+            if bundle_color_bytes is not None:
+                color_path.write_bytes(bundle_color_bytes)
+                if color_img is None:
+                    color_img = Image.open(io.BytesIO(bundle_color_bytes))
+            else:
+                color_img.save(str(color_path), format="PNG")
 
             # Save depth (optional)
             depth_path = None
@@ -666,8 +711,14 @@ class TaskOrchestrator:
                 json.dump(intr_dict, f, indent=2)
 
             # Save detections
-            det_payload, object_ids = self._serialize_detections_for_snapshot()
+            det_payload, object_ids = self._serialize_detections_for_snapshot(objects=bundle_objects)
+            if bundle_timestamp is not None:
+                det_payload["stamp"] = bundle_timestamp
             det_path = snapshot_dir / "detections.json"
+            # Stamp snapshot_id into interaction points for grounding
+            for dobj in det_payload.get("objects", []):
+                for point in (dobj.get("interaction_points") or {}).values():
+                    point["snapshot_id"] = snapshot_id
             with open(det_path, "w") as f:
                 json.dump(det_payload, f, indent=2)
 
@@ -681,8 +732,9 @@ class TaskOrchestrator:
 
             # Manifest
             recorded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            # captured_at: fallback to recorded_at (no camera-specific timestamp available here)
             captured_at = recorded_at
+            if bundle_timestamp is not None:
+                captured_at = datetime.fromtimestamp(bundle_timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
             manifest = {
                 "snapshot_id": snapshot_id,
                 "captured_at": captured_at,
@@ -790,7 +842,7 @@ class TaskOrchestrator:
                     await self.save_snapshot(reason="periodic")
                 except Exception as e:
                     # Non-fatal: continue detection
-                    print(f"⚠ Snapshot failed: {e}")
+                    self.logger.warning("Snapshot failed: %s", e)
 
     def _convert_objects_to_dict(self, objects: List[DetectedObject]) -> List[Dict]:
         """Convert DetectedObject list to dict format for PDDL maintainer."""
@@ -845,8 +897,8 @@ class TaskOrchestrator:
             }
 
         # Add registry stats (from tracker's registry)
-        if self.tracker and self.tracker.tracker:
-            registry = self.tracker.tracker.registry
+        if self.tracker:
+            registry = self.tracker.registry
             status["registry"] = {
                 "num_objects": len(registry),
                 "object_types": list(set(obj.object_type for obj in registry.get_all_objects())),
@@ -887,20 +939,20 @@ class TaskOrchestrator:
 
     def get_detected_objects(self) -> List[DetectedObject]:
         """Get all detected objects from tracker's registry."""
-        if self.tracker and self.tracker.tracker:
-            return self.tracker.tracker.registry.get_all_objects()
+        if self.tracker:
+            return self.tracker.registry.get_all_objects()
         return []
 
     def get_objects_by_type(self, object_type: str) -> List[DetectedObject]:
         """Get objects of a specific type."""
-        if self.tracker and self.tracker.tracker:
-            return self.tracker.tracker.registry.get_objects_by_type(object_type)
+        if self.tracker:
+            return self.tracker.registry.get_objects_by_type(object_type)
         return []
 
     def get_objects_with_affordance(self, affordance: str) -> List[DetectedObject]:
         """Get objects with a specific affordance."""
-        if self.tracker and self.tracker.tracker:
-            return self.tracker.tracker.registry.get_objects_with_affordance(affordance)
+        if self.tracker:
+            return self.tracker.registry.get_objects_with_affordance(affordance)
         return []
     
     def get_new_objects(self) -> List[DetectedObject]:
@@ -964,38 +1016,41 @@ class TaskOrchestrator:
 
         output_dir = Path(output_dir)
 
-        print(f"\n{'='*70}")
-        print("GENERATING PDDL FILES")
-        print(f"{'='*70}")
+        self.logger.info("%s", "=" * 70)
+        self.logger.info("GENERATING PDDL FILES")
+        self.logger.info("%s", "=" * 70)
 
         # Set goals if requested
         if set_goals:
-            print("  • Setting goal state from task analysis...")
+            self.logger.info("  • Setting goal state from task analysis...")
             await self.maintainer.set_goal_from_task_analysis()
 
         # Generate files
-        print(f"  • Generating files to {output_dir}...")
+        self.logger.info("  • Generating files to %s...", output_dir)
         paths = await self.pddl.generate_files_async(str(output_dir))
 
-        print(f"\n✓ PDDL files generated:")
-        print(f"  • Domain: {paths['domain_path']}")
-        print(f"  • Problem: {paths['problem_path']}")
+        self.logger.info("✓ PDDL files generated:")
+        self.logger.info("  • Domain: %s", paths["domain_path"])
+        self.logger.info("  • Problem: %s", paths["problem_path"])
 
         # Show summary
         domain_snapshot = await self.pddl.get_domain_snapshot()
         problem_snapshot = await self.pddl.get_problem_snapshot()
 
-        print(f"\nDomain Summary:")
-        print(f"  • Types: {len(domain_snapshot['object_types'])}")
-        print(f"  • Predicates: {len(domain_snapshot['predicates'])}")
-        print(f"  • Actions: {len(domain_snapshot['predefined_actions']) + len(domain_snapshot['llm_generated_actions'])}")
+        self.logger.info("Domain Summary:")
+        self.logger.info("  • Types: %s", len(domain_snapshot["object_types"]))
+        self.logger.info("  • Predicates: %s", len(domain_snapshot["predicates"]))
+        self.logger.info(
+            "  • Actions: %s",
+            len(domain_snapshot["predefined_actions"]) + len(domain_snapshot["llm_generated_actions"]),
+        )
 
-        print(f"\nProblem Summary:")
-        print(f"  • Objects: {len(problem_snapshot['object_instances'])}")
-        print(f"  • Initial literals: {len(problem_snapshot['initial_literals'])}")
-        print(f"  • Goal literals: {len(problem_snapshot['goal_literals'])}")
+        self.logger.info("Problem Summary:")
+        self.logger.info("  • Objects: %s", len(problem_snapshot["object_instances"]))
+        self.logger.info("  • Initial literals: %s", len(problem_snapshot["initial_literals"]))
+        self.logger.info("  • Goal literals: %s", len(problem_snapshot["goal_literals"]))
 
-        print(f"\n{'='*70}\n")
+        self.logger.info("%s", "=" * 70)
 
         return paths
 
@@ -1008,13 +1063,12 @@ class TaskOrchestrator:
         Build an enhanced registry with snapshot references.
         
         The enhanced format includes snapshot references to show observation history,
-        while keeping latest positions for convenience. Full position history is
-        available in each snapshot's detections.json file.
+        while keeping full position history in each snapshot's detections.json file.
         
         Returns:
             Dict with registry data including snapshot references
         """
-        if not self.tracker or not self.tracker.tracker:
+        if not self.tracker:
             return {"num_objects": 0, "detection_timestamp": datetime.now().isoformat(), "objects": []}
         
         # Load perception pool index to get snapshot references
@@ -1026,9 +1080,9 @@ class TaskOrchestrator:
                 snapshot_refs = pool_index.get("objects", {})
         
         # Build enhanced object entries
-        registry = self.tracker.tracker.registry
+        registry = self.tracker.registry
         objects_data = []
-        
+
         with registry._lock:
             for obj in registry._objects.values():
                 # Get snapshot references for this object
@@ -1045,25 +1099,8 @@ class TaskOrchestrator:
                     # Snapshot references - this is the key addition
                     "observations": obj_snapshots,
                     "latest_observation": latest_snapshot,
-                    # Keep latest position/bbox for convenience (from latest detection)
-                    # For full history, look up each snapshot's detections.json
-                    "latest_position_2d": obj.position_2d,
-                    "latest_position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None,
-                    "latest_bounding_box_2d": obj.bounding_box_2d,
-                    "interaction_points": {}
                 }
-                
-                # Interaction points now reference their source snapshot
-                for affordance, point in obj.interaction_points.items():
-                    obj_dict["interaction_points"][affordance] = {
-                        "snapshot_id": latest_snapshot,  # Grounded in specific perception
-                        "position_2d": point.position_2d,
-                        "position_3d": point.position_3d.tolist() if point.position_3d is not None else None,
-                        "confidence": point.confidence,
-                        "reasoning": point.reasoning,
-                        "alternative_points": point.alternative_points
-                    }
-                
+
                 objects_data.append(obj_dict)
         
         return {
@@ -1097,11 +1134,11 @@ class TaskOrchestrator:
 
         # Save enhanced registry with snapshot references
         registry_path = path.parent / "registry.json"
-        if self.tracker and self.tracker.tracker:
+        if self.tracker:
             enhanced_registry = self._build_enhanced_registry()
             with open(registry_path, 'w') as f:
                 json.dump(enhanced_registry, f, indent=2)
-            print(f"✓ Saved {enhanced_registry['num_objects']} objects to {registry_path}")
+            self.logger.info("✓ Saved %s objects to %s", enhanced_registry["num_objects"], registry_path)
 
         # Save PDDL files
         pddl_dir = path.parent / "pddl"
@@ -1134,7 +1171,7 @@ class TaskOrchestrator:
             json.dump(state_data, f, indent=2)
 
         self._last_save_time = time.time()
-        print(f"✓ State saved to {path}")
+        self.logger.info("✓ State saved to %s", path)
 
         return path
 
@@ -1153,16 +1190,16 @@ class TaskOrchestrator:
         if not path.exists():
             raise FileNotFoundError(f"State file not found: {path}")
 
-        print(f"Loading state from {path}...")
+        self.logger.info("Loading state from %s...", path)
 
         with open(path, 'r') as f:
             state_data = json.load(f)
 
         # Load object registry into tracker's registry
         registry_path = state_data["files"]["registry"]
-        if Path(registry_path).exists() and self.tracker and self.tracker.tracker:
-            self.tracker.tracker.registry.load_from_json(registry_path)
-            print(f"  • Loaded {len(self.tracker.tracker.registry)} objects")
+        if Path(registry_path).exists() and self.tracker:
+            self.tracker.registry.load_from_json(registry_path)
+            self.logger.info("  • Loaded %s objects", len(self.tracker.registry))
 
         # Load task information
         self.current_task = state_data.get("current_task")
@@ -1173,13 +1210,13 @@ class TaskOrchestrator:
         task_analysis_data = state_data.get("task_analysis")
         if task_analysis_data and self.current_task:
             # Re-analyze task to get full TaskAnalysis object
-            print(f"  • Re-analyzing task: '{self.current_task}'")
+            self.logger.info("  • Re-analyzing task: '%s'", self.current_task)
             await self.process_task_request(self.current_task)
 
             # Re-process existing observations from tracker's registry
             all_objects = self.get_detected_objects()
             if all_objects:
-                print(f"  • Re-processing {len(all_objects)} objects...")
+                self.logger.info("  • Re-processing %s objects...", len(all_objects))
                 objects_dict = self._convert_objects_to_dict(all_objects)
                 await self.maintainer.update_from_observations(objects_dict)
 
@@ -1193,14 +1230,17 @@ class TaskOrchestrator:
                     with open(p, "r") as f:
                         self._perception_pool_index = json.load(f)
                         self.last_snapshot_id = self._perception_pool_index.get("last_snapshot_id", self.last_snapshot_id)
-                        print(f"  • Perception pool index loaded with {len(self._perception_pool_index.get('snapshots', {}))} snapshots")
+                        self.logger.info(
+                            "  • Perception pool index loaded with %s snapshots",
+                            len(self._perception_pool_index.get("snapshots", {})),
+                        )
                 except Exception:
                     self._perception_pool_index = self._init_empty_pool_index()
             else:
                 # Initialize empty if directory configured but index missing
                 self._perception_pool_index = self._init_empty_pool_index()
 
-        print(f"✓ State loaded successfully")
+        self.logger.info("✓ State loaded successfully")
 
     async def _try_auto_save(self) -> None:
         """
@@ -1245,7 +1285,7 @@ class TaskOrchestrator:
 
     def __repr__(self) -> str:
         """String representation."""
-        num_objects = len(self.tracker.tracker.registry) if self.tracker and self.tracker.tracker else 0
+        num_objects = len(self.tracker.registry) if self.tracker else 0
         return (
             f"TaskOrchestrator("
             f"state={self._state.value}, "

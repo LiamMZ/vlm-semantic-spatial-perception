@@ -57,6 +57,6 @@ Ad-hoc world model generation in PDDL, powered by LLM (Gemini Robotics-ER), whic
 ├── scripts/                  # Utilities (e.g., run_cached_plan.py)
 └── tests/                    # Regression suites + cached translation/LLM artifacts
     ├── assets/               # World fixtures used by cached plans
-    ├── artifacts/            # Translation/LLM artifacts
+    ├── artifacts/            # Test artifacts
     └── conftest.py           # Test configuration
 ```

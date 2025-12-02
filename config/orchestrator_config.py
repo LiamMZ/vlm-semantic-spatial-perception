@@ -34,8 +34,6 @@ class OrchestratorConfig:
     update_interval: float = 2.0  # Seconds between detections
     min_observations: int = 3  # Minimum objects before planning
     fast_mode: bool = False  # Skip interaction points for speed
-    scene_change_threshold: float = 0.15
-    enable_scene_change_detection: bool = True
 
     # Persistence Configuration
     state_dir: Path = field(default_factory=lambda: Path("outputs/orchestrator_state"))

@@ -12,7 +12,7 @@
    - Capture/attach an environment frame when available; note whether a frame was used in the journal.
    - Reject ambiguous tasks early and log the exchange with timestamp + base commit hash.
 2. **Perception**
-   - `ObjectTracker` must load prompts from YAML; keep `fast_mode`/`scene_change_threshold` aligned with hardware constraints and document overrides.
+   - `ObjectTracker` must load prompts from YAML; keep `fast_mode` and update cadence aligned with hardware constraints and document overrides.
    - Ensure frame providers return `(color, depth, intrinsics)`; depth may be `None` for webcam-only runs—note this when interpreting executor warnings.
 3. **Registry & Snapshots**
    - Registry saves are versioned (v2.0) via `save_state()`; do not edit `registry.json`.

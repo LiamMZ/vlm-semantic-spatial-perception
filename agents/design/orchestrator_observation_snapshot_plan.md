@@ -8,7 +8,7 @@ Goal (delivered): `TaskOrchestrator` now captures lightweight “observation sna
 - Keep state persistence non-breaking: existing PDDL outputs remain unchanged; `registry.json` now embeds snapshot references via the orchestrator’s enhanced registry builder.
 
 ### Current Behavior (as shipped in `src/planning/task_orchestrator.py`)
-- Snapshots are taken every detection by default (`enable_snapshots=True`, `snapshot_every_n_detections=1`). Adjust cadence/retention via `OrchestratorConfig`.
+- Snapshots are taken every detection by default (`enable_snapshots=True`, `snapshot_every_n_detections=1`). Adjust cadence/retention via `OrchestratorConfig`. Each snapshot now reuses the exact color/depth/intrinsics frame from the most recent detection cycle to avoid drift when the camera moves between perception and write-out.
 - Snapshot contents (under `perception_pool/snapshots/<SNAPSHOT_ID>/`):
   - `color.png` (lossless)
   - `depth.npz` (optional; float32 meters) when depth is enabled
@@ -16,7 +16,8 @@ Goal (delivered): `TaskOrchestrator` now captures lightweight “observation sna
   - `detections.json` (stamp + objects with `object_id`, `object_type`, `affordances`, `pddl_state`, `position_3d`, `bounding_box_2d`)
   - `manifest.json` (`snapshot_id`, `captured_at`, `recorded_at`, sources, file list, optional label/reason)
   - `robot_state.json` (optional, via duck-typed `get_robot_state()`)
-- Manifest timestamps: `captured_at` currently equals `recorded_at` (no camera stamp yet); IDs are `YYYYMMDD_HHMMSS_mmm-<shortid>` for sortability, not time authority.
+- `detections.json` is built from only the most recent detection pass (not the long-lived registry), so objects drop out of snapshots when they leave the frame, even though the registry may still carry them for re-ID context.
+- Manifest timestamps: `captured_at` now mirrors the detection frame timestamp (when available from the last detection bundle) and falls back to `recorded_at`; IDs are `YYYYMMDD_HHMMSS_mmm-<shortid>` for sortability, not time authority.
 - Perception pool index (`perception_pool/index.json`, version `1.0`):
   - `objects[object_id] -> [snapshot_ids]`
   - `snapshots[id] -> {captured_at, recorded_at, objects, files, label, reason}`
@@ -42,10 +43,11 @@ Goal (delivered): `TaskOrchestrator` now captures lightweight “observation sna
 
 ### Deviations from the original concept (tracked for future extension)
 - No `extrinsics.json` is emitted; any transform data should be added to `robot_state.json` once a stable schema is agreed upon.
-- `captured_at` mirrors `recorded_at` until camera/robot timestamps are plumbed through.
+- `captured_at` now reflects detection time; `recorded_at` remains the write time.
 - Snapshot retention is index-driven; avoid manual folder deletion to keep references consistent.
 
 ### Operator Notes
 - Always cite snapshot IDs and the cadence/retention settings used when reporting results or incidents.
 - When customizing storage paths, prefer `perception_pool_dir` over manual symlinks.
 - If robot context is expected but missing, capture that in the daily journal with the base commit hash (`git log -1 --format="%H"`).
+- Route orchestrator/camera logs through `configure_logging(..., callback=_write_log, include_console=False)` (see `examples/orchestrator_demo.py`) so snapshot/camera errors surface in real time without stdout redirection.

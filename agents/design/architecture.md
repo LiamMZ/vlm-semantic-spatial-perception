@@ -4,8 +4,8 @@ Agents sit on top of the production `TaskOrchestrator` pipeline plus the primiti
 
 ## Current Stack (code-backed)
 1. **Task analysis + PDDL maintenance** – `PDDLDomainMaintainer` (`llm_task_analyzer.py`) seeds and updates `PDDLRepresentation`; `TaskStateMonitor` gates readiness.
-2. **Continuous perception** – `ContinuousObjectTracker` (prompted `ObjectTracker`) streams detections into `DetectedObjectRegistry`, honoring `scene_change_threshold` and `fast_mode`.
-3. **State persistence + snapshots** – `TaskOrchestrator` writes `state.json`, `registry.json` (v2.0 with `observations`), PDDL outputs, and a perception pool (`color.png`, optional `depth.npz`, `intrinsics.json`, `detections.json`, `manifest.json`, optional `robot_state.json`) indexed by `perception_pool/index.json`.
+2. **Continuous perception** – `ContinuousObjectTracker` (subclass of `ObjectTracker`) streams detections into `DetectedObjectRegistry` on an interval, with a simple `should_detect` hook (currently always true) and `fast_mode` for lighter calls.
+3. **State persistence + snapshots** – `TaskOrchestrator` writes `state.json`, `registry.json` (v2.0 with `observations`), PDDL outputs, and a perception pool (`color.png`, optional `depth.npz`, `intrinsics.json`, `detections.json`, `manifest.json`, optional `robot_state.json`) indexed by `perception_pool/index.json`; snapshots reuse the last detection bundle (color/depth/intrinsics/detections) so only on-frame objects are serialized even if the registry still holds older IDs.
 4. **World-state export** – `get_world_state_snapshot()` bundles registry + `snapshot_index` + `last_snapshot_id` + `robot_state` for downstream planners.
 5. **Primitive planning/execution** – `SkillDecomposer` (Gemini ER) + `PrimitiveExecutor` live under `src/primitives/`; they use `config/primitive_descriptions.md`, `config/skill_decomposer_prompts.yaml`, and snapshot utils to turn symbolic steps into validated primitive calls and (optionally) execute via `CuRoboMotionPlanner`.
 
@@ -33,6 +33,7 @@ SkillDecomposer.plan(...) → SkillPlan → PrimitiveExecutor.execute_plan(...)
 - Prompts: `config/prompts_config.yaml` (perception), `config/skill_decomposer_prompts.yaml` (primitive planning). Keep them aligned with `agents/design/prompts_configuration.md`.
 - Primitive catalog: `config/primitive_descriptions.md` must mirror callable signatures in `src/kinematics/xarm_curobo_interface.py` and stay in sync with `PRIMITIVE_LIBRARY`.
 - Snapshot helpers: `src/planning/utils/snapshot_utils.py` resolve color/depth/intrinsics for a snapshot ID referenced in the registry or plan.
+- Logging: use `configure_logging` (`src/utils/logging_utils.py`) to route `TaskOrchestrator`/`RealSenseCamera` logs into UI callbacks (e.g., the Textual demo) instead of redirecting stdout.
 
 ## Example Orchestration + Primitive Plan
 ```python
@@ -61,7 +62,7 @@ async def main():
     plan = decomposer.plan("pick", {"object_id": "black_folded_fabric"})
 
     executor = PrimitiveExecutor(
-        planner=None,  # inject CuRoboMotionPlanner(...) to execute on hardware
+        primitives=None,  # inject CuRoboMotionPlanner(...) to execute on hardware
         perception_pool_dir=cfg.state_dir / "perception_pool",
     )
     result = executor.execute_plan(plan, world, dry_run=True)
