@@ -201,7 +201,8 @@ class TaskOrchestrator:
         self.maintainer = PDDLDomainMaintainer(
             self.pddl,
             api_key=self.config.api_key,
-            model_name=self.config.model_name
+            model_name=self.config.model_name,
+            robot_description=self.config.robot_description
         )
 
         self.monitor = TaskStateMonitor(
@@ -333,7 +334,8 @@ class TaskOrchestrator:
         )
 
         self.logger.info("✓ Task analyzed!")
-        self.logger.info("  • Goal objects: %s", ", ".join(self.task_analysis.goal_objects))
+        valid_goal_objects = [obj for obj in self.task_analysis.goal_objects if obj and obj != "None"]
+        self.logger.info("  • Goal objects: %s", ", ".join(valid_goal_objects) if valid_goal_objects else "None")
         self.logger.info("  • Estimated steps: %s", self.task_analysis.estimated_steps)
         self.logger.info("  • Complexity: %s", self.task_analysis.complexity)
         self.logger.info("  • Required predicates: %s", len(self.task_analysis.relevant_predicates))
@@ -354,9 +356,10 @@ class TaskOrchestrator:
                 }
                 for action in self.task_analysis.required_actions
             ]
-            self.tracker.tracker.set_task_context(
+            self.tracker.set_task_context(
                 task_description=task_description,
-                available_actions=available_actions
+                available_actions=available_actions,
+                goal_objects=self.task_analysis.goal_objects
             )
 
         print(f"\n{'='*70}\n")
@@ -1068,9 +1071,19 @@ class TaskOrchestrator:
         # Sync objects from tracker to PDDL representation
         if self.tracker and hasattr(self.tracker, 'tracker'):
             self.logger.info("  • Syncing objects from tracker to PDDL...")
-            registry = self.tracker.tracker.registry
+            registry = self.tracker.registry
             all_objects = registry.get_all_objects()
             self.logger.info(f"    Found {len(all_objects)} objects in registry")
+
+            # Check if objects have been detected
+            if len(all_objects) == 0:
+                self.logger.warning("⚠ No objects detected in tracker registry!")
+                self.logger.warning("  Planning requires at least one detected object.")
+                self.logger.warning("  Make sure object detection has run before calling generate_pddl_files().")
+                print("\n⚠ WARNING: Cannot generate PDDL files - no objects detected!")
+                print("  • Ensure the object tracker has detected objects before planning")
+                print("  • Check that detect_objects() has been called and completed")
+                print("  • Verify the camera is providing valid frames")
 
             # Add objects to PDDL problem
             for obj in all_objects:
@@ -1121,7 +1134,9 @@ class TaskOrchestrator:
         algorithm: Optional[SearchAlgorithm] = None,
         timeout: Optional[float] = None,
         generate_files: bool = True,
-        output_dir: Optional[Path] = None
+        output_dir: Optional[Path] = None,
+        wait_for_objects: bool = False,
+        max_wait_seconds: float = 30.0
     ) -> SolverResult:
         """
         Generate PDDL files and solve for a plan.
@@ -1131,12 +1146,39 @@ class TaskOrchestrator:
             timeout: Solver timeout in seconds (defaults to config)
             generate_files: Whether to generate PDDL files first
             output_dir: Directory for PDDL files (defaults to config.state_dir / "pddl")
+            wait_for_objects: Whether to wait for object detection before planning
+            max_wait_seconds: Maximum time to wait for objects (default: 30s)
 
         Returns:
             SolverResult with plan and statistics
         """
         if self.solver is None:
             raise RuntimeError("Solver not initialized")
+
+        # Wait for object detection to complete if requested
+        if wait_for_objects and self.tracker and hasattr(self.tracker, 'registry'):
+            registry = self.tracker.registry
+            objects_count = len(registry.get_all_objects())
+
+            if objects_count == 0:
+                print(f"\n⏳ Waiting for object detection to complete (max {max_wait_seconds}s)...")
+                import asyncio
+                waited = 0.0
+                poll_interval = 0.5
+
+                while objects_count == 0 and waited < max_wait_seconds:
+                    await asyncio.sleep(poll_interval)
+                    waited += poll_interval
+                    objects_count = len(registry.get_all_objects())
+
+                    if waited % 5.0 < poll_interval:  # Print every 5 seconds
+                        print(f"  Still waiting... ({waited:.1f}s elapsed, {objects_count} objects detected)")
+
+                if objects_count == 0:
+                    print(f"\n⚠ WARNING: No objects detected after {max_wait_seconds}s")
+                    print("  Planning will likely fail without detected objects")
+                else:
+                    print(f"✓ Object detection complete: {objects_count} objects detected")
 
         # Use config defaults if not specified
         if algorithm is None:
@@ -1245,13 +1287,25 @@ class TaskOrchestrator:
         print()
 
         try:
-            # Read the current domain for context if available
+            # Read the current domain and problem files for context if available
             domain_content = None
+            problem_content = None
             if pddl_files and "domain_path" in pddl_files:
                 domain_path = Path(pddl_files["domain_path"])
                 if domain_path.exists():
                     domain_content = domain_path.read_text()
 
+            if pddl_files and "problem_path" in pddl_files:
+                problem_path = Path(pddl_files["problem_path"])
+                if problem_path.exists():
+                    print("Problem file exists!")
+                    problem_content = problem_path.read_text()
+                    print(problem_content)
+                else: 
+                    print("  ⚠ Problem file not found for refinement context")
+            else:
+                print("  ⚠ Problem file not found in pddl files for refinement context")
+            print(pddl_files)
             # Use the maintainer to refine the domain
             print("  • Requesting domain refinement from LLM...")
 
@@ -1260,7 +1314,8 @@ class TaskOrchestrator:
                 # The maintainer will analyze the error and fix the domain
                 await self.maintainer.refine_domain_from_error(
                     error_message=error_message,
-                    current_domain_pddl=domain_content
+                    current_domain_pddl=domain_content,
+                    current_problem_pddl=problem_content
                 )
 
                 print("  ✓ Domain refinement complete")
@@ -1282,7 +1337,9 @@ class TaskOrchestrator:
         self,
         algorithm: Optional[SearchAlgorithm] = None,
         timeout: Optional[float] = None,
-        output_dir: Optional[Path] = None
+        output_dir: Optional[Path] = None,
+        wait_for_objects: bool = True,
+        max_wait_seconds: float = 30.0
     ) -> SolverResult:
         """
         Solve for a plan with automatic domain refinement on failures.
@@ -1295,6 +1352,8 @@ class TaskOrchestrator:
             algorithm: Search algorithm to use (defaults to config)
             timeout: Solver timeout in seconds (defaults to config)
             output_dir: Directory for PDDL files (defaults to config.state_dir / "pddl")
+            wait_for_objects: Whether to wait for object detection before planning
+            max_wait_seconds: Maximum time to wait for objects (default: 30s)
 
         Returns:
             SolverResult with plan and statistics
@@ -1304,12 +1363,14 @@ class TaskOrchestrator:
         self.last_planning_error = None
 
         while self.refinement_attempts <= self.config.max_refinement_attempts:
-            # Try to solve
+            # Try to solve (wait for objects only on first attempt)
             result = await self.solve_and_plan(
                 algorithm=algorithm,
                 timeout=timeout,
                 generate_files=True,  # Always regenerate after refinement
-                output_dir=output_dir
+                output_dir=output_dir,
+                wait_for_objects=wait_for_objects and self.refinement_attempts == 0,  # Only wait on first attempt
+                max_wait_seconds=max_wait_seconds
             )
 
             # Success - return result

@@ -108,9 +108,9 @@ async def test_tamp_integration():
 
         # Add to registry
         if tamp.orchestrator.tracker:
-            tamp.orchestrator.tracker.tracker.registry.add_object(red_block)
-            tamp.orchestrator.tracker.tracker.registry.add_object(blue_block)
-            tamp.orchestrator.tracker.tracker.registry.add_object(table)
+            tamp.orchestrator.tracker.registry.add_object(red_block)
+            tamp.orchestrator.tracker.registry.add_object(blue_block)
+            tamp.orchestrator.tracker.registry.add_object(table)
             print("   ✓ Added mock objects: red_block, blue_block, table")
 
         # Test a simple task

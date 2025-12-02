@@ -30,19 +30,28 @@ class LLMTaskAnalyzer:
     to the actual environment rather than relying on fixed patterns.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-pro"):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-2.5-pro",
+        robot_description: Optional[str] = None
+    ):
         """
         Initialize LLM task analyzer.
 
         Args:
             api_key: Gemini API key (None to use environment variable)
             model_name: Model to use (flash for speed, pro for quality)
+            robot_description: Optional description of robot capabilities and affordances
         """
         self.api_key = api_key
         self.model_name = model_name
+        self.robot_description = robot_description
         self.client = genai.Client(api_key=api_key)
 
         print(f"ℹ LLMTaskAnalyzer using GenAI SDK with model: {model_name}")
+        if robot_description:
+            print(f"  • Robot description configured ({len(robot_description)} chars)")
 
         # Response cache for identical queries
         self._cache: Dict[str, TaskAnalysis] = {}
@@ -148,9 +157,19 @@ class LLMTaskAnalyzer:
         This prompt asks the LLM to predict what predicates, actions, and objects
         will likely be needed for the task, even without seeing the environment yet.
         """
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Consider the robot's capabilities when determining feasible actions and predicates.
+"""
+
         return f"""Analyze this robotic task and predict required PDDL components.
 
 TASK: {task}
+{robot_context}
 
 Return JSON with:
 {{
@@ -203,10 +222,19 @@ Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspab
 
         relationship_list = "\n".join([f"- {rel}" for rel in relationships[:30]])
 
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Consider the robot's capabilities when determining feasible actions.
+"""
+
         return f"""You are a robotic task planner. Analyze this task given the observed scene.
 
 TASK: {task}
-
+{robot_context}
 OBSERVED OBJECTS:
 {object_list if object_list else "- No objects detected yet"}
 

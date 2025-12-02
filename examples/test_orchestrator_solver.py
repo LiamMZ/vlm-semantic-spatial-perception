@@ -112,9 +112,9 @@ async def test_solver_integration():
     ]
 
     # Add objects to registry
-    if orchestrator.tracker and orchestrator.tracker.tracker:
+    if orchestrator.tracker and orchestrator.tracker:
         for obj in mock_objects:
-            orchestrator.tracker.tracker.registry.add_object(obj)
+            orchestrator.tracker.registry.add_object(obj)
         print(f"   ✓ Added {len(mock_objects)} mock objects")
         print()
 

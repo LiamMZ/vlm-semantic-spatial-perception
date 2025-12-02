@@ -20,6 +20,8 @@ detection:
       ]
       {prior_images_section}
 
+      IMPORTANT: All object IDs use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle".
+
       Wait for the next turn with the current frame before performing detection.
 
     current: |-
@@ -31,9 +33,10 @@ detection:
 
       Instructions:
       - Return bounding boxes as a JSON array with labels. Never return masks or code fencing.
-      - Include all objects you can identify, focusing on new objects that are not in context turn. 
+      - Include all objects you can identify, focusing on new objects that are not in context turn.
       - If the current image is similar or identical to context image with no new objects, it is fine to not return new detections
       - If an object from previous images is visible, re-use the exact id as the "label"; otherwise create a descriptive, unique label (colors, size, position, distinctive traits).
+      - IMPORTANT: Object labels must use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle", "red_cup" not "red-cup"
       - Box format: [ymin, xmin, ymax, xmax] normalized to 0-1000. All values MUST be integers.
       - Prefer tight boxes around each object instance. The bounding box may have moved compared to last capture, so make sure to update all bounding boxes and not just return the same bounding box for existing objects.
       - Output ONLY the JSON array in this format (no prose):
@@ -164,8 +167,6 @@ pddl:
   example_template: |
     ,
       "pddl_state": {"clean": true, "opened": false, "filled": false}
-<<<<<<< HEAD
-=======
 
 # Task Context Templates
 task_context:
@@ -197,4 +198,3 @@ task_context:
 
     Consider the task requirements when identifying the optimal interaction point.
 
->>>>>>> aa951db (pddl solver integration setup)

@@ -158,7 +158,8 @@ class PDDLDomainMaintainer:
         self,
         pddl_representation: PDDLRepresentation,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-flash"
+        model_name: str = "gemini-robotics-er-1.5-preview",
+        robot_description: Optional[str] = None
     ):
         """
         Initialize domain maintainer.
@@ -167,9 +168,15 @@ class PDDLDomainMaintainer:
             pddl_representation: PDDL representation to maintain
             api_key: Gemini API key for LLM analysis
             model_name: LLM model to use
+            robot_description: Optional description of robot capabilities and affordances
         """
         self.pddl = pddl_representation
-        self.llm_analyzer = LLMTaskAnalyzer(api_key=api_key, model_name=model_name)
+        self.robot_description = robot_description
+        self.llm_analyzer = LLMTaskAnalyzer(
+            api_key=api_key,
+            model_name=model_name,
+            robot_description=robot_description
+        )
 
         # Current task context
         self.current_task: Optional[str] = None
@@ -710,7 +717,8 @@ class PDDLDomainMaintainer:
     async def refine_domain_from_error(
         self,
         error_message: str,
-        current_domain_pddl: Optional[str] = None
+        current_domain_pddl: Optional[str] = None,
+        current_problem_pddl: Optional[str] = None
     ) -> None:
         """
         Refine the PDDL domain based on a planning error.
@@ -720,10 +728,12 @@ class PDDLDomainMaintainer:
         - Missing predicates
         - Action definition errors
         - Type mismatches
+        - Goal object name mismatches with detected objects
 
         Args:
             error_message: The error message from the planner
             current_domain_pddl: Optional current domain PDDL for context
+            current_problem_pddl: Optional current problem PDDL for context (includes detected objects)
         """
         if not self.llm_analyzer:
             print("⚠ No LLM analyzer available for refinement")
@@ -734,20 +744,106 @@ class PDDLDomainMaintainer:
         # Create refinement prompt
         task_desc = self.current_task if self.current_task else 'Unknown'
 
+        # Extract goal objects from task analysis if available
+        goal_objects_str = ""
+        if self.task_analysis and self.task_analysis.goal_objects:
+            # Filter out None values that might have been incorrectly added
+            valid_goal_objects = [obj for obj in self.task_analysis.goal_objects if obj and obj != "None"]
+            if valid_goal_objects:
+                goal_objects_str = f"\nExpected Goal Objects (from task): {', '.join(valid_goal_objects)}"
+
+        # Add problem file context and check if objects section is empty
+        problem_context = ""
+        objects_section_empty = False
+        detected_objects_list = []
+
+        if current_problem_pddl:
+            # Check if :objects section is empty or missing
+            if ":objects" not in current_problem_pddl:
+                objects_section_empty = True
+                print("  ⚠ DEBUG: Problem file has NO :objects section")
+            else:
+                # Extract content between (:objects and next section or (:init
+                import re
+                objects_match = re.search(r'\(:objects\s*(.*?)\s*\)', current_problem_pddl, re.DOTALL)
+                if objects_match:
+                    objects_content = objects_match.group(1).strip()
+                    objects_section_empty = len(objects_content) == 0 or objects_content == ""
+                    if not objects_section_empty:
+                        # Extract object names for debugging
+                        detected_objects_list = re.findall(r'(\w+)\s*', objects_content)
+                        print(f"  ℹ DEBUG: Detected objects in problem file: {detected_objects_list}")
+                    else:
+                        print("  ⚠ DEBUG: :objects section exists but is EMPTY")
+                else:
+                    print("  ⚠ DEBUG: Could not parse :objects section")
+
+            problem_context = f"""
+
+Current PDDL Problem File:
+{current_problem_pddl}
+
+Note: The problem file shows the detected objects (in :objects section) and the goal state (in :goal section).
+If the goal references objects that don't exist in :objects, this is the root cause of the failure.
+"""
+            if objects_section_empty:
+                problem_context += """
+⚠ WARNING: The :objects section appears to be EMPTY. This means NO objects were detected by the perception system.
+This is a PERCEPTION PROBLEM, not a domain problem. The object tracker needs to detect objects before planning can work.
+"""
+            elif detected_objects_list:
+                problem_context += f"""
+ℹ INFO: Detected {len(detected_objects_list)} object(s) in problem file: {', '.join(detected_objects_list)}
+"""
+
+        # Add robot capabilities context
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Note: Actions and predicates should be consistent with the robot's capabilities.
+"""
+
         refinement_prompt = f"""
 You are a PDDL domain debugging expert. A PDDL planning task failed with an error.
 
 ERROR: {error_message}
 
-Task Description: {task_desc}
+Task Description: {task_desc}{goal_objects_str}{robot_context}
 
 Current PDDL Domain:
-{current_domain_pddl if current_domain_pddl else 'Not available'}
+{current_domain_pddl if current_domain_pddl else 'Not available'}{problem_context}
 
 Your task is to:
 1. Analyze the error and identify the root cause
-2. Find ALL occurrences of similar issues in the domain (not just the one mentioned in the error)
-3. Provide fixes for each issue found
+2. Check if the error is due to goal objects not matching detected objects
+3. Find ALL occurrences of similar issues in the domain (not just the one mentioned in the error)
+4. Provide fixes for each issue found
+
+CRITICAL: Check for goal object mismatches and empty objects section!
+
+Case 1: EMPTY :objects section
+- If :objects section is empty or has no objects, this is a PERCEPTION FAILURE
+- The object tracker has not detected any objects yet
+- You CANNOT fix this with domain changes
+- Provide an empty goal_object_recommendations array and empty fixes array
+- In your analysis, state: "No objects detected by perception system. Cannot plan without detected objects."
+
+Case 2: Goal object name mismatch
+- If the goal references objects like "water_bottle_1" but NO such object exists in :objects section
+- Check if there's a similar object with a different name in :objects (e.g., "blue_water_bottle" instead of "water_bottle_1")
+- YOU CANNOT ADD OBJECTS TO THE PROBLEM - objects in :objects come from perception and are fixed
+- YOU CANNOT FIX MISSING :init PREDICATES - the initial state comes from perception
+- YOU CAN ONLY identify goal object mismatches and recommend updating the goal object names
+
+If object "water_bottle_1" is in the goal but not in :objects:
+1. Check if there's a similar object in :objects (e.g., "blue_water_bottle", "plastic_bottle", etc.)
+2. If found: Recommend updating the goal object name to match the detected object
+3. If :objects is empty: State this is a perception problem in analysis
+4. Do NOT try to add the missing object or init predicates - these are generated automatically
 
 IMPORTANT: Look for the same type of error in other parts of the domain!
 For example, if one predicate has wrong arity, check if other predicates have the same issue.
@@ -755,25 +851,37 @@ For example, if one predicate has wrong arity, check if other predicates have th
 Respond in JSON format with the following structure:
 {{
   "analysis": "Brief explanation of the problem and how many instances were found",
+  "goal_object_recommendations": [
+    {{
+      "goal_object_expected": "water_bottle_1",
+      "detected_object_actual": "blue_water_bottle",
+      "action": "UPDATE_GOAL"
+    }},
+    ... more recommendations if there are other mismatched objects ...
+  ],
   "fixes": [
     {{
-      "old_text": "The exact text from the domain to replace (must match exactly)",
+      "old_text": "The exact text from the DOMAIN to replace (must match exactly)",
       "new_text": "The corrected replacement text (with same indentation/formatting)",
-      "location": "Brief description of where this fix is (e.g., 'pick action precondition', 'empty-hand predicate definition')"
+      "location": "Brief description of where this fix is in the DOMAIN (e.g., 'pick action precondition', 'empty-hand predicate definition', 'open action effects')"
     }},
-    ... more fixes if similar issues exist elsewhere ...
+    ... more fixes if similar issues exist elsewhere IN THE DOMAIN ...
   ],
   "explanation": "Why these fixes resolve the error and prevent similar issues"
 }}
 
 Important:
+- For goal object mismatches, use goal_object_recommendations ONLY (not fixes array)
+- The fixes array is ONLY for domain file changes (action definitions, predicates, types)
+- DO NOT include problem file fixes (goals, objects, init) - these are regenerated automatically
 - Each old_text must match EXACTLY as it appears in the domain (including spaces, newlines, indentation)
-- Include enough context in old_text to make it unique (e.g., entire predicate definition or action section)
+- Include enough context in old_text to make it unique (e.g., entire action definition or predicate)
 - Use the same formatting style as the existing domain
 - Check the ENTIRE domain for similar patterns that need fixing
-- Return ALL fixes in the "fixes" array
+- If the error is ONLY about missing objects in :objects, provide goal_object_recommendations with empty fixes array
 
 Common PDDL errors to look for throughout the domain:
+- Goal object name mismatches with detected objects (check :goal vs :objects)
 - Predicate arity mismatches (wrong number of arguments) - check ALL actions
 - Missing predicate definitions in :predicates section
 - Undefined predicates used in actions - scan all preconditions and effects
@@ -805,19 +913,67 @@ Provide only valid JSON, no markdown formatting.
             analysis = fix_data.get("analysis", "")
             fixes = fix_data.get("fixes", [])
             explanation = fix_data.get("explanation", "")
+            goal_object_recommendations = fix_data.get("goal_object_recommendations", [])
 
             print(f"  Analysis: {analysis}")
             print(f"  Explanation: {explanation}")
+
+            # Display goal object recommendations and update task analysis if any
+            if goal_object_recommendations:
+                print(f"\n  ⚠ Goal Object Name Mismatches Detected:")
+                updates_applied = 0
+                for rec in goal_object_recommendations:
+                    expected = rec.get("goal_object_expected", rec.get("current_name", "?"))
+                    actual = rec.get("detected_object_actual", rec.get("detected_as", "?"))
+                    action = rec.get("action", "UPDATE_GOAL")
+
+                    # Skip if no actual object was detected (None, empty, or "None" string)
+                    if not actual or actual == "?" or actual == "None" or actual.lower() == "none":
+                        print(f"    • Goal expects: '{expected}' but NO matching object was detected")
+                        print(f"      ⚠ Cannot update goal - no objects detected. Check if perception is running.")
+                        continue
+
+                    print(f"    • Goal expects: '{expected}' but detected object is: '{actual}'")
+
+                    # Update goal_objects AND goal_predicates in task analysis
+                    if self.task_analysis and expected in self.task_analysis.goal_objects:
+                        # Update goal_objects list
+                        idx = self.task_analysis.goal_objects.index(expected)
+                        self.task_analysis.goal_objects[idx] = actual
+                        print(f"      ✓ Updated task_analysis.goal_objects: '{expected}' → '{actual}'")
+
+                        # Update goal_predicates to use new object name
+                        updated_predicates = []
+                        for pred in self.task_analysis.goal_predicates:
+                            # Replace old object name with new one in predicate strings
+                            # Handle various formats: "(is-open water_bottle_1)" or "is-open(water_bottle_1)"
+                            updated_pred = pred.replace(expected, actual)
+                            updated_predicates.append(updated_pred)
+                            if updated_pred != pred:
+                                print(f"      ✓ Updated goal predicate: '{pred}' → '{updated_pred}'")
+
+                        self.task_analysis.goal_predicates = updated_predicates
+                        updates_applied += 1
+                    else:
+                        print(f"      → Will update goal when domain is regenerated")
+
+                if updates_applied > 0:
+                    print(f"\n  ✓ Updated {updates_applied} goal object name(s) in task analysis")
+                    print(f"  ℹ Goal predicates will use new names on next problem generation\n")
+                else:
+                    print(f"\n  ⚠ No objects detected in perception - cannot update goal object names")
+                    print(f"     Please ensure the object tracker has detected objects before planning\n")
+
             print(f"  Found {len(fixes)} fix(es) to apply\n")
 
-            if not fixes:
-                print("  ⚠ LLM did not provide any fixes")
+            if not fixes and not goal_object_recommendations:
+                print("  ⚠ LLM did not provide any fixes or recommendations")
                 return
 
-            # Get current domain text from PDDLRepresentation
+            # Get current domain text for domain-level fixes
             current_domain_str = self.pddl.get_domain_text()
 
-            # Apply all fixes sequentially
+            # Apply all fixes sequentially (domain-level fixes only)
             fixes_applied = 0
             fixes_failed = 0
 
@@ -829,6 +985,12 @@ Provide only valid JSON, no markdown formatting.
                 if not old_text or not new_text:
                     print(f"  ⚠ Fix {i}: Invalid fix (missing old_text or new_text)")
                     fixes_failed += 1
+                    continue
+
+                # Skip problem file fixes since those are regenerated automatically
+                if "problem" in location.lower() or "goal" in location.lower() or ":objects" in location.lower() or ":init" in location.lower():
+                    print(f"\n  • Skipping fix {i}/{len(fixes)}: {location}")
+                    print(f"    (Problem file is regenerated automatically; use goal_object_recommendations instead)")
                     continue
 
                 print(f"\n  • Applying fix {i}/{len(fixes)}: {location}")
@@ -848,13 +1010,15 @@ Provide only valid JSON, no markdown formatting.
             if fixes_applied > 0:
                 # Update text cache only (don't parse back to structured)
                 self.pddl.set_domain_text(current_domain_str, update_structured=False)
-                print(f"\n  ✓ Applied {fixes_applied} fix(es) successfully")
+                print(f"\n  ✓ Applied {fixes_applied} domain fix(es) successfully")
                 if fixes_failed > 0:
                     print(f"  ⚠ Failed to apply {fixes_failed} fix(es)")
+            elif fixes_failed > 0:
+                print(f"\n  ✗ All {fixes_failed} fix(es) failed to match domain text")
+            elif len(fixes) == 0 and goal_object_recommendations:
+                print(f"  ℹ No domain fixes needed (only goal object updates)")
             else:
                 print(f"\n  ✗ No fixes could be applied")
-                if fixes_failed > 0:
-                    print(f"     All {fixes_failed} fix(es) failed to match domain text")
 
         except json.JSONDecodeError as e:
             print(f"⚠ Error parsing LLM JSON response: {e}")
