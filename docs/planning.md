@@ -8,7 +8,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 ## Components
 - `pddl_representation.py` – thread-safe domain/problem model and PDDL writers.
 - `pddl_domain_maintainer.py` – seeds/updates the domain from tasks and observations; LLM refinement instructions live in `config/pddl_domain_maintainer_prompts.yaml`.
-- `llm_task_analyzer.py` – builds prompts from `config/llm_task_analyzer_prompts.yaml`, injecting only the dynamic fields (task text, robot description, JSON summaries of observed objects/relationships) while keeping the rest of the instructions fixed to ensure consistent formatting. Edit the YAML’s `robot_description` field (or set it to `null`) to control whether that section appears in prompts.
+- `llm_task_analyzer.py` – builds prompts from `config/llm_task_analyzer_prompts.yaml`, injecting only the dynamic fields (task text, robot description, JSON summaries of observed objects/relationships) while keeping the rest of the instructions fixed to ensure consistent formatting. The config now exposes a single `analysis_prompt`; the "initial" analyzer pass just renders that template with placeholder text describing the lack of observations, so there is one authoritative prompt definition. Edit the YAML’s `robot_description` field (or set it to `null`) to control whether that section appears in prompts.
 - `task_state_monitor.py` – gates exploration vs. plan readiness (`TaskState.PLAN_AND_EXECUTE`).
 - `task_orchestrator.py` – orchestrates perception, PDDL maintenance, snapshots, and world-state export.
 - `primitives/skill_decomposer.py` – LLM-backed decomposition of symbolic actions to primitives; attaches latest snapshot bytes and registry slices.

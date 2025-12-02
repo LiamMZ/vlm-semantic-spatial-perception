@@ -111,15 +111,10 @@ class LLMTaskAnalyzer:
         if environment_image is not None:
             pil_image = self._prepare_image(environment_image)
 
-        # Build prompt (different for initial vs observed analysis)
-        has_observations = len(observed_objects) > 0 or pil_image is not None
-        if has_observations:
-            prompt = self._build_analysis_prompt(
-                task_description, observed_objects, observed_relationships
-            )
-        else:
-            # Initial analysis without observations - predict requirements
-            prompt = self._build_initial_analysis_prompt(task_description)
+        # Build prompt (analysis template handles empty observations)
+        prompt = self._build_analysis_prompt(
+            task_description, observed_objects, observed_relationships
+        )
 
         # Call LLM with timeout
         start_time = time.time()
@@ -166,22 +161,6 @@ class LLMTaskAnalyzer:
             import traceback
             traceback.print_exc()
             return None
-
-    def _build_initial_analysis_prompt(self, task: str) -> str:
-        """
-        Build prompt for INITIAL task analysis (before any observations).
-
-        This prompt asks the LLM to predict what predicates, actions, and objects
-        will likely be needed for the task, even without seeing the environment yet.
-        """
-        template = self._get_prompt_template("initial_prompt")
-        return render_prompt_template(
-            template,
-            {
-                "TASK": task,
-                "ROBOT_DESCRIPTION": self._format_robot_description(),
-            },
-        )
 
     def _build_analysis_prompt(
         self,
@@ -261,6 +240,11 @@ class LLMTaskAnalyzer:
 
     def _format_objects_json(self, objects: List[Dict]) -> str:
         """Serialize observed objects as compact JSON summary."""
+        if not objects:
+            return (
+                "Initial analysis run; perception has not produced any objects yet. "
+            )
+
         summary: List[Dict[str, Union[str, List[str]]]] = []
         for obj in objects[:20]:
             summary.append(
@@ -274,5 +258,10 @@ class LLMTaskAnalyzer:
 
     def _format_relationships_json(self, relationships: List[str]) -> str:
         """Serialize observed relationships as JSON."""
-        rels = relationships[:30] if relationships else []
+        if not relationships:
+            return (
+                "Initial analysis run; perception has not produced any relationships yet."
+            )
+
+        rels = relationships[:30]
         return json.dumps(rels, indent=2)
