@@ -318,16 +318,8 @@ class PDDLDomainMaintainer:
                 sanitized_type = sanitize_pddl_name(raw_obj_type)
                 self._type_name_mapping[raw_obj_type] = sanitized_type
 
-            obj_type = self._type_name_mapping[raw_obj_type]
-
-            # Track new object types
-            if obj_type not in self.observed_object_types:
-                new_object_types.add(obj_type)
-                self.observed_object_types.add(obj_type)
-
-                # Add object type to domain if not present
-                if obj_type not in self.pddl.object_types:
-                    await self.pddl.add_object_type_async(obj_type, parent="object")
+            # Use base 'object' type for STRIPS (no typing)
+            obj_type = "object"
 
             # Add object instance to problem
             if obj_id not in self.pddl.object_instances:
@@ -356,17 +348,11 @@ class PDDLDomainMaintainer:
 
         self.last_update_observations += len(detected_objects)
 
-        # Check if we observed any goal-relevant objects (with fuzzy matching)
-        goal_objects_found = self._match_goal_objects(self.observed_object_types)
-        goal_objects_missing = self.goal_object_types - goal_objects_found
+        # Note: With STRIPS (no typing), we don't track object types
         return {
             "objects_added": objects_added,
-            "new_object_types": list(new_object_types),
             "new_predicates": list(new_predicates),
-            "total_object_types": len(self.observed_object_types),
-            "total_observations": self.last_update_observations,
-            "goal_objects_found": list(goal_objects_found),
-            "goal_objects_missing": list(goal_objects_missing)
+            "total_observations": self.last_update_observations
         }
 
     async def refine_domain_from_observations(
@@ -619,61 +605,107 @@ class PDDLDomainMaintainer:
         Uses LLM-predicted goal predicates to populate PDDL goal state.
         """
         if not self.task_analysis:
+            print("⚠ No task analysis available - cannot set goals")
             return
+
+        print(f"  • Setting goals from task analysis...")
+        print(f"    Task: {self.current_task}")
+        print(f"    Goal predicates: {self.task_analysis.goal_predicates}")
 
         # Clear existing goals
         await self.pddl.clear_goal_state_async()
 
+        if not self.task_analysis.goal_predicates:
+            print("⚠ No goal predicates in task analysis - problem will have empty goals!")
+            print("   This usually means the LLM failed to extract goals from the task description")
+            return
+
         # Add goal predicates from analysis
+        goals_added = 0
         for goal_pred in self.task_analysis.goal_predicates:
             try:
-                # Parse goal predicate format: "predicate(arg1, arg2)" or "not(predicate(arg))"
+                # Parse goal predicate format
+                # Supports:
+                #   - PDDL S-expression: "(is-open bottle_1)" or "(not (is-open bottle_1))"
+                #   - Function call format: "is-open(bottle_1, arg2)"
                 negated = False
                 pred_str = goal_pred.strip()
 
-                if pred_str.startswith("not(") or pred_str.startswith("not "):
+                # Handle negation for both formats
+                if pred_str.startswith("(not "):
                     negated = True
-                    # Extract inner predicate
+                    # Extract inner predicate: "(not (pred args))" -> "(pred args)"
+                    pred_str = pred_str[5:].strip()  # Remove "(not "
+                    if pred_str.endswith(")"):
+                        pred_str = pred_str[:-1]  # Remove trailing )
+                elif pred_str.startswith("not(") or pred_str.startswith("not "):
+                    negated = True
                     if "(" in pred_str:
                         pred_str = pred_str[pred_str.index("(") + 1:]
                         if pred_str.endswith(")"):
                             pred_str = pred_str[:-1]
 
-                # Parse "predicate(arg1, arg2)"
-                if "(" in pred_str and ")" in pred_str:
+                # Detect format: PDDL S-expression starts with "(", function call doesn't
+                if pred_str.startswith("("):
+                    # PDDL S-expression format: "(predicate arg1 arg2)"
+                    pred_str = pred_str[1:]  # Remove leading (
+                    if pred_str.endswith(")"):
+                        pred_str = pred_str[:-1]  # Remove trailing )
+
+                    # Split by whitespace
+                    parts = pred_str.split()
+                    if not parts:
+                        continue
+
+                    pred_name = parts[0]
+                    args = parts[1:] if len(parts) > 1 else []
+
+                elif "(" in pred_str and ")" in pred_str:
+                    # Function call format: "predicate(arg1, arg2)"
                     pred_name = pred_str[:pred_str.index("(")]
                     args_str = pred_str[pred_str.index("(") + 1:pred_str.index(")")]
                     args = [arg.strip() for arg in args_str.split(",") if arg.strip()]
 
-                    # Map generic object types to actual object instances
-                    # e.g., "red_mug" -> "red_mug_1" if red_mug_1 exists
-                    mapped_args = []
-                    for arg in args:
-                        # Check if this is an exact object instance
-                        if arg in self.pddl.object_instances:
-                            mapped_args.append(arg)
-                        else:
-                            # Try to find an instance with this type
-                            found = False
-                            for obj_name, obj in self.pddl.object_instances.items():
-                                # Match if object type contains arg or vice versa
-                                if arg in obj.object_type or obj.object_type in arg:
-                                    mapped_args.append(obj_name)
-                                    found = True
-                                    break
-                            if not found:
-                                # Use original arg (will fail validation later)
-                                mapped_args.append(arg)
+                else:
+                    # Simple predicate with no args: "predicate"
+                    pred_name = pred_str
+                    args = []
 
-                    # Only add if predicate is defined
-                    if pred_name in self.pddl.predicates:
-                        await self.pddl.add_goal_literal_async(
-                            pred_name,
-                            mapped_args,
-                            negated=negated
-                        )
+                # Map generic object types to actual object instances
+                # e.g., "red_mug" -> "red_mug_1" if red_mug_1 exists
+                mapped_args = []
+                for arg in args:
+                    # Check if this is an exact object instance
+                    if arg in self.pddl.object_instances:
+                        mapped_args.append(arg)
+                    else:
+                        # Try to find an instance with this type
+                        found = False
+                        for obj_name, obj in self.pddl.object_instances.items():
+                            # Match if object type contains arg or vice versa
+                            if arg in obj.object_type or obj.object_type in arg:
+                                mapped_args.append(obj_name)
+                                found = True
+                                break
+                        if not found:
+                            # Use original arg (will fail validation later)
+                            mapped_args.append(arg)
+
+                # Only add if predicate is defined
+                if pred_name in self.pddl.predicates:
+                    await self.pddl.add_goal_literal_async(
+                        pred_name,
+                        mapped_args,
+                        negated=negated
+                    )
+                    goals_added += 1
+                    print(f"    ✓ Added goal: {pred_name}({', '.join(mapped_args)}) {'(negated)' if negated else ''}")
+                else:
+                    print(f"    ⚠ Skipped goal '{goal_pred}': predicate '{pred_name}' not defined")
             except Exception as e:
-                print(f"⚠ Failed to parse goal predicate '{goal_pred}': {e}")
+                print(f"    ⚠ Failed to parse goal predicate '{goal_pred}': {e}")
+
+        print(f"  ✓ Added {goals_added} goal literals")
 
     async def refine_domain_from_error(
         self,
@@ -703,54 +735,133 @@ class PDDLDomainMaintainer:
         task_desc = self.current_task if self.current_task else 'Unknown'
 
         refinement_prompt = f"""
-I have a PDDL planning task that failed with the following error:
+You are a PDDL domain debugging expert. A PDDL planning task failed with an error.
 
 ERROR: {error_message}
 
 Task Description: {task_desc}
 
-Current PDDL Domain (excerpt):
-{current_domain_pddl[:2000] if current_domain_pddl else 'Not available'}
+Current PDDL Domain:
+{current_domain_pddl if current_domain_pddl else 'Not available'}
 
-Please analyze this error and identify what needs to be fixed in the PDDL domain.
+Your task is to:
+1. Analyze the error and identify the root cause
+2. Find ALL occurrences of similar issues in the domain (not just the one mentioned in the error)
+3. Provide fixes for each issue found
 
-Common issues to check:
-1. Predicate arity mismatches - predicates used with wrong number of arguments
-2. Missing predicate definitions
-3. Action preconditions/effects using undefined or incorrectly-typed predicates
-4. Type mismatches in parameters
+IMPORTANT: Look for the same type of error in other parts of the domain!
+For example, if one predicate has wrong arity, check if other predicates have the same issue.
 
-Provide specific fixes needed. Focus on the exact error mentioned.
+Respond in JSON format with the following structure:
+{{
+  "analysis": "Brief explanation of the problem and how many instances were found",
+  "fixes": [
+    {{
+      "old_text": "The exact text from the domain to replace (must match exactly)",
+      "new_text": "The corrected replacement text (with same indentation/formatting)",
+      "location": "Brief description of where this fix is (e.g., 'pick action precondition', 'empty-hand predicate definition')"
+    }},
+    ... more fixes if similar issues exist elsewhere ...
+  ],
+  "explanation": "Why these fixes resolve the error and prevent similar issues"
+}}
+
+Important:
+- Each old_text must match EXACTLY as it appears in the domain (including spaces, newlines, indentation)
+- Include enough context in old_text to make it unique (e.g., entire predicate definition or action section)
+- Use the same formatting style as the existing domain
+- Check the ENTIRE domain for similar patterns that need fixing
+- Return ALL fixes in the "fixes" array
+
+Common PDDL errors to look for throughout the domain:
+- Predicate arity mismatches (wrong number of arguments) - check ALL actions
+- Missing predicate definitions in :predicates section
+- Undefined predicates used in actions - scan all preconditions and effects
+- Type mismatches in parameters
+- Inconsistent parameter names or ordering across actions
+
+Provide only valid JSON, no markdown formatting.
 """
 
         try:
-            # Get LLM's analysis of the error
+            # Get LLM's analysis and fix
             response = await asyncio.to_thread(
-                self.llm_analyzer.client.generate_content,
-                refinement_prompt
+                self.llm_analyzer.client.models.generate_content,
+                model=self.llm_analyzer.model_name,
+                contents=refinement_prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.1
+                }
             )
 
-            analysis = response.text.strip()
-            print(f"\n  LLM Analysis:\n{analysis}\n")
+            fix_json = response.text.strip()
+            print(f"\n  LLM Response:\n{fix_json[:500]}...\n")
 
-            # Now apply fixes based on the analysis
-            # Check if it's a predicate arity issue
-            if "arity" in error_message.lower() or "wrong number of arguments" in error_message.lower():
-                print("  • Detected predicate arity issue")
-                await self._fix_predicate_arity_from_error(error_message, analysis)
+            # Parse the JSON response
+            import json
+            fix_data = json.loads(fix_json)
 
-            # Check if it's a missing predicate
-            elif "undefined" in error_message.lower() or "unknown predicate" in error_message.lower():
-                print("  • Detected missing predicate")
-                await self._add_missing_predicate_from_error(error_message, analysis)
+            analysis = fix_data.get("analysis", "")
+            fixes = fix_data.get("fixes", [])
+            explanation = fix_data.get("explanation", "")
 
-            # General action validation and fixing
+            print(f"  Analysis: {analysis}")
+            print(f"  Explanation: {explanation}")
+            print(f"  Found {len(fixes)} fix(es) to apply\n")
+
+            if not fixes:
+                print("  ⚠ LLM did not provide any fixes")
+                return
+
+            # Get current domain text from PDDLRepresentation
+            current_domain_str = self.pddl.get_domain_text()
+
+            # Apply all fixes sequentially
+            fixes_applied = 0
+            fixes_failed = 0
+
+            for i, fix in enumerate(fixes, 1):
+                old_text = fix.get("old_text", "")
+                new_text = fix.get("new_text", "")
+                location = fix.get("location", "unknown location")
+
+                if not old_text or not new_text:
+                    print(f"  ⚠ Fix {i}: Invalid fix (missing old_text or new_text)")
+                    fixes_failed += 1
+                    continue
+
+                print(f"\n  • Applying fix {i}/{len(fixes)}: {location}")
+                print(f"    Replacing:\n{old_text[:150]}...")
+                print(f"    With:\n{new_text[:150]}...")
+
+                if old_text in current_domain_str:
+                    # Replace text (only first occurrence for safety)
+                    current_domain_str = current_domain_str.replace(old_text, new_text, 1)
+                    print(f"    ✓ Applied successfully")
+                    fixes_applied += 1
+                else:
+                    print(f"    ⚠ Could not find exact match in domain")
+                    fixes_failed += 1
+
+            # After all fixes, update the domain if any were applied
+            if fixes_applied > 0:
+                # Update text cache only (don't parse back to structured)
+                self.pddl.set_domain_text(current_domain_str, update_structured=False)
+                print(f"\n  ✓ Applied {fixes_applied} fix(es) successfully")
+                if fixes_failed > 0:
+                    print(f"  ⚠ Failed to apply {fixes_failed} fix(es)")
             else:
-                print("  • Running general action validation")
-                await self.validate_and_fix_action_predicates()
+                print(f"\n  ✗ No fixes could be applied")
+                if fixes_failed > 0:
+                    print(f"     All {fixes_failed} fix(es) failed to match domain text")
 
+        except json.JSONDecodeError as e:
+            print(f"⚠ Error parsing LLM JSON response: {e}")
         except Exception as e:
             print(f"⚠ Error during refinement: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _fix_predicate_arity_from_error(
         self,

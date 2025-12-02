@@ -162,6 +162,7 @@ Return JSON with:
   "obstacle_objects": [],
   "initial_predicates": ["expected_initial_states"],
   "relevant_predicates": ["predicate_names"],
+  relevalnt_types": ["type1", "type2"],
   "required_actions": [
     {{
       "name": "pick",
@@ -222,6 +223,7 @@ Provide a JSON response with:
   "obstacle_objects": ["obstacle_id", ...],
   "initial_predicates": ["current_predicate(obj)", ...],
   "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
+  "relevant_types": ["type1", "type2", ...],
   "required_actions": [
     {{
       "name": "pick",
@@ -266,6 +268,7 @@ Focus on:
                 obstacle_objects=data.get("obstacle_objects", []),
                 initial_predicates=data.get("initial_predicates", []),
                 relevant_predicates=data.get("relevant_predicates", []),
+                relevant_types=data.get("relevant_types", []),
                 required_actions=data.get("required_actions", []),
                 complexity=data.get("complexity", "medium"),
                 estimated_steps=data.get("estimated_steps", 1)

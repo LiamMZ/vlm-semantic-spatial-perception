@@ -73,6 +73,7 @@ class ObjectTracker:
         enable_affordance_caching: bool = True,
         fast_mode: bool = False,
         pddl_predicates: Optional[List[str]] = None,
+        pddl_types: Optional[List[str]] = None,
         prompts_config_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         task_context: Optional[str] = None,
@@ -105,7 +106,7 @@ class ObjectTracker:
 
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
-
+        self.pddl_types: List[str] = pddl_types or []
         # Task context for grounding
         self.task_context: Optional[str] = task_context
         self.available_actions: List[Dict[str, Any]] = available_actions or []
@@ -191,6 +192,37 @@ class ObjectTracker:
         if predicate in self.pddl_predicates:
             self.pddl_predicates.remove(predicate)
             self.logger.info("Removed PDDL predicate: %s", predicate)
+
+    def set_pddl_types(self, types: List[str]) -> None:
+        """
+        Set the list of PDDL types to track for objects.
+
+        Args:
+            types: List of type names (e.g., ["clean", "dirty", "opened", "filled"])
+        """
+        self.pddl_types = types
+        print(f"ℹ PDDL types updated: {types}")
+
+    def add_pddl_type(self, type: str) -> None:
+        """
+        Add a single PDDL type to track.
+
+        Args:
+            type: type name to add
+        """
+        if type not in self.pddl_types:
+            self.pddl_types.append(type)
+            print(f"ℹ Added PDDL type: {type}")
+
+    def remove_pddl_type(self, type: str) -> None:
+        """
+        Remove a PDDL type from tracking.
+
+        Args:
+            type: type name to remove
+        """
+        if type in self.pddl_types:
+            self.pddl_types.remove(type)
 
     def set_task_context(
         self,
@@ -591,7 +623,7 @@ class ObjectTracker:
             pddl_list = ", ".join(self.pddl_predicates)
             pddl_section = self.prompts['pddl']['section_template'].format(pddl_list=pddl_list)
             pddl_example = self.prompts['pddl']['example_template']
-
+        
         # Format task context for analysis
         task_context_section = self._format_task_context_for_analysis()
 

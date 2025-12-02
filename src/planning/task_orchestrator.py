@@ -1065,6 +1065,23 @@ class TaskOrchestrator:
         self.logger.info("GENERATING PDDL FILES")
         self.logger.info("%s", "=" * 70)
 
+        # Sync objects from tracker to PDDL representation
+        if self.tracker and hasattr(self.tracker, 'tracker'):
+            self.logger.info("  • Syncing objects from tracker to PDDL...")
+            registry = self.tracker.tracker.registry
+            all_objects = registry.get_all_objects()
+            self.logger.info(f"    Found {len(all_objects)} objects in registry")
+
+            # Add objects to PDDL problem
+            for obj in all_objects:
+                # Add object instance if not already present
+                if obj.object_id not in self.pddl.object_instances:
+                    await self.pddl.add_object_instance_async(
+                        obj.object_id,
+                        obj.object_type
+                    )
+                    self.logger.info(f"      Added: {obj.object_id} ({obj.object_type})")
+
         # Set goals if requested
         if set_goals:
             self.logger.info("  • Setting goal state from task analysis...")
@@ -1346,6 +1363,7 @@ class TaskOrchestrator:
 
         # Common refinable error patterns
         refinable_patterns = [
+            # Domain syntax/structure errors
             "wrong number of arguments",
             "predicate",
             "arity",
@@ -1356,6 +1374,12 @@ class TaskOrchestrator:
             "precondition",
             "effect",
             "parameter",
+            # Planning failures that might indicate domain issues
+            "no plan found",
+            "no solution",
+            "unsolvable",
+            "empty plan",
+            "goals",  # Goal-related issues
         ]
 
         error_lower = error_message.lower()

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 from dataclasses import field
 from contextlib import asynccontextmanager
+import re
 
 from .utils.pddl_types import (
     PDDLRequirements,
@@ -84,10 +85,9 @@ class PDDLRepresentation:
         # Thread safety with asyncio Lock for true parallel access
         self._lock = asyncio.Lock()
 
-        # Requirements
+        # Requirements (use STRIPS only, no typing)
         self.requirements: Set[PDDLRequirements] = set(requirements or [
-            PDDLRequirements.STRIPS,
-            PDDLRequirements.TYPING
+            PDDLRequirements.STRIPS
         ])
 
         # Domain components
@@ -104,6 +104,11 @@ class PDDLRepresentation:
         # Metadata
         self.task_description: Optional[str] = None
         self.last_modified: float = time.time()
+
+        # Cached text representations (generated on demand)
+        self._domain_text_cache: Optional[str] = None
+        self._problem_text_cache: Optional[str] = None
+        self._cache_dirty: bool = True
 
         # Initialize with base type
         self.add_object_type("object")
@@ -548,7 +553,17 @@ class PDDLRepresentation:
     # =====================================================================
 
     def generate_domain_pddl(self) -> str:
-        """Generate PDDL domain file content."""
+        """
+        Generate PDDL domain file content.
+
+        If a text cache exists (e.g., from LLM-based refinement), use that.
+        Otherwise, generate from structured representation.
+        """
+        # If we have a cached text version (e.g., from refinement), use it
+        if self._domain_text_cache is not None and not self._cache_dirty:
+            return self._domain_text_cache
+
+        # Otherwise generate from structured representation
         lines = [
             f";; Auto-generated PDDL domain: {self.domain_name}",
             f";; Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -562,16 +577,8 @@ class PDDLRepresentation:
         lines.append(f"  (:requirements {req_str})")
         lines.append("")
 
-        # Types
-        if len(self.object_types) > 1:  # More than just base 'object' type
-            lines.append("  (:types")
-            for type_name in sorted(self.object_types.keys()):
-                if type_name == "object":
-                    continue
-                obj_type = self.object_types[type_name]
-                lines.append(f"    {obj_type.to_pddl()}")
-            lines.append("  )")
-            lines.append("")
+        # Types (omitted - using STRIPS without typing)
+        # All objects use the base 'object' type
 
         # Predicates
         if self.predicates:
@@ -909,3 +916,175 @@ class PDDLRepresentation:
         for pred_name, params in common_predicates:
             if pred_name not in self.predicates:
                 self.add_predicate(pred_name, params)
+
+    # ========================================================================
+    # Domain Text Management (for LLM-based refinement)
+    # ========================================================================
+
+    def get_domain_text(self, force_regenerate: bool = False) -> str:
+        """
+        Get the domain as PDDL text.
+
+        Args:
+            force_regenerate: If True, regenerate from structured representation
+                            If False, return cached version if available
+
+        Returns:
+            PDDL domain text
+        """
+        if force_regenerate or self._cache_dirty or self._domain_text_cache is None:
+            self._domain_text_cache = self.generate_domain_pddl()
+            self._cache_dirty = False
+
+        return self._domain_text_cache
+
+    def set_domain_text(self, pddl_text: str, update_structured: bool = True) -> None:
+        """
+        Set the domain from PDDL text.
+
+        Args:
+            pddl_text: PDDL domain text
+            update_structured: If True, parse and update structured representation
+        """
+        self._domain_text_cache = pddl_text
+        self._cache_dirty = False
+
+        if update_structured:
+            self._update_from_domain_text(pddl_text)
+
+    def _mark_cache_dirty(self) -> None:
+        """Mark cache as dirty (call this when structured representation changes)."""
+        self._cache_dirty = True
+
+    def _update_from_domain_text(self, pddl_text: str) -> None:
+        """
+        Update structured representation from PDDL text.
+
+        This parses the PDDL text and updates the internal structured representation.
+        Uses a simplified parser focused on predicates and basic structure.
+
+        Args:
+            pddl_text: PDDL domain text
+        """
+        import re
+
+        # Extract domain name
+        domain_match = re.search(r'\(define\s+\(domain\s+(\w+)\)', pddl_text)
+        if domain_match:
+            self.domain_name = domain_match.group(1)
+
+        # Extract and parse predicates section
+        pred_match = re.search(r'\(:predicates\s+(.*?)\s*\)', pddl_text, re.DOTALL)
+        if pred_match:
+            pred_section = pred_match.group(1)
+            self._parse_predicates_from_text(pred_section)
+
+        # Extract and parse actions
+        # Pattern to match entire actions with their content
+        action_pattern = r'\(:action\s+(\w+)\s+(.*?)\n\s*\)'
+        action_matches = re.finditer(action_pattern, pddl_text, re.DOTALL)
+
+        for action_match in action_matches:
+            action_name = action_match.group(1)
+            action_body = action_match.group(2)
+            self._parse_action_from_text(action_name, action_body)
+
+        self.last_modified = time.time()
+
+    def _parse_predicates_from_text(self, pred_section: str) -> None:
+        """
+        Parse predicates from PDDL text section.
+
+        Args:
+            pred_section: Content of (:predicates ...) section
+        """
+        # Find all predicate definitions (handle nested parens)
+        pred_lines = re.findall(r'\(([^)]+(?:\([^)]*\))?[^)]*)\)', pred_section)
+
+        new_predicates = {}
+        for pred_line in pred_lines:
+            parts = pred_line.strip().split()
+            if not parts:
+                continue
+
+            pred_name = parts[0]
+
+            # Parse parameters: ?name - type
+            params = []
+            i = 1
+            while i < len(parts):
+                if parts[i].startswith('?'):
+                    param_name = parts[i][1:]  # Remove ?
+                    # Look for - type pattern
+                    if i + 2 < len(parts) and parts[i + 1] == '-':
+                        param_type = parts[i + 2]
+                        i += 3
+                    else:
+                        param_type = 'object'
+                        i += 1
+                    params.append((param_name, param_type))
+                else:
+                    i += 1
+
+            # Create Predicate object
+            from .utils.pddl_types import Predicate
+            new_predicates[pred_name] = Predicate(
+                name=pred_name,
+                parameters=params,
+                description=f"Parsed from PDDL text"
+            )
+
+        # Update predicates
+        self.predicates = new_predicates
+
+    def _parse_action_from_text(self, action_name: str, action_body: str) -> None:
+        """
+        Parse action from PDDL text.
+
+        Args:
+            action_name: Name of the action
+            action_body: Body of the action (parameters, preconditions, effects)
+        """
+        import re
+        from .utils.pddl_types import Action
+
+        # Extract parameters
+        param_match = re.search(r':parameters\s+\((.*?)\)', action_body, re.DOTALL)
+        parameters = []
+        if param_match:
+            param_str = param_match.group(1)
+            # Parse ?name - type pairs
+            param_parts = param_str.split()
+            i = 0
+            while i < len(param_parts):
+                if param_parts[i].startswith('?'):
+                    param_name = param_parts[i][1:]
+                    if i + 2 < len(param_parts) and param_parts[i + 1] == '-':
+                        param_type = param_parts[i + 2]
+                        i += 3
+                    else:
+                        param_type = 'object'
+                        i += 1
+                    parameters.append((param_name, param_type))
+                else:
+                    i += 1
+
+        # Extract preconditions (simplified - just store as string)
+        precond_match = re.search(r':precondition\s+(.*?)(?=:effect|\Z)', action_body, re.DOTALL)
+        preconditions = precond_match.group(1).strip() if precond_match else "(and)"
+
+        # Extract effects (simplified - just store as string)
+        effect_match = re.search(r':effect\s+(.*)', action_body, re.DOTALL)
+        effects = effect_match.group(1).strip() if effect_match else "(and)"
+
+        # Create Action object
+        action = Action(
+            name=action_name,
+            parameters=parameters,
+            precondition=preconditions,
+            effect=effects,
+            description=f"Parsed from PDDL text"
+        )
+
+        # Store in LLM-generated actions (since we don't know origin)
+        self.llm_generated_actions[action_name] = action
