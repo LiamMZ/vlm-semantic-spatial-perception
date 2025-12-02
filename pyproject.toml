@@ -32,6 +32,7 @@ dependencies = [
     "tqdm>=4.66.0",
     "torch>=2.9.0",
     "xarm-python-sdk>=1.17.0",
+    "pyperplan>=2.1",
 ]
 torch = [
   { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
