@@ -237,6 +237,7 @@ Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspab
     ) -> str:
         """Build prompt for task analysis with observations."""
 
+        object_list = [obj["object_id"] for obj in objects]
         objects_json = self._format_objects_json(objects)
         relationships_json = self._format_relationships_json(relationships)
 
