@@ -26,12 +26,7 @@ from google import genai
 from google.genai import types
 
 # Import coordinate conversion utilities
-from .utils.coordinates import (
-    normalized_to_pixel,
-    pixel_to_normalized,
-    compute_3d_position,
-    project_3d_to_2d,
-)
+from .utils.coordinates import compute_3d_position
 
 # Import object registry
 from .object_registry import DetectedObject, InteractionPoint, DetectedObjectRegistry
@@ -60,7 +55,7 @@ class ObjectTracker:
     FLASH_MODEL = "gemini-1.5-flash"
     
     # Default prompts configuration path
-    DEFAULT_PROMPTS_CONFIG = str(Path(__file__).parent.parent.parent / "config" / "prompts_config.yaml")
+    DEFAULT_PROMPTS_CONFIG = str(Path(__file__).parent.parent.parent / "config" / "object_tracker_prompts.yaml")
 
     def __init__(
         self,
@@ -92,7 +87,7 @@ class ObjectTracker:
             enable_affordance_caching: Cache affordance results for similar objects
             fast_mode: Skip detailed interaction points, only detect affordances
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
-            prompts_config_path: Path to prompts config YAML file (defaults to config/prompts_config.yaml)
+            prompts_config_path: Path to prompts config YAML file (defaults to config/object_tracker_prompts.yaml)
             task_context: Optional task description to ground object detection (e.g., "make coffee")
             available_actions: Optional list of available PDDL actions for context
         """

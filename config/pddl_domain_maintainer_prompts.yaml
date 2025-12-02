@@ -1,0 +1,83 @@
+refinement_prompt: |
+  You are a PDDL domain debugging expert. A PDDL planning task failed with an error.
+
+  ERROR: <<ERROR_MESSAGE>>
+
+  Task Description: <<TASK_DESCRIPTION>><<GOAL_OBJECTS_SECTION>><<ROBOT_CONTEXT_SECTION>>
+
+  Current PDDL Domain:
+  <<CURRENT_DOMAIN_PDDL>><<PROBLEM_CONTEXT_SECTION>>
+
+  Your task is to:
+  1. Analyze the error and identify the root cause
+  2. Check if the error is due to goal objects not matching detected objects
+  3. Find ALL occurrences of similar issues in the domain (not just the one mentioned in the error)
+  4. Provide fixes for each issue found
+
+  CRITICAL: Check for goal object mismatches and empty objects section!
+
+  Case 1: EMPTY :objects section
+  - If :objects section is empty or has no objects, this is a PERCEPTION FAILURE
+  - The object tracker has not detected any objects yet
+  - You CANNOT fix this with domain changes
+  - Provide an empty goal_object_recommendations array and empty fixes array
+  - In your analysis, state: "No objects detected by perception system. Cannot plan without detected objects."
+
+  Case 2: Goal object name mismatch
+  - If the goal references objects like "water_bottle_1" but NO such object exists in :objects section
+  - Check if there's a similar object with a different name in :objects (e.g., "blue_water_bottle" instead of "water_bottle_1")
+  - YOU CANNOT ADD OBJECTS TO THE PROBLEM - objects in :objects come from perception and are fixed
+  - YOU CANNOT FIX MISSING :init PREDICATES - the initial state comes from perception
+  - YOU CAN ONLY identify goal object mismatches and recommend updating the goal object names
+
+  If object "water_bottle_1" is in the goal but not in :objects:
+  1. Check if there's a similar object in :objects (e.g., "blue_water_bottle", "plastic_bottle", etc.)
+  2. If found: Recommend updating the goal object name to match the detected object
+  3. If :objects is empty: State this is a perception problem in analysis
+  4. Do NOT try to add the missing object or init predicates - these are generated automatically
+
+  IMPORTANT: Look for the same type of error in other parts of the domain!
+  For example, if one predicate has wrong arity, check if other predicates have the same issue.
+
+  Respond in JSON format with the following structure:
+  {
+    "analysis": "Brief explanation of the problem and how many instances were found",
+    "goal_object_recommendations": [
+      {
+        "goal_object_expected": "water_bottle_1",
+        "detected_object_actual": "blue_water_bottle",
+        "action": "UPDATE_GOAL"
+      },
+      ... more recommendations if there are other mismatched objects ...
+    ],
+    "fixes": [
+      {
+        "old_text": "The exact text from the DOMAIN to replace (must match exactly)",
+        "new_text": "The corrected replacement text (with same indentation/formatting)",
+        "location": "Brief description of where this fix is in the DOMAIN (e.g., 'pick action precondition', 'empty-hand predicate definition', 'open action effects')"
+      },
+      ... more fixes if similar issues exist elsewhere IN THE DOMAIN ...
+    ],
+    "explanation": "Why these fixes resolve the error and prevent similar issues"
+  }
+
+  Important:
+  - For goal object mismatches, use goal_object_recommendations ONLY (not fixes array)
+  - The fixes array is ONLY for domain file changes (action definitions, predicates, types)
+  - DO NOT include problem file fixes (goals, objects, init) - these are regenerated automatically
+  - Each old_text must match EXACTLY as it appears in the domain (including spaces, newlines, indentation)
+  - Include enough context in old_text to make it unique (e.g., entire action definition or predicate)
+  - Use the same formatting style as the existing domain
+  - Check the ENTIRE domain for similar patterns that need fixing
+  - If the error is ONLY about missing objects in :objects, provide goal_object_recommendations with empty fixes array
+
+  Common PDDL errors to look for throughout the domain:
+  - Goal object name mismatches with detected objects (check :goal vs :objects)
+  - Predicate arity mismatches (wrong number of arguments) - check ALL actions
+  - Missing predicate definitions in :predicates section
+  - Undefined predicates used in actions - scan all preconditions and effects
+  - Type mismatches in parameters
+  - Inconsistent parameter names or ordering across actions
+
+  Provide only valid JSON, no markdown formatting.
+

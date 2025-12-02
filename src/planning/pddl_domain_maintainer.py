@@ -12,7 +12,9 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+import yaml
 
+from ..utils.prompt_utils import render_prompt_template
 from .llm_task_analyzer import LLMTaskAnalyzer, TaskAnalysis
 from .pddl_representation import PDDLRepresentation
 
@@ -154,12 +156,16 @@ class PDDLDomainMaintainer:
         >>> is_complete = await maintainer.is_domain_complete()
     """
 
+    DEFAULT_PROMPTS_CONFIG = str(
+        Path(__file__).parent.parent.parent / "config" / "pddl_domain_maintainer_prompts.yaml"
+    )
+
     def __init__(
         self,
         pddl_representation: PDDLRepresentation,
         api_key: Optional[str] = None,
         model_name: str = "gemini-robotics-er-1.5-preview",
-        robot_description: Optional[str] = None
+        prompts_config_path: Optional[Union[str, Path]] = None,
     ):
         """
         Initialize domain maintainer.
@@ -168,15 +174,27 @@ class PDDLDomainMaintainer:
             pddl_representation: PDDL representation to maintain
             api_key: Gemini API key for LLM analysis
             model_name: LLM model to use
-            robot_description: Optional description of robot capabilities and affordances
+            prompts_config_path: Override path to prompts config YAML (defaults to config/pddl_domain_maintainer_prompts.yaml)
         """
+        if prompts_config_path is None:
+            prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
+
         self.pddl = pddl_representation
-        self.robot_description = robot_description
         self.llm_analyzer = LLMTaskAnalyzer(
             api_key=api_key,
             model_name=model_name,
-            robot_description=robot_description
         )
+        self.robot_description = self.llm_analyzer.robot_description
+        self.prompts_config_path = Path(prompts_config_path)
+
+        with open(self.prompts_config_path, "r", encoding="utf-8") as f:
+            config_data = yaml.safe_load(f) or {}
+
+        self.prompt_templates = {
+            key: value
+            for key, value in config_data.items()
+            if key.endswith("_prompt") and isinstance(value, str)
+        }
 
         # Current task context
         self.current_task: Optional[str] = None
@@ -807,89 +825,19 @@ ROBOT CAPABILITIES:
 Note: Actions and predicates should be consistent with the robot's capabilities.
 """
 
-        refinement_prompt = f"""
-You are a PDDL domain debugging expert. A PDDL planning task failed with an error.
+        template = self._get_prompt_template("refinement_prompt")
+        refinement_prompt = render_prompt_template(
+            template,
+            {
+                "ERROR_MESSAGE": error_message,
+                "TASK_DESCRIPTION": task_desc,
+                "GOAL_OBJECTS_SECTION": goal_objects_str,
+                "ROBOT_CONTEXT_SECTION": robot_context,
+                "CURRENT_DOMAIN_PDDL": current_domain_pddl if current_domain_pddl else "Not available",
+                "PROBLEM_CONTEXT_SECTION": problem_context,
+            },
+        )
 
-ERROR: {error_message}
-
-Task Description: {task_desc}{goal_objects_str}{robot_context}
-
-Current PDDL Domain:
-{current_domain_pddl if current_domain_pddl else 'Not available'}{problem_context}
-
-Your task is to:
-1. Analyze the error and identify the root cause
-2. Check if the error is due to goal objects not matching detected objects
-3. Find ALL occurrences of similar issues in the domain (not just the one mentioned in the error)
-4. Provide fixes for each issue found
-
-CRITICAL: Check for goal object mismatches and empty objects section!
-
-Case 1: EMPTY :objects section
-- If :objects section is empty or has no objects, this is a PERCEPTION FAILURE
-- The object tracker has not detected any objects yet
-- You CANNOT fix this with domain changes
-- Provide an empty goal_object_recommendations array and empty fixes array
-- In your analysis, state: "No objects detected by perception system. Cannot plan without detected objects."
-
-Case 2: Goal object name mismatch
-- If the goal references objects like "water_bottle_1" but NO such object exists in :objects section
-- Check if there's a similar object with a different name in :objects (e.g., "blue_water_bottle" instead of "water_bottle_1")
-- YOU CANNOT ADD OBJECTS TO THE PROBLEM - objects in :objects come from perception and are fixed
-- YOU CANNOT FIX MISSING :init PREDICATES - the initial state comes from perception
-- YOU CAN ONLY identify goal object mismatches and recommend updating the goal object names
-
-If object "water_bottle_1" is in the goal but not in :objects:
-1. Check if there's a similar object in :objects (e.g., "blue_water_bottle", "plastic_bottle", etc.)
-2. If found: Recommend updating the goal object name to match the detected object
-3. If :objects is empty: State this is a perception problem in analysis
-4. Do NOT try to add the missing object or init predicates - these are generated automatically
-
-IMPORTANT: Look for the same type of error in other parts of the domain!
-For example, if one predicate has wrong arity, check if other predicates have the same issue.
-
-Respond in JSON format with the following structure:
-{{
-  "analysis": "Brief explanation of the problem and how many instances were found",
-  "goal_object_recommendations": [
-    {{
-      "goal_object_expected": "water_bottle_1",
-      "detected_object_actual": "blue_water_bottle",
-      "action": "UPDATE_GOAL"
-    }},
-    ... more recommendations if there are other mismatched objects ...
-  ],
-  "fixes": [
-    {{
-      "old_text": "The exact text from the DOMAIN to replace (must match exactly)",
-      "new_text": "The corrected replacement text (with same indentation/formatting)",
-      "location": "Brief description of where this fix is in the DOMAIN (e.g., 'pick action precondition', 'empty-hand predicate definition', 'open action effects')"
-    }},
-    ... more fixes if similar issues exist elsewhere IN THE DOMAIN ...
-  ],
-  "explanation": "Why these fixes resolve the error and prevent similar issues"
-}}
-
-Important:
-- For goal object mismatches, use goal_object_recommendations ONLY (not fixes array)
-- The fixes array is ONLY for domain file changes (action definitions, predicates, types)
-- DO NOT include problem file fixes (goals, objects, init) - these are regenerated automatically
-- Each old_text must match EXACTLY as it appears in the domain (including spaces, newlines, indentation)
-- Include enough context in old_text to make it unique (e.g., entire action definition or predicate)
-- Use the same formatting style as the existing domain
-- Check the ENTIRE domain for similar patterns that need fixing
-- If the error is ONLY about missing objects in :objects, provide goal_object_recommendations with empty fixes array
-
-Common PDDL errors to look for throughout the domain:
-- Goal object name mismatches with detected objects (check :goal vs :objects)
-- Predicate arity mismatches (wrong number of arguments) - check ALL actions
-- Missing predicate definitions in :predicates section
-- Undefined predicates used in actions - scan all preconditions and effects
-- Type mismatches in parameters
-- Inconsistent parameter names or ordering across actions
-
-Provide only valid JSON, no markdown formatting.
-"""
 
         try:
             # Get LLM's analysis and fix
@@ -1055,3 +1003,10 @@ Provide only valid JSON, no markdown formatting.
         await self.validate_and_fix_action_predicates()
 
         print("  ✓ Re-validated predicates")
+
+    def _get_prompt_template(self, template_key: str) -> str:
+        """Fetch prompt text for the given key."""
+        template = self.prompt_templates.get(template_key)
+        if template is None:
+            raise KeyError(f"Missing prompt template: {template_key}")
+        return template

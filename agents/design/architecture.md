@@ -30,7 +30,7 @@ SkillDecomposer.plan(...) → SkillPlan → PrimitiveExecutor.execute_plan(...)
 
 ## Interfaces & Config
 - `TaskOrchestrator` / `OrchestratorConfig` (`config/orchestrator_config.py`): detection cadence, snapshot cadence/retention, state directory, optional robot provider (duck-typed `get_robot_state()`).
-- Prompts: `config/prompts_config.yaml` (perception), `config/skill_decomposer_prompts.yaml` (primitive planning). Keep them aligned with `agents/design/prompts_configuration.md`.
+- Prompts: `config/object_tracker_prompts.yaml` (perception), `config/llm_task_analyzer_prompts.yaml` (task analysis), `config/pddl_domain_maintainer_prompts.yaml` (domain refinement), `config/skill_decomposer_prompts.yaml` (primitive planning). Keep them aligned with the paired docs (`agents/design/prompts_configuration.md` for perception, `docs/planning.md` for task analysis/primitives).
 - Primitive catalog: `config/primitive_descriptions.md` must mirror callable signatures in `src/kinematics/xarm_curobo_interface.py` and stay in sync with `PRIMITIVE_LIBRARY`.
 - Snapshot helpers: `src/planning/utils/snapshot_utils.py` resolve color/depth/intrinsics for a snapshot ID referenced in the registry or plan.
 - Logging: use `configure_logging` (`src/utils/logging_utils.py`) to route `TaskOrchestrator`/`RealSenseCamera` logs into UI callbacks (e.g., the Textual demo) instead of redirecting stdout.

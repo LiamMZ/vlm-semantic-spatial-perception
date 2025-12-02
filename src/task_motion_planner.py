@@ -112,13 +112,6 @@ class TAMPConfig:
     dry_run_default: bool = False  # Default dry-run mode for execution
     primitives_interface: Optional[Any] = None  # Actual robot primitives interface
 
-    # Robot configuration
-    # Optional description of robot capabilities and affordances, injected into task analysis
-    # and domain refinement prompts to help the LLM generate feasible actions and predicates.
-    # Example: "6-DOF arm with parallel gripper. Can pick/place (max 2kg), open containers,
-    # push/pull objects. Cannot do fine manipulation or grasp objects <1cm or >15cm."
-    robot_description: Optional[str] = None
-
     # Callbacks
     on_state_change: Optional[Callable[[TAMPState], None]] = None
     on_plan_generated: Optional[Callable[[SolverResult], None]] = None
@@ -139,7 +132,6 @@ class TAMPConfig:
             solver_backend=self.solver_backend,
             solver_algorithm=self.solver_algorithm,
             solver_timeout=self.solver_timeout,
-            robot_description=self.robot_description,
             on_plan_generated=self.on_plan_generated,
         )
 

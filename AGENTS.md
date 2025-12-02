@@ -9,7 +9,9 @@ Use this file as the index for all agent-related docs. Each component lives in i
 
 ## Maintenance Instructions
 1. **Find the paired doc for your change**:
-   - Perception/prompts changes (`src/perception/*`, `config/prompts_config.yaml`): update `agents/design/prompts_configuration.md` and `docs/perception.md`.
+   - Perception/prompts changes (`src/perception/*`, `config/object_tracker_prompts.yaml`): update `agents/design/prompts_configuration.md` and `docs/perception.md`.
+   - Task analysis prompts (`src/planning/llm_task_analyzer.py`, `config/llm_task_analyzer_prompts.yaml`): update `docs/planning.md` (task analysis section) and reference the change in `agents/journal/YYYY-MM-DD.md`.
+   - Domain refinement **prompts** (`src/planning/pddl_domain_maintainer.py`, `config/pddl_domain_maintainer_prompts.yaml`): update `docs/planning.md` (domain maintainer section) and log in `agents/journal/YYYY-MM-DD.md`.
    - Orchestrator/state/snapshots (`src/planning/task_orchestrator.py`, `config/orchestrator_config.py`): update `agents/design/architecture.md`, `agents/design/orchestrator_observation_snapshot_plan.md`, and `docs/ORCHESTRATOR.md`.
    - Primitives/skill decomposition (`src/primitives/*`, `config/primitive_descriptions.md`, `config/skill_decomposer_prompts.yaml`): update `agents/design/primitive_task_breakdown_plan.md` and `docs/planning.md`.
    - Operational guardrails or runbooks: update `agents/operations/playbook.md`.

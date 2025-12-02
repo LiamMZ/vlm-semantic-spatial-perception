@@ -60,13 +60,6 @@ class TAMPDemo:
             solver_timeout=30.0,
             dry_run_default=dry_run,
             primitives_interface=None,  # Would be robot interface in real deployment
-            # Optional: Describe robot capabilities to guide task planning
-            robot_description="""
-                SINGLE 7-DOF robotic arm with parallel jaw gripper.
-                Capabilities: pick/place objects (max 2kg), open/close containers,
-                push/pull objects, pour from containers.
-                Limitations: Cannot grasp objects <1cm or >15cm, no fine manipulation.
-            """,
             on_state_change=self._on_state_change,
             on_plan_generated=self._on_plan_generated,
             on_action_decomposed=self._on_action_decomposed,

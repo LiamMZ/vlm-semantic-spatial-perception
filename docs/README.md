@@ -4,7 +4,7 @@ This folder tracks the current behavior of the perception/orchestration stack. U
 
 ## What to Read
 - [ORCHESTRATOR.md](ORCHESTRATOR.md) – TaskOrchestrator lifecycle, perception pool snapshots, and state layout produced under `state_dir`.
-- [perception.md](perception.md) – `ObjectTracker`/`ContinuousObjectTracker`, prompt loading from `config/prompts_config.yaml`, registry v2.0, and coordinate conventions.
+- [perception.md](perception.md) – `ObjectTracker`/`ContinuousObjectTracker`, prompt loading from `config/object_tracker_prompts.yaml`, registry v2.0, and coordinate conventions.
 - [planning.md](planning.md) – PDDL maintainer/task monitor plus the primitives layer (`SkillDecomposer`, `PrimitiveExecutor`), snapshot utilities, and cached-plan replay guidance.
 - [camera.md](camera.md) – RealSense/Webcam wrappers, intrinsics, and 2D↔3D utilities used by perception and the executor.
 
@@ -15,7 +15,9 @@ This folder tracks the current behavior of the perception/orchestration stack. U
 
 ## Key Config Files
 - `config/orchestrator_config.py` – detection cadence, snapshot cadence/retention, state_dir.
-- `config/prompts_config.yaml` – Gemini Robotics prompts for perception.
+- `config/object_tracker_prompts.yaml` – Gemini Robotics prompts for perception.
+- `config/llm_task_analyzer_prompts.yaml` – prompt templates + default robot description for `LLMTaskAnalyzer`.
+- `config/pddl_domain_maintainer_prompts.yaml` – refinement prompt for `PDDLDomainMaintainer`.
 - `config/primitive_descriptions.md` + `config/skill_decomposer_prompts.yaml` – primitive catalog and Gemini prompt/schema for skill decomposition.
 
 Keep these docs in sync with the corresponding modules under `src/`; update them in the same PR whenever APIs or behaviors change.

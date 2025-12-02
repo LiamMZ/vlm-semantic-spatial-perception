@@ -1,8 +1,8 @@
 # Prompts Configuration
 
-`ObjectTracker` and `ContinuousObjectTracker` always load prompts from YAML; do not inline prompt strings. `ContinuousObjectTracker` now subclasses `ObjectTracker` in the same module and reuses the exact prompt config (no separate scene-change tuning). The default path is `config/prompts_config.yaml` (also referenced by `ObjectTracker.DEFAULT_PROMPTS_CONFIG`). Detection prompts render an `existing_objects_section` plus `prior_images_section` (attached recent frames with per-object positions) so Gemini reuses existing IDs when objects persist and only introduces new IDs when necessary.
+`ObjectTracker` and `ContinuousObjectTracker` always load prompts from YAML; do not inline prompt strings. `ContinuousObjectTracker` now subclasses `ObjectTracker` in the same module and reuses the exact prompt config (no separate scene-change tuning). The default path is `config/object_tracker_prompts.yaml` (also referenced by `ObjectTracker.DEFAULT_PROMPTS_CONFIG`). Detection prompts render an `existing_objects_section` plus `prior_images_section` (attached recent frames with per-object positions) so Gemini reuses existing IDs when objects persist and only introduces new IDs when necessary.
 
-## File Layout (`config/prompts_config.yaml`)
+## File Layout (`config/object_tracker_prompts.yaml`)
 - `detection.streaming` – scene-level object discovery (normalized `[ymin, xmin, ymax, xmax]` integers in the 0–1000 range). Streaming is the only detection path and is split into two YAML templates: `prior` (IDs + prior images, no detection) and `current` (current frame + detection instructions). The tracker now sends these as two explicit content turns to Gemini: prior images + prior prompt first (context only), then a second turn with ONLY the current frame appended last; detection must run solely on that final image. The current turn follows the Gemini cookbook style: return ONLY a JSON array of `{box_2d, label}` entries (no code fences), reuse existing IDs in the `label` field when visible, create descriptive labels for new instances, clamp to 25 objects, and keep boxes tight.
 - `analysis.fast_mode` / `analysis.cached_mode` / `analysis.full` – affordances, interaction points, properties, optional PDDL predicates.
 - `interaction.update` – single-affordance interaction point refinement.
@@ -16,7 +16,7 @@ tracker = ObjectTracker(
     api_key=api_key,
     fast_mode=False,
     pddl_predicates=["clean", "opened"],
-    prompts_config_path="config/prompts_config.yaml",  # optional override
+    prompts_config_path="config/object_tracker_prompts.yaml",  # optional override
 )
 print(tracker.prompts["analysis"]["full"][:80])  # confirm load
 ```
@@ -32,4 +32,4 @@ Template variables supported:
 - When adding new prompt variables, update the tracker formatting code and this doc together.
 - Test prompt edits with `uv run python examples/object_tracker_demo.py` or a targeted script before merging.
 
-Keep this doc synchronized with `config/prompts_config.yaml` and `src/perception/object_tracker.py`.
+Keep this doc synchronized with `config/object_tracker_prompts.yaml` and `src/perception/object_tracker.py`.

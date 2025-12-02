@@ -1,6 +1,6 @@
 # Perception System
 
-Perception is built around Gemini Robotics-ER prompts loaded from `config/prompts_config.yaml`. The stack detects objects, affordances, interaction points, and optional PDDL predicates, then maintains a thread-safe registry consumed by the orchestrator, planners, and the primitives layer.
+Perception is built around Gemini Robotics-ER prompts loaded from `config/object_tracker_prompts.yaml`. The stack detects objects, affordances, interaction points, and optional PDDL predicates, then maintains a thread-safe registry consumed by the orchestrator, planners, and the primitives layer.
 
 **Code**: `src/perception/`
 
@@ -59,7 +59,7 @@ Run the demo: `uv run python examples/object_tracker_demo.py`.
 
 ## Configuration + Environment
 - API key: `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
-- Prompts: `config/prompts_config.yaml` (keep it in sync with `agents/design/prompts_configuration.md`).
+- Prompts: `config/object_tracker_prompts.yaml` (keep it in sync with `agents/design/prompts_configuration.md`).
 - Detection runs streaming-only; there is no batch prompt or fallback path.
 - Detection output uses a Gemini cookbook-style JSON array: `[{"box_2d": [ymin, xmin, ymax, xmax], "label": "<id or descriptive name>"}]` with integer coords in 0–1000, up to 25 objects. Reuse registry IDs in `label` when visible, otherwise create descriptive labels.
 - Tuning: `fast_mode`, `max_parallel_requests`, `crop_target_size`, and `enable_affordance_caching` on the trackers.

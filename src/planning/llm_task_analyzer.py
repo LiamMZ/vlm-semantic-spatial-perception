@@ -8,17 +8,19 @@ This module uses an LLM to:
 4. Infer required actions
 """
 
+import io
 import json
 import time
-import io
-from typing import Dict, List, Optional, Union
 from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 import numpy as np
+import yaml
 from PIL import Image
 from google import genai
 from google.genai import types
 
+from ..utils.prompt_utils import render_prompt_template
 from .utils.task_types import TaskAnalysis
 
 
@@ -30,11 +32,13 @@ class LLMTaskAnalyzer:
     to the actual environment rather than relying on fixed patterns.
     """
 
+    DEFAULT_PROMPTS_CONFIG = str(Path(__file__).parent.parent.parent / "config" / "llm_task_analyzer_prompts.yaml")
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         model_name: str = "gemini-2.5-pro",
-        robot_description: Optional[str] = None
+        prompts_config_path: Optional[Union[str, Path]] = None
     ):
         """
         Initialize LLM task analyzer.
@@ -42,16 +46,29 @@ class LLMTaskAnalyzer:
         Args:
             api_key: Gemini API key (None to use environment variable)
             model_name: Model to use (flash for speed, pro for quality)
-            robot_description: Optional description of robot capabilities and affordances
+            prompts_config_path: Override path to prompts config YAML (defaults to config/llm_task_analyzer_prompts.yaml)
         """
+        if prompts_config_path is None:
+            prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
+
         self.api_key = api_key
         self.model_name = model_name
-        self.robot_description = robot_description
+        self.prompts_config_path = Path(prompts_config_path)
         self.client = genai.Client(api_key=api_key)
 
+        with open(self.prompts_config_path, "r", encoding="utf-8") as f:
+            config_data = yaml.safe_load(f) or {}
+
+        self.prompt_templates = {
+            key: value
+            for key, value in config_data.items()
+            if key.endswith("_prompt")
+        }
+        self.robot_description = config_data.get("robot_description")
+
         print(f"ℹ LLMTaskAnalyzer using GenAI SDK with model: {model_name}")
-        if robot_description:
-            print(f"  • Robot description configured ({len(robot_description)} chars)")
+        if self.robot_description:
+            print(f"  • Robot description configured ({len(self.robot_description)} chars)")
 
         # Response cache for identical queries
         self._cache: Dict[str, TaskAnalysis] = {}
@@ -157,52 +174,14 @@ class LLMTaskAnalyzer:
         This prompt asks the LLM to predict what predicates, actions, and objects
         will likely be needed for the task, even without seeing the environment yet.
         """
-        robot_context = ""
-        if self.robot_description:
-            robot_context = f"""
-ROBOT CAPABILITIES:
-{self.robot_description}
-
-Consider the robot's capabilities when determining feasible actions and predicates.
-"""
-
-        return f"""Analyze this robotic task and predict required PDDL components.
-
-TASK: {task}
-{robot_context}
-
-Return JSON with:
-{{
-  "action_sequence": ["step1", "step2"],
-  "goal_predicates": ["on(obj, location)"],
-  "preconditions": ["graspable(obj)"],
-  "goal_objects": ["obj_types_from_task"],
-  "tool_objects": ["tools_needed"],
-  "obstacle_objects": [],
-  "initial_predicates": ["expected_initial_states"],
-  "relevant_predicates": ["predicate_names"],
-  relevalnt_types": ["type1", "type2"],
-  "required_actions": [
-    {{
-      "name": "pick",
-      "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (empty-hand))",
-      "effect": "(and (holding ?obj) (not (empty-hand)))"
-    }}
-  ],
-  "complexity": "simple",
-  "estimated_steps": 3
-}}
-
-IMPORTANT PDDL RULES:
-1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
-2. Preconditions and effects use ONLY variables - NO quoted strings or constants
-3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
-   - WRONG: (is-empty ?machine "water_reservoir")
-   - RIGHT: (water-reservoir-empty ?machine)
-4. All predicates should be predicates applied to variables, not string constants
-
-Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
+        template = self._get_prompt_template("initial_prompt")
+        return render_prompt_template(
+            template,
+            {
+                "TASK": task,
+                "ROBOT_DESCRIPTION": self._format_robot_description(),
+            },
+        )
 
     def _build_analysis_prompt(
         self,
@@ -212,75 +191,19 @@ Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspab
     ) -> str:
         """Build prompt for task analysis with observations."""
 
-        # Format observed scene
-        object_list = "\n".join([
-            f"- {obj.get('object_type', 'unknown')} "
-            f"(id: {obj.get('object_id', 'unknown')}, "
-            f"affordances: {', '.join(obj.get('affordances', []))})"
-            for obj in objects[:20]  # Limit for speed
-        ])
+        objects_json = self._format_objects_json(objects)
+        relationships_json = self._format_relationships_json(relationships)
 
-        relationship_list = "\n".join([f"- {rel}" for rel in relationships[:30]])
-
-        robot_context = ""
-        if self.robot_description:
-            robot_context = f"""
-ROBOT CAPABILITIES:
-{self.robot_description}
-
-Consider the robot's capabilities when determining feasible actions.
-"""
-
-        return f"""You are a robotic task planner. Analyze this task given the observed scene.
-
-TASK: {task}
-{robot_context}
-OBSERVED OBJECTS:
-{object_list if object_list else "- No objects detected yet"}
-
-OBSERVED RELATIONSHIPS:
-{relationship_list if relationship_list else "- No relationships observed yet"}
-
-Provide a JSON response with:
-{{
-  "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
-  "preconditions": ["predicate(obj)", ...],
-  "goal_objects": ["object_id1", ...],
-  "tool_objects": ["tool_id", ...],
-  "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["current_predicate(obj)", ...],
-  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
-  "relevant_types": ["type1", "type2", ...],
-  "required_actions": [
-    {{
-      "name": "pick",
-      "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
-      "effect": "(and (holding ?obj) (not (empty-hand)))"
-    }}
-  ],
-  "complexity": "simple|medium|complex",
-  "estimated_steps": 3
-}}
-
-CRITICAL PDDL FORMATTING RULES:
-1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
-2. Preconditions and effects can ONLY use:
-   - Variables (e.g., ?obj, ?container)
-   - Predicate names (e.g., graspable, empty-hand, has-water)
-3. NEVER use quoted strings or constants in preconditions/effects
-4. If referencing a component, make it a predicate:
-   - WRONG: (is-empty ?machine "water_reservoir")
-   - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
-5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
-
-Focus on:
-1. Use observed objects and their actual IDs
-2. Generate predicates matching observed affordances
-3. Create action sequence using observed objects
-4. Include all task-relevant predicates
-5. Ensure all PDDL actions follow proper syntax (no quoted strings!)"""
+        template = self._get_prompt_template("analysis_prompt")
+        return render_prompt_template(
+            template,
+            {
+                "TASK": task,
+                "ROBOT_DESCRIPTION": self._format_robot_description(),
+                "OBJECTS_JSON": objects_json,
+                "RELATIONSHIPS_JSON": relationships_json,
+            },
+        )
 
     def _parse_response(self, response_text: str) -> TaskAnalysis:
         """Parse LLM JSON response into TaskAnalysis."""
@@ -305,24 +228,6 @@ Focus on:
             print(f"   ⚠ Failed to parse LLM response: {e}")
             raise
 
-    def _create_fallback_analysis(
-        self, task: str, objects: List[Dict]
-    ) -> TaskAnalysis:
-        """Create basic fallback analysis if LLM fails."""
-        return TaskAnalysis(
-            action_sequence=["navigate", "manipulate"],
-            goal_predicates=["completed(task)"],
-            preconditions=["ready(robot)"],
-            goal_objects=[obj.get("object_id", "") for obj in objects[:3]],
-            tool_objects=[],
-            obstacle_objects=[],
-            initial_predicates=[],
-            relevant_predicates=["at", "holding", "clear"],
-            required_actions=[],
-            complexity="medium",
-            estimated_steps=2
-        )
-
     def _make_cache_key(self, task: str, objects: List[Dict]) -> str:
         """Create cache key from task and objects."""
         obj_ids = sorted([obj.get("object_id", "") for obj in objects])
@@ -342,3 +247,32 @@ Focus on:
     def clear_cache(self):
         """Clear analysis cache."""
         self._cache.clear()
+
+    def _get_prompt_template(self, template_key: str) -> str:
+        """Return prompt template by key."""
+        template = self.prompt_templates.get(template_key)
+        if template is None:
+            raise KeyError(f"Missing prompt template: {template_key}")
+        return template
+
+    def _format_robot_description(self) -> str:
+        """Return robot description text or empty string if not configured."""
+        return (self.robot_description or "").strip()
+
+    def _format_objects_json(self, objects: List[Dict]) -> str:
+        """Serialize observed objects as compact JSON summary."""
+        summary: List[Dict[str, Union[str, List[str]]]] = []
+        for obj in objects[:20]:
+            summary.append(
+                {
+                    "object_id": obj.get("object_id", "unknown"),
+                    "object_type": obj.get("object_type", "unknown"),
+                    "affordances": obj.get("affordances", []),
+                }
+            )
+        return json.dumps(summary, indent=2)
+
+    def _format_relationships_json(self, relationships: List[str]) -> str:
+        """Serialize observed relationships as JSON."""
+        rels = relationships[:30] if relationships else []
+        return json.dumps(rels, indent=2)

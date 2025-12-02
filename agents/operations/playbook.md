@@ -2,7 +2,7 @@
 
 ## Guiding Principles
 - Ground everything in the orchestrator: use `TaskOrchestrator`/`get_world_state_snapshot()` instead of bespoke loops.
-- Keep prompts/config in YAML/MD (`config/prompts_config.yaml`, `config/skill_decomposer_prompts.yaml`, `config/primitive_descriptions.md`); never inline LLM prompts.
+- Keep prompts/config in YAML/MD (`config/object_tracker_prompts.yaml`, `config/llm_task_analyzer_prompts.yaml`, `config/pddl_domain_maintainer_prompts.yaml`, `config/skill_decomposer_prompts.yaml`, `config/primitive_descriptions.md`); never inline LLM prompts.
 - Preserve reproducibility: snapshots + registry v2.0 are the canonical evidence. Do not hand-edit `registry.json` or perception pool contents.
 - Use `uv` for all commands (`uv run python ...`, `uv run python -m pytest -q`) and log what you ran in `agents/journal/YYYY-MM-DD.md` with timestamps from `date '+%Y-%m-%d-%H%M'`.
 

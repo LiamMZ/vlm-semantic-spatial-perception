@@ -202,7 +202,6 @@ class TaskOrchestrator:
             self.pddl,
             api_key=self.config.api_key,
             model_name=self.config.model_name,
-            robot_description=self.config.robot_description
         )
 
         self.monitor = TaskStateMonitor(

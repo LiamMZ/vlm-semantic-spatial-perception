@@ -1,0 +1,112 @@
+# Optional default robot description injected into prompts (set to null to omit)
+robot_description: "The robot is a 7-DOF robot arm, with a two-finger rigid gripper as end effector. The end effector cannot grasp objects <1cm or >15cm. The robot has a Realsense RGBD camera mounted at the end effector."
+
+initial_prompt: |
+  Analyze this robotic task and predict required PDDL components.
+
+  TASK:
+  <<TASK>>
+
+  ROBOT CAPABILITIES:
+  <<ROBOT_DESCRIPTION>>
+
+  Use the robot's capabilities when determining feasible actions and predicates.
+
+  Return JSON with:
+  {
+    "action_sequence": ["step1", "step2"],
+    "goal_predicates": ["on(obj, location)"],
+    "preconditions": ["graspable(obj)"],
+    "goal_objects": ["obj_types_from_task"],
+    "tool_objects": ["tools_needed"],
+    "obstacle_objects": [],
+    "initial_predicates": ["expected_initial_states"],
+    "relevant_predicates": ["predicate_names"],
+    "relevant_types": ["type1", "type2"],
+    "required_actions": [
+      {
+        "name": "pick",
+        "parameters": ["?obj - object"],
+        "precondition": "(and (graspable ?obj) (empty-hand))",
+        "effect": "(and (holding ?obj) (not (empty-hand)))"
+      }
+    ],
+    "complexity": "simple",
+    "estimated_steps": 3
+  }
+
+  IMPORTANT PDDL RULES:
+  1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
+  2. Preconditions and effects use ONLY variables - NO quoted strings or constants
+  3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
+     - WRONG: (is-empty ?machine "water_reservoir")
+     - RIGHT: (water-reservoir-empty ?machine)
+  4. All predicates should be predicates applied to variables, not string constants
+  5. Include 8-12 relevant_predicates and 3-5 required_actions.
+
+analysis_prompt: |
+  Your goal is to analyze a task space and formulate a symbolic world representation in
+  PDDL to help a robotics system execute the task. The context of the task is as follows:
+
+  Task description:
+  <<TASK>>
+
+  Robot description:
+  <<ROBOT_DESCRIPTION>>
+
+  Current Observed Objects:
+  <<OBJECTS_JSON>>
+
+  Current Observed Relationship:
+  <<RELATIONSHIPS_JSON>>
+
+  Provide a response in JSON with the following schema:
+  {
+    "relevant_predicates": ["predicate_type1", "predicate_type2", "..."],
+    "relevant_actions": [
+      {
+        "name": "action_name_1",
+        "parameters": ["?obj - object"],
+        "precondition": "precondition_1",
+        "effect": "effect_1",
+      }
+    ]
+    "goal_predicates": ["goal_predicate"],
+    ""
+  }
+
+  Response guidelines:
+  1. Your goal is not to complete the task, but to give a general and useful set of
+  primitives for the downstream system to build a world representation and operate on
+  it.
+  2. Predicates should be a detailed and exhaustive list of predicates that might be 
+  useful to representing and solving the task.
+  3. Actions can be a list of any number of actions the robot is capable of doing, and
+  should be concise and general. If preconditions and effects are not in 
+  relevant_predicates, they should be added to the response JSON.
+  4. The goal predicate should be a general, quantificational description over the world,
+   instead of a specific one only involving immediate objects. For example, instead of
+   producing a goal that directly names objects like “the water bottle is in the paper bag”,
+   you should express it in terms of existentially quantified variables constrained by
+   semantic predicates.
+
+   In logical form, the same goal would be:
+
+     “There exist objects w and b such that
+      is_water_bottle(w) ∧ is_paper_bag(b) ∧ inside(w, b).”
+
+   In PDDL-style syntax, this could look like:
+
+     (:goal
+       (exists (?w - object ?b - object)
+         (and (is_water_bottle ?w)
+              (is_paper_bag ?b)
+              (inside ?w ?b))))
+
+   This way, the goal does not refer to any specific object names that may only be
+   introduced later in the problem file; it is written purely in terms of semantic
+   predicates (e.g., is_water_bottle, is_paper_bag, inside) over abstract objects.
+
+
+
+
