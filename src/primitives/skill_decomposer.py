@@ -25,7 +25,12 @@ from src.primitives.skill_plan_types import (
     compute_registry_hash,
 )
 from src.planning.task_orchestrator import TaskOrchestrator
-from src.planning.utils.snapshot_utils import SnapshotArtifacts, SnapshotCache, load_snapshot_artifacts
+from src.planning.utils.snapshot_utils import (
+    SnapshotArtifacts,
+    SnapshotCache,
+    latest_snapshot_for_object_ids,
+    load_snapshot_artifacts,
+)
 
 # Default prompts config path (all prompt text lives in YAML)
 DEFAULT_PROMPTS_PATH = Path(__file__).resolve().parents[2] / "config" / "skill_decomposer_prompts.yaml"
@@ -100,8 +105,12 @@ class SkillDecomposer:
         registry_hash = compute_registry_hash(world_state.get("registry", {}))
 
         catalog_text = self.primitive_catalog_path.read_text()
+        target_object_ids = self._extract_object_ids(parameters)
+        snapshot_id = latest_snapshot_for_object_ids(
+            world_state, self._perception_pool_dir, target_object_ids, cache=self._snapshot_cache
+        ) or world_state.get("last_snapshot_id")
         snapshot_artifacts = load_snapshot_artifacts(
-            world_state, self._perception_pool_dir, cache=self._snapshot_cache
+            world_state, self._perception_pool_dir, cache=self._snapshot_cache, snapshot_id=snapshot_id
         )
         prompts = self._load_prompts_config()
         prompt = self._build_prompt(
@@ -196,6 +205,23 @@ class SkillDecomposer:
             merged_objects, parameters=parameters
         )
         return world_state
+
+    def _extract_object_ids(self, parameters: Dict[str, Any]) -> List[str]:
+        """
+        Pull likely target object ids from parameters.
+        """
+        ids: List[str] = []
+        oid = parameters.get("object_id")
+        if isinstance(oid, str):
+            ids.append(oid)
+        elif isinstance(oid, (list, tuple)):
+            ids.extend([str(v) for v in oid])
+
+        oid_plural = parameters.get("object_ids")
+        if isinstance(oid_plural, (list, tuple)):
+            ids.extend([str(v) for v in oid_plural if v is not None])
+
+        return [i for i in ids if i]
 
     def _filter_relevant_objects(
         self, objects: List[Dict[str, Any]], parameters: Dict[str, Any]
