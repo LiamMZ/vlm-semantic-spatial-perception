@@ -366,6 +366,10 @@ class ObjectTracker:
             List of detected objects with full information
         """
         self.logger.info("Detecting objects in scene (async)...")
+
+        # Clear previous predicates before new detection
+        self.registry.clear_predicates()
+
         start_time = time.time()
 
         # Prepare image
@@ -645,14 +649,35 @@ class ObjectTracker:
         # Build prompt based on mode and cache
         crop_note = " (This is a cropped region focusing on the object.)" if crop_offset else ""
 
-        # Build PDDL predicate section if predicates are specified
-        pddl_section = ""
-        pddl_example = ""
+        # Build predicates section if predicates are specified
+        predicates_section = ""
+        predicates_example = ""
         if self.pddl_predicates:
             pddl_list = ", ".join(self.pddl_predicates)
-            pddl_section = self.prompts['pddl']['section_template'].format(pddl_list=pddl_list)
-            pddl_example = self.prompts['pddl']['example_template']
-        
+
+            # Get list of other detected objects for relational predicates
+            other_objects = self.registry.get_all_objects()
+            other_objects_list = ""
+            if other_objects:
+                other_objects_list = "\n"
+                for obj in other_objects:
+                    # Skip the current object being analyzed
+                    if obj.object_id != existing_object_id and obj.object_id != object_name:
+                        other_objects_list += f"       - {obj.object_id} ({obj.object_type})\n"
+                if other_objects_list.strip() == "":
+                    other_objects_list = "\n       (No other objects detected yet)"
+            else:
+                other_objects_list = "\n       (No other objects detected yet)"
+
+            predicates_section = self.prompts['predicates']['section_template'].format(
+                object_id=object_name,
+                pddl_list=pddl_list,
+                other_objects_list=other_objects_list
+            )
+            predicates_example = self.prompts['predicates']['example_template'].format(
+                object_id=object_name
+            )
+
         # Format task context for analysis
         task_context_section = self._format_task_context_for_analysis()
 
@@ -661,8 +686,8 @@ class ObjectTracker:
             prompt = self.prompts['analysis']['fast_mode'].format(
                 object_name=object_name,
                 crop_note=crop_note,
-                pddl_section=pddl_section,
-                pddl_example=pddl_example,
+                predicates_section=predicates_section,
+                predicates_example=predicates_example,
                 task_context_section=task_context_section
             )
         elif cached_data:
@@ -678,8 +703,8 @@ class ObjectTracker:
             prompt = self.prompts['analysis']['full'].format(
                 object_name=object_name,
                 crop_note=crop_note,
-                pddl_section=pddl_section,
-                pddl_example=pddl_example,
+                predicates_section=predicates_section,
+                predicates_example=predicates_example,
                 task_context_section=task_context_section
             )
 
@@ -774,8 +799,6 @@ class ObjectTracker:
                 interaction_points[affordance] = InteractionPoint(
                     position_2d=pos_2d,
                     position_3d=pos_3d,
-                    confidence=point_data.get("confidence", 0.5),
-                    reasoning=point_data.get("reasoning", ""),
                     alternative_points=point_data.get("alternative_points", [])
                 )
 
@@ -800,14 +823,25 @@ class ObjectTracker:
             if self.enable_affordance_caching and not cached_data and affordances:
                 self._affordance_cache[object_type] = {
                     "object_type": object_type,
-                    "affordances": list(affordances),
-                    "properties": data.get("properties", {})
+                    "affordances": list(affordances)
                 }
 
-            # Extract PDDL state predicates if present
-            pddl_state = data.get("pddl_state", {})
+            # Extract predicates if present
+            object_predicates = data.get("predicates", [])
 
-            # Create DetectedObject
+            # Validate and normalize predicates
+            validated_predicates = []
+            for pred in object_predicates:
+                if isinstance(pred, str) and pred.strip():
+                    # Normalize whitespace
+                    normalized = " ".join(pred.strip().split())
+                    validated_predicates.append(normalized)
+
+            # Add predicates to registry's global predicate set
+            if validated_predicates:
+                self.registry.add_predicates(validated_predicates)
+
+            # Create DetectedObject (without predicates field - they're only at registry level)
             detected_obj = DetectedObject(
                 object_type=object_type,
                 object_id=existing_object_id or object_id,
@@ -815,10 +849,7 @@ class ObjectTracker:
                 interaction_points=interaction_points,
                 position_2d=pos_2d,
                 position_3d=pos_3d,
-                bounding_box_2d=final_bbox,
-                properties=data.get("properties", {}),
-                pddl_state=pddl_state,
-                confidence=data.get("confidence", 0.5)
+                bounding_box_2d=final_bbox
             )
 
             return detected_obj
@@ -988,9 +1019,7 @@ class ObjectTracker:
             # Create updated interaction point
             interaction_point = InteractionPoint(
                 position_2d=pos_2d,
-                position_3d=pos_3d,
-                confidence=data.get("confidence", 0.5),
-                reasoning=data.get("reasoning", "")
+                position_3d=pos_3d
             )
 
             # Update in registry (thread-safe)
@@ -1057,9 +1086,6 @@ class ObjectTracker:
                     parts.append(f"type={obj.object_type}")
                 if obj.bounding_box_2d:
                     parts.append(f"bbox={obj.bounding_box_2d}")
-                color = obj.properties.get("color") if obj.properties else None
-                if color:
-                    parts.append(f"color={color}")
                 lines.append("- " + ", ".join(parts))
 
             if len(existing_objects) > 20:

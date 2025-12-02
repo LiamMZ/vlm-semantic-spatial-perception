@@ -95,9 +95,7 @@ async def test_solver_integration():
             position_2d=(100, 100),
             position_3d=np.array([0.3, 0.0, 0.1]),
             bounding_box_2d=(80, 80, 120, 120),
-            affordances={"graspable", "stackable"},
-            pddl_state={"color": "red", "graspable": True, "clear": True},
-            confidence=0.95
+            affordances={"graspable", "stackable"}
         ),
         DetectedObject(
             object_type="block",
@@ -105,9 +103,7 @@ async def test_solver_integration():
             position_2d=(200, 200),
             position_3d=np.array([0.5, 0.0, 0.1]),
             bounding_box_2d=(180, 180, 220, 220),
-            affordances={"graspable", "stackable"},
-            pddl_state={"color": "blue", "graspable": True, "clear": True},
-            confidence=0.95
+            affordances={"graspable", "stackable"}
         ),
     ]
 
@@ -115,6 +111,16 @@ async def test_solver_integration():
     if orchestrator.tracker and orchestrator.tracker:
         for obj in mock_objects:
             orchestrator.tracker.registry.add_object(obj)
+
+        # Add predicates to registry
+        predicates = [
+            "graspable red_block_1",
+            "clear red_block_1",
+            "graspable blue_block_1",
+            "clear blue_block_1"
+        ]
+        orchestrator.tracker.registry.add_predicates(predicates)
+
         print(f"   ✓ Added {len(mock_objects)} mock objects")
         print()
 
@@ -125,13 +131,13 @@ async def test_solver_integration():
             "object_id": obj.object_id,
             "object_type": obj.object_type,
             "affordances": list(obj.affordances),
-            "pddl_state": obj.pddl_state,
             "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None
         }
         for obj in mock_objects
     ]
 
-    await orchestrator.maintainer.update_from_observations(objects_dict)
+    predicates = orchestrator.tracker.registry.get_all_predicates()
+    await orchestrator.maintainer.update_from_observations(objects_dict, predicates=predicates)
     print("   ✓ PDDL domain updated")
     print()
 

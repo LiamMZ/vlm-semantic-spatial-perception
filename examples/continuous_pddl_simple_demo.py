@@ -116,8 +116,7 @@ class SimpleContinuousDemo:
                 {
                     "object_id": obj.object_id,
                     "object_type": obj.object_type,
-                    "affordances": list(obj.affordances),
-                    "pddl_state": obj.pddl_state
+                    "affordances": list(obj.affordances)
                 }
                 for obj in all_objects
             ]

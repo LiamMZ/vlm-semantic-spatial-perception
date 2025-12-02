@@ -49,8 +49,8 @@ class TAMPDemo:
         config = TAMPConfig(
             api_key=api_key,
             state_dir=project_root / "outputs" / "tamp_demo",
-            orchestrator_model="gemini-2.5-pro",
-            decomposer_model="gemini-2.5-pro",
+            orchestrator_model="gemini-robotics-er-1.5-preview",
+            decomposer_model="gemini-robotics-er-1.5-preview",
             update_interval=2.0,
             min_observations=3,
             auto_refine_on_failure=True,
@@ -339,9 +339,9 @@ async def main():
         return 1
 
     # Determine dry run mode (default to True for safety)
-    dry_run = not args.live if args.live else True
-    if args.dry_run:
-        dry_run = True
+    dry_run = False #not args.live if args.live else True
+    # if args.dry_run:
+    #     dry_run = True
 
     # Create demo
     demo = TAMPDemo(api_key=args.api_key, dry_run=dry_run)

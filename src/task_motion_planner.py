@@ -89,7 +89,7 @@ class TAMPConfig:
 
     # API and model configuration
     api_key: Optional[str] = None
-    orchestrator_model: str = "gemini-2.5-pro"
+    orchestrator_model: str = "gemini-robotics-er-1.5-preview"
     decomposer_model: str = "gemini-robotics-er-1.5-preview"
 
     # Paths

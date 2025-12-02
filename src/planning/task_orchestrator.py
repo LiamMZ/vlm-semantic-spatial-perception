@@ -391,7 +391,8 @@ class TaskOrchestrator:
         if all_objects:
             self.logger.info("  • Re-processing %s existing objects with new task...", len(all_objects))
             objects_dict = self._convert_objects_to_dict(all_objects)
-            await self.maintainer.update_from_observations(objects_dict)
+            predicates = self.tracker.registry.get_all_predicates()
+            await self.maintainer.update_from_observations(objects_dict, predicates=predicates)
 
         # Resume detection if it was running
         if was_detecting:
@@ -553,14 +554,11 @@ class TaskOrchestrator:
                 "object_id": obj.object_id,
                 "object_type": obj.object_type,
                 "affordances": list(obj.affordances),
-                "pddl_state": obj.pddl_state,
                 "interaction_points": {
                     affordance: {
                         "snapshot_id": None,  # filled by snapshot_id at write-time
                         "position_2d": point.position_2d,
                         "position_3d": point.position_3d.tolist() if point.position_3d is not None else None,
-                        "confidence": point.confidence,
-                        "reasoning": point.reasoning,
                         "alternative_points": point.alternative_points,
                     }
                     for affordance, point in obj.interaction_points.items()
@@ -571,6 +569,7 @@ class TaskOrchestrator:
             })
         payload = {
             "stamp": time.time(),
+            "predicates": self.tracker.registry.get_all_predicates(),
             "objects": det_objects
         }
         return payload, object_ids
@@ -850,7 +849,8 @@ class TaskOrchestrator:
         objects_dict = self._convert_objects_to_dict(all_objects)
 
         # Update PDDL domain
-        update_stats = await self.maintainer.update_from_observations(objects_dict)
+        predicates = self.tracker.registry.get_all_predicates()
+        update_stats = await self.maintainer.update_from_observations(objects_dict, predicates=predicates)
 
         # Check task state
         decision = await self.monitor.determine_state()
@@ -898,7 +898,6 @@ class TaskOrchestrator:
                 "object_id": obj.object_id,
                 "object_type": obj.object_type,
                 "affordances": list(obj.affordances),
-                "pddl_state": obj.pddl_state,
                 "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None
             }
             for obj in objects
@@ -1093,6 +1092,19 @@ class TaskOrchestrator:
                         obj.object_type
                     )
                     self.logger.info(f"      Added: {obj.object_id} ({obj.object_type})")
+
+            # Add global predicates to initial state
+            if self.maintainer:
+                global_predicates = self.maintainer.get_global_predicates()
+                if global_predicates:
+                    self.logger.info(f"  • Adding {len(global_predicates)} global predicates to initial state...")
+                    for pred_name in global_predicates:
+                        # Global predicates typically have no parameters
+                        try:
+                            await self.pddl.add_initial_literal_async(pred_name, [], negated=False)
+                            self.logger.info(f"      Added global predicate: {pred_name}")
+                        except ValueError as e:
+                            self.logger.warning(f"      Failed to add global predicate '{pred_name}': {e}")
 
         # Set goals if requested
         if set_goals:
@@ -1337,7 +1349,7 @@ class TaskOrchestrator:
         algorithm: Optional[SearchAlgorithm] = None,
         timeout: Optional[float] = None,
         output_dir: Optional[Path] = None,
-        wait_for_objects: bool = True,
+        wait_for_objects: bool = False,
         max_wait_seconds: float = 30.0
     ) -> SolverResult:
         """
@@ -1484,8 +1496,6 @@ class TaskOrchestrator:
                     "object_type": obj.object_type,
                     "object_id": obj.object_id,
                     "affordances": list(obj.affordances),
-                    "properties": obj.properties,
-                    "confidence": obj.confidence,
                     "timestamp": obj.timestamp,
                     # Snapshot references - this is the key addition
                     "observations": obj_snapshots,
@@ -1609,7 +1619,8 @@ class TaskOrchestrator:
             if all_objects:
                 self.logger.info("  • Re-processing %s objects...", len(all_objects))
                 objects_dict = self._convert_objects_to_dict(all_objects)
-                await self.maintainer.update_from_observations(objects_dict)
+                predicates = self.tracker.registry.get_all_predicates()
+                await self.maintainer.update_from_observations(objects_dict, predicates=predicates)
 
         # Load perception pool index into memory if present
         files = state_data.get("files", {})

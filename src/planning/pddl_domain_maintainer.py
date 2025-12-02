@@ -9,6 +9,7 @@ import asyncio
 import re
 from typing import Dict, List, Optional, Set, Union
 from pathlib import Path
+import json
 
 import numpy as np
 from PIL import Image
@@ -212,6 +213,10 @@ class PDDLDomainMaintainer:
         # Object type mapping: raw_name -> sanitized_name
         self._type_name_mapping: Dict[str, str] = {}
 
+        # Global predicates: predicates not related to specific objects (e.g., hand_is_empty, arm_at_home)
+        # These are identified during domain generation and should be true in initial state
+        self.global_predicates: Set[str] = set()
+
     async def initialize_from_task(
         self,
         task_description: str,
@@ -259,6 +264,16 @@ class PDDLDomainMaintainer:
         """Initialize PDDL domain based on task analysis."""
         if not self.task_analysis:
             return
+
+        # Store global predicates from task analysis
+        if self.task_analysis.global_predicates:
+            self.set_global_predicates(self.task_analysis.global_predicates)
+            print(f"  • Identified {len(self.task_analysis.global_predicates)} global predicates: {', '.join(self.task_analysis.global_predicates)}")
+
+            # Add global predicates to domain (they typically have no parameters)
+            for pred_name in self.task_analysis.global_predicates:
+                if pred_name not in self.pddl.predicates:
+                    await self.pddl.add_predicate_async(pred_name, [])
 
         # Add predicted predicates
         for predicate_name in self.task_analysis.relevant_predicates:
@@ -310,7 +325,8 @@ class PDDLDomainMaintainer:
     async def update_from_observations(
         self,
         detected_objects: List[Dict],
-        detected_relationships: Optional[List[str]] = None
+        detected_relationships: Optional[List[str]] = None,
+        predicates: Optional[List[str]] = None
     ) -> Dict[str, any]:
         """
         Update domain based on new observations.
@@ -321,12 +337,15 @@ class PDDLDomainMaintainer:
         Args:
             detected_objects: List of detected objects with types and properties
             detected_relationships: Optional spatial relationships
+            predicates: Optional list of predicate strings (e.g., ["on bottle_1 table", "graspable cup_1"])
 
         Returns:
             Dict with update statistics
         """
         if detected_relationships is None:
             detected_relationships = []
+        if predicates is None:
+            predicates = []
 
         new_object_types = set()
         new_predicates = set()
@@ -351,25 +370,29 @@ class PDDLDomainMaintainer:
                 await self.pddl.add_object_instance_async(obj_id, obj_type)
                 objects_added += 1
 
-            # Add predicates from PDDL state if available
-            if "pddl_state" in obj and obj["pddl_state"]:
-                for predicate, value in obj["pddl_state"].items():
-                    if value:  # Only add true predicates (closed world assumption)
-                        # Track observed predicates
-                        if predicate not in self.observed_predicates:
-                            new_predicates.add(predicate)
-                            self.observed_predicates.add(predicate)
+        # Add predicates from top-level predicates list
+        for pred_str in predicates:
+            # Parse "on bottle_1 counter_2" -> predicate="on", args=["bottle_1", "counter_2"]
+            parts = pred_str.split()
+            if len(parts) >= 2:
+                predicate_name = parts[0]
+                args = parts[1:]
 
-                        # Add to initial state
-                        try:
-                            await self.pddl.add_initial_literal_async(
-                                predicate,
-                                [obj_id],
-                                negated=False
-                            )
-                        except ValueError:
-                            # Predicate not in domain - this indicates domain incompleteness
-                            pass
+                # Track observed predicates
+                if predicate_name not in self.observed_predicates:
+                    new_predicates.add(predicate_name)
+                    self.observed_predicates.add(predicate_name)
+
+                # Add to initial state
+                try:
+                    await self.pddl.add_initial_literal_async(
+                        predicate_name,
+                        args,
+                        negated=False
+                    )
+                except ValueError:
+                    # Predicate not in domain - this indicates domain incompleteness
+                    pass
 
         self.last_update_observations += len(detected_objects)
 
@@ -1010,3 +1033,42 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
         if template is None:
             raise KeyError(f"Missing prompt template: {template_key}")
         return template
+    
+    def set_global_predicates(self, predicates: List[str]) -> None:
+        """
+        Set global predicates (predicates not related to specific objects).
+
+        Global predicates represent robot or environment state that should be
+        true initially before task execution.
+
+        Examples:
+            - hand_is_empty
+            - arm_at_home
+            - gripper_open
+
+        Args:
+            predicates: List of global predicate names (not predicate strings with args)
+        """
+        self.global_predicates = self.global_predicates.union(set(predicates))
+
+    def add_global_predicate(self, predicate: str) -> None:
+        """
+        Add a single global predicate.
+
+        Args:
+            predicate: Global predicate name
+        """
+        self.global_predicates.add(predicate)
+
+    def get_global_predicates(self) -> List[str]:
+        """
+        Get all global predicates.
+
+        Returns:
+            List of global predicate names
+        """
+        return sorted(list(self.global_predicates))
+
+    def clear_global_predicates(self) -> None:
+        """Clear all global predicates."""
+        self.global_predicates.clear()

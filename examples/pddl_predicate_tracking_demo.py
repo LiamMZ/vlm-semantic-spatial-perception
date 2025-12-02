@@ -339,12 +339,16 @@ class PDDLPredicateTrackingDemo:
                 self.pddl.add_object_instance(obj.object_id, obj.object_type)
                 print(f"  + Object: {obj.object_id} ({obj.object_type})")
 
-            # Add PDDL state predicates (closed world assumption - only true predicates)
-            if hasattr(obj, 'pddl_state') and obj.pddl_state:
-                for predicate, value in obj.pddl_state.items():
-                    if value:  # Only add true predicates
-                        self.pddl.add_initial_literal(predicate, [obj.object_id])
-                        print(f"      • ({predicate} {obj.object_id})")
+        # Add predicates from registry (top-level)
+        predicates = self.tracker.registry.get_all_predicates()
+        for pred_str in predicates:
+            # Parse "predicate_name obj_id [obj_id2]" format
+            parts = pred_str.split()
+            if len(parts) >= 2:
+                predicate_name = parts[0]
+                args = parts[1:]
+                self.pddl.add_initial_literal(predicate_name, args)
+                print(f"      • ({predicate_name} {' '.join(args)})")
 
         # Add robot state
         self.pddl.add_initial_literal("empty-hand", [])
@@ -448,55 +452,51 @@ class PDDLPredicateTrackingDemo:
                 object_id="coffee_mug_1",
                 affordances={"graspable", "containable"},
                 position_2d=[450, 320],
-                properties={"color": "white"},
-                pddl_state={
-                    pred: False for pred in self.predicates
-                }
+                properties={"color": "white"}
             ),
             DetectedObject(
                 object_type="sink",
                 object_id="kitchen_sink_1",
                 affordances={"containable"},
                 position_2d=[600, 400],
-                properties={"has_faucet": True},
-                pddl_state={
-                    pred: False for pred in self.predicates
-                }
+                properties={"has_faucet": True}
             ),
             DetectedObject(
                 object_type="shelf",
                 object_id="shelf_1",
                 affordances={"supportable"},
                 position_2d=[300, 200],
-                properties={"material": "wood"},
-                pddl_state={
-                    pred: False for pred in self.predicates
-                }
+                properties={"material": "wood"}
             ),
         ]
 
-        # Set predicates based on LLM analysis
+        # Add predicates to registry (instead of per-object pddl_state)
+        predicates_to_add = []
+
         # For mug
         if "dirty" in self.predicates:
-            objects[0].pddl_state["dirty"] = True
+            predicates_to_add.append("dirty coffee_mug_1")
         if "graspable" in self.predicates:
-            objects[0].pddl_state["graspable"] = True
+            predicates_to_add.append("graspable coffee_mug_1")
         if "reachable" in self.predicates:
-            objects[0].pddl_state["reachable"] = True
+            predicates_to_add.append("reachable coffee_mug_1")
 
         # For sink
         if "clean" in self.predicates:
-            objects[1].pddl_state["clean"] = True
+            predicates_to_add.append("clean kitchen_sink_1")
         if "reachable" in self.predicates:
-            objects[1].pddl_state["reachable"] = True
+            predicates_to_add.append("reachable kitchen_sink_1")
 
         # For shelf
         if "clean" in self.predicates:
-            objects[2].pddl_state["clean"] = True
+            predicates_to_add.append("clean shelf_1")
         if "reachable" in self.predicates:
-            objects[2].pddl_state["reachable"] = True
+            predicates_to_add.append("reachable shelf_1")
         if "clear" in self.predicates:
-            objects[2].pddl_state["clear"] = True
+            predicates_to_add.append("clear shelf_1")
+
+        # Add predicates to registry
+        self.tracker.registry.add_predicates(predicates_to_add)
 
         return objects
 

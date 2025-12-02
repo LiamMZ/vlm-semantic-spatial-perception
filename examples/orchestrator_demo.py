@@ -680,18 +680,25 @@ class OrchestratorDemoApp(App):
             if all_objects:
                 self._write_log("")
                 self._write_log(f"Objects ({len(all_objects)}):")
+
+                # Get all predicates from registry
+                all_predicates = self.orchestrator.tracker.registry.get_all_predicates()
+                # Group predicates by object
+                predicates_by_object = {}
+                for pred_str in all_predicates:
+                    parts = pred_str.split()
+                    if len(parts) >= 2:
+                        obj_id = parts[1]
+                        if obj_id not in predicates_by_object:
+                            predicates_by_object[obj_id] = []
+                        predicates_by_object[obj_id].append(pred_str)
+
                 for obj in all_objects:
                     self._write_log(f"  • {obj.object_id} ({obj.object_type})")
-                    # Extract predicates from pddl_state
-                    if obj.pddl_state:
-                        predicates = []
-                        for key, value in obj.pddl_state.items():
-                            if isinstance(value, bool) and value:
-                                predicates.append(key)
-                            elif value and key not in ['object_id', 'object_type']:
-                                predicates.append(f"{key}={value}")
-                        if predicates:
-                            self._write_log(f"    Predicates: {', '.join(predicates)}")
+                    # Show predicates for this object
+                    obj_predicates = predicates_by_object.get(obj.object_id, [])
+                    if obj_predicates:
+                        self._write_log(f"    Predicates: {', '.join(obj_predicates)}")
                     if obj.affordances:
                         self._write_log(f"    Affordances: {', '.join(obj.affordances)}")
         
