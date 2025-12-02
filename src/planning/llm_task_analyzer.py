@@ -30,19 +30,28 @@ class LLMTaskAnalyzer:
     to the actual environment rather than relying on fixed patterns.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-pro"):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-2.5-pro",
+        robot_description: Optional[str] = None
+    ):
         """
         Initialize LLM task analyzer.
 
         Args:
             api_key: Gemini API key (None to use environment variable)
             model_name: Model to use (flash for speed, pro for quality)
+            robot_description: Optional description of robot capabilities and affordances
         """
         self.api_key = api_key
         self.model_name = model_name
+        self.robot_description = robot_description
         self.client = genai.Client(api_key=api_key)
 
         print(f"ℹ LLMTaskAnalyzer using GenAI SDK with model: {model_name}")
+        if robot_description:
+            print(f"  • Robot description configured ({len(robot_description)} chars)")
 
         # Response cache for identical queries
         self._cache: Dict[str, TaskAnalysis] = {}
@@ -148,9 +157,19 @@ class LLMTaskAnalyzer:
         This prompt asks the LLM to predict what predicates, actions, and objects
         will likely be needed for the task, even without seeing the environment yet.
         """
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Consider the robot's capabilities when determining feasible actions and predicates.
+"""
+
         return f"""Analyze this robotic task and predict required PDDL components.
 
 TASK: {task}
+{robot_context}
 
 Return JSON with:
 {{
@@ -162,6 +181,7 @@ Return JSON with:
   "obstacle_objects": [],
   "initial_predicates": ["expected_initial_states"],
   "relevant_predicates": ["predicate_names"],
+  relevalnt_types": ["type1", "type2"],
   "required_actions": [
     {{
       "name": "pick",
@@ -173,6 +193,14 @@ Return JSON with:
   "complexity": "simple",
   "estimated_steps": 3
 }}
+
+IMPORTANT PDDL RULES:
+1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
+2. Preconditions and effects use ONLY variables - NO quoted strings or constants
+3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine)
+4. All predicates should be predicates applied to variables, not string constants
 
 Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
 
@@ -194,10 +222,19 @@ Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspab
 
         relationship_list = "\n".join([f"- {rel}" for rel in relationships[:30]])
 
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Consider the robot's capabilities when determining feasible actions.
+"""
+
         return f"""You are a robotic task planner. Analyze this task given the observed scene.
 
 TASK: {task}
-
+{robot_context}
 OBSERVED OBJECTS:
 {object_list if object_list else "- No objects detected yet"}
 
@@ -214,6 +251,7 @@ Provide a JSON response with:
   "obstacle_objects": ["obstacle_id", ...],
   "initial_predicates": ["current_predicate(obj)", ...],
   "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
+  "relevant_types": ["type1", "type2", ...],
   "required_actions": [
     {{
       "name": "pick",
@@ -226,11 +264,23 @@ Provide a JSON response with:
   "estimated_steps": 3
 }}
 
+CRITICAL PDDL FORMATTING RULES:
+1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
+2. Preconditions and effects can ONLY use:
+   - Variables (e.g., ?obj, ?container)
+   - Predicate names (e.g., graspable, empty-hand, has-water)
+3. NEVER use quoted strings or constants in preconditions/effects
+4. If referencing a component, make it a predicate:
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
+5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
+
 Focus on:
 1. Use observed objects and their actual IDs
 2. Generate predicates matching observed affordances
 3. Create action sequence using observed objects
-4. Include all task-relevant predicates"""
+4. Include all task-relevant predicates
+5. Ensure all PDDL actions follow proper syntax (no quoted strings!)"""
 
     def _parse_response(self, response_text: str) -> TaskAnalysis:
         """Parse LLM JSON response into TaskAnalysis."""
@@ -246,6 +296,7 @@ Focus on:
                 obstacle_objects=data.get("obstacle_objects", []),
                 initial_predicates=data.get("initial_predicates", []),
                 relevant_predicates=data.get("relevant_predicates", []),
+                relevant_types=data.get("relevant_types", []),
                 required_actions=data.get("required_actions", []),
                 complexity=data.get("complexity", "medium"),
                 estimated_steps=data.get("estimated_steps", 1)

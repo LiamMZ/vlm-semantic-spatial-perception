@@ -219,6 +219,49 @@ class DetectedObjectRegistry:
             # Add number suffix
             return f"{base_id}_{count}"
 
+    def to_dict(self) -> dict:
+        """
+        Convert registry to dictionary format (thread-safe).
+
+        Returns:
+            Dictionary with 'num_objects' and 'objects' keys
+        """
+        from datetime import datetime
+
+        # Convert objects to serializable format (thread-safe snapshot)
+        with self._lock:
+            objects_data = []
+            for obj in self._objects.values():
+                obj_dict = {
+                    "object_type": obj.object_type,
+                    "object_id": obj.object_id,
+                    "affordances": list(obj.affordances),
+                    "properties": obj.properties,
+                    "confidence": obj.confidence,
+                    "timestamp": obj.timestamp,
+                }
+
+                # Add positional data if available
+                if obj.position_2d:
+                    obj_dict["position_2d"] = obj.position_2d
+                if obj.position_3d is not None:
+                    obj_dict["position_3d"] = obj.position_3d.tolist() if hasattr(obj.position_3d, 'tolist') else obj.position_3d
+                if obj.bounding_box_2d:
+                    obj_dict["bounding_box_2d"] = obj.bounding_box_2d
+
+                # Add PDDL state if available
+                if obj.pddl_state:
+                    obj_dict["pddl_state"] = obj.pddl_state
+
+                objects_data.append(obj_dict)
+
+        # Return dictionary
+        return {
+            "num_objects": len(objects_data),
+            "snapshot_timestamp": datetime.now().isoformat(),
+            "objects": objects_data
+        }
+
     def save_to_json(self, output_path: str, include_timestamp: bool = True) -> str:
         """
         Save registry to JSON file (thread-safe).

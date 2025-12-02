@@ -43,8 +43,9 @@ class Predicate:
     description: Optional[str] = None
 
     def to_pddl(self) -> str:
-        """Convert to PDDL format: (predicate_name ?p1 - type1 ?p2 - type2)"""
-        params = " ".join([f"?{name} - {typ}" for name, typ in self.parameters])
+        """Convert to PDDL format (STRIPS): (predicate_name ?p1 ?p2)"""
+        # Use STRIPS format without type annotations
+        params = " ".join([f"?{name}" for name, typ in self.parameters])
         return f"({self.name} {params})"
 
     def __hash__(self):
@@ -67,8 +68,9 @@ class Action:
     is_llm_generated: bool = False
 
     def to_pddl(self) -> str:
-        """Convert to PDDL action definition."""
-        params = " ".join([f"?{name} - {typ}" for name, typ in self.parameters])
+        """Convert to PDDL action definition (STRIPS format)."""
+        # Use STRIPS format without type annotations
+        params = " ".join([f"?{name}" for name, typ in self.parameters])
 
         return f"""  (:action {self.name}
     :parameters ({params})
@@ -84,8 +86,9 @@ class ObjectInstance:
     object_type: str
 
     def to_pddl(self) -> str:
-        """Convert to PDDL format: name - type"""
-        return f"{self.name} - {self.object_type}"
+        """Convert to PDDL format (STRIPS): just the name"""
+        # Use STRIPS format without type annotations
+        return f"{self.name}"
 
 
 @dataclass

@@ -21,6 +21,13 @@ from .pddl_representation import PDDLRepresentation
 from .pddl_domain_maintainer import PDDLDomainMaintainer
 from .task_state_monitor import TaskStateMonitor
 from .task_orchestrator import TaskOrchestrator, OrchestratorState
+from .pddl_solver import (
+    PDDLSolver,
+    SolverBackend,
+    SearchAlgorithm,
+    SolverResult,
+    solve_pddl
+)
 
 # Import OrchestratorConfig from config directory
 import sys
@@ -56,4 +63,11 @@ __all__ = [
     "TaskOrchestrator",
     "OrchestratorConfig",
     "OrchestratorState",
+
+    # PDDL solving
+    "PDDLSolver",
+    "SolverBackend",
+    "SearchAlgorithm",
+    "SolverResult",
+    "solve_pddl"
 ]

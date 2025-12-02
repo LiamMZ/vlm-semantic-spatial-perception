@@ -425,7 +425,7 @@ class OrchestratorDemoApp(App):
                     self.orchestrator.is_ready_for_planning()
                     or force
                 )
-                
+
                 if not ready and decision:
                     self._write_log("⚠ Not ready for planning yet.")
                     self._write_log(f"  Current state: {decision.state.value}")
@@ -437,6 +437,39 @@ class OrchestratorDemoApp(App):
                 else:
                     await self.orchestrator.generate_pddl_files()
                     self._write_log(f"✓ Output: {self.orchestrator.config.state_dir}")
+        elif action == "solve":
+            # Solve for a plan
+            if not self.orchestrator:
+                self._write_log("⚠ System not initialized.")
+            elif not self.orchestrator.current_task:
+                self._write_log("⚠ No task set. Process a task first.")
+            else:
+                force = argument.lower() == "force"
+                self._write_log("⚙ Checking readiness...")
+                ready = self.orchestrator.is_ready_for_planning() or force
+
+                if not ready:
+                    decision = await self.orchestrator.get_task_decision()
+                    self._write_log("⚠ Not ready for planning yet.")
+                    if decision:
+                        self._write_log(f"  Current state: {decision.state.value}")
+                        if decision.blockers:
+                            self._write_log("  Blockers:")
+                            for blocker in decision.blockers:
+                                self._write_log(f"    ✗ {blocker}")
+                    self._write_log("  Use 'solve force' to solve anyway.")
+                else:
+                    try:
+                        # Use refinement-enabled solver if configured
+                        if self.orchestrator.config.auto_refine_on_failure:
+                            result = await self.orchestrator.solve_and_plan_with_refinement()
+                        else:
+                            result = await self.orchestrator.solve_and_plan()
+
+                        if result.success:
+                            self._write_log(f"✓ Plan saved to {self.orchestrator.config.state_dir}/pddl/")
+                    except Exception as exc:
+                        self._write_log(f"⚠ Solver failed: {exc}")
         elif action in {"quit", "exit"}:
             self._write_log("⚙ Shutting down...")
             await self.action_shutdown()
@@ -483,10 +516,13 @@ class OrchestratorDemoApp(App):
                 auto_save=True,
                 auto_save_on_detection=True,
                 auto_save_on_state_change=True,
+                auto_refine_on_failure=True,  # Enable automatic domain refinement
+                max_refinement_attempts=3,
                 on_state_change=self._on_state_change,
                 on_detection_update=self._on_detection_update,
                 on_task_state_change=self._on_task_state_change,
-                on_save_state=self._on_save_state
+                on_save_state=self._on_save_state,
+                on_plan_generated=self._on_plan_generated
             )
             
             # Set up logging so user output and debug traces split cleanly
@@ -733,6 +769,7 @@ class OrchestratorDemoApp(App):
         self._write_log("  • save                 – Save current state to disk")
         self._write_log("  • load [dir]           – Load state from dir (keeps logging to current dir)")
         self._write_log("  • generate [force]     – Export PDDL files (force to override readiness)")
+        self._write_log("  • solve [force]        – Solve for plan using PDDL solver (force to override readiness)")
         self._write_log("  • interval <seconds>   – Update detection interval")
         self._write_log("  • quit                 – Cleanup and exit")
 
@@ -838,9 +875,9 @@ class OrchestratorDemoApp(App):
         else:
             tracking_state = "RUNNING" if self.orchestrator and self.orchestrator._detection_running else "STOPPED"
             if tracking_state == "STOPPED" and self.orchestrator:
-                commands_text = "Commands: help | status | continue | restart | save | load [dir] | generate [force] | interval <sec> | quit"
+                commands_text = "Commands: help | status | continue | restart | save | load [dir] | generate [force] | solve [force] | interval <sec> | quit"
             else:
-                commands_text = "Commands: help | status | stop | pause | restart | save | load [dir] | generate [force] | interval <sec> | quit"
+                commands_text = "Commands: help | status | stop | pause | restart | save | load [dir] | generate [force] | solve [force] | interval <sec> | quit"
         
         self._commands_widget.update(commands_text)
     
@@ -903,6 +940,31 @@ class OrchestratorDemoApp(App):
         """Called after successful state save (silent - auto-save)."""
         # Silent for auto-saves to avoid log spam
         pass
+
+    def _on_plan_generated(self, result):
+        """Called when a plan is generated."""
+        sep = self._get_separator()
+
+        self._write_log("")
+        self._write_log(sep)
+        self._write_log("📋 PLAN GENERATED")
+        self._write_log(sep)
+
+        if result.success:
+            self._write_log(f"✓ Found plan with {result.plan_length} steps")
+            if result.plan_cost is not None:
+                self._write_log(f"  • Cost: {result.plan_cost}")
+            if result.search_time is not None:
+                self._write_log(f"  • Search time: {result.search_time:.2f}s")
+
+            self._write_log("")
+            self._write_log("Plan:")
+            for i, action in enumerate(result.plan, 1):
+                self._write_log(f"  {i}. {action}")
+        else:
+            self._write_log(f"✗ Planning failed: {result.error_message}")
+
+        self._write_log(sep)
 
 
 if __name__ == "__main__":

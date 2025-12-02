@@ -73,8 +73,11 @@ class ObjectTracker:
         enable_affordance_caching: bool = True,
         fast_mode: bool = False,
         pddl_predicates: Optional[List[str]] = None,
+        pddl_types: Optional[List[str]] = None,
         prompts_config_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
+        task_context: Optional[str] = None,
+        available_actions: Optional[List[Dict[str, Any]]] = None
     ):
         """
         Initialize object tracker.
@@ -90,9 +93,10 @@ class ObjectTracker:
             fast_mode: Skip detailed interaction points, only detect affordances
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
             prompts_config_path: Path to prompts config YAML file (defaults to config/prompts_config.yaml)
+            task_context: Optional task description to ground object detection (e.g., "make coffee")
+            available_actions: Optional list of available PDDL actions for context
         """
         self.logger = logger or get_structured_logger("ObjectTracker")
-
         self.api_key = api_key
         self.max_parallel_requests = max_parallel_requests
         self.crop_target_size = crop_target_size
@@ -101,6 +105,11 @@ class ObjectTracker:
 
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
+        self.pddl_types: List[str] = pddl_types or []
+        # Task context for grounding
+        self.task_context: Optional[str] = task_context
+        self.available_actions: List[Dict[str, Any]] = available_actions or []
+        self.goal_objects: List[str] = []  # Expected object names/IDs from the task
         
         # Load prompts configuration
         if prompts_config_path is None:
@@ -184,9 +193,154 @@ class ObjectTracker:
             self.pddl_predicates.remove(predicate)
             self.logger.info("Removed PDDL predicate: %s", predicate)
 
+    def set_pddl_types(self, types: List[str]) -> None:
+        """
+        Set the list of PDDL types to track for objects.
+
+        Args:
+            types: List of type names (e.g., ["clean", "dirty", "opened", "filled"])
+        """
+        self.pddl_types = types
+        print(f"ℹ PDDL types updated: {types}")
+
+    def add_pddl_type(self, type: str) -> None:
+        """
+        Add a single PDDL type to track.
+
+        Args:
+            type: type name to add
+        """
+        if type not in self.pddl_types:
+            self.pddl_types.append(type)
+            print(f"ℹ Added PDDL type: {type}")
+
+    def remove_pddl_type(self, type: str) -> None:
+        """
+        Remove a PDDL type from tracking.
+
+        Args:
+            type: type name to remove
+        """
+        if type in self.pddl_types:
+            self.pddl_types.remove(type)
+
+    def set_task_context(
+        self,
+        task_description: Optional[str] = None,
+        available_actions: Optional[List[Dict[str, Any]]] = None,
+        goal_objects: Optional[List[str]] = None
+    ) -> None:
+        """
+        Set or update the task context for grounded object detection.
+
+        This helps the VLM understand what objects are relevant for the current task
+        and what actions can be performed on them.
+
+        Args:
+            task_description: Natural language task description (e.g., "make coffee")
+            available_actions: List of available PDDL actions with their parameters and descriptions
+            goal_objects: List of expected object IDs/names from the task (e.g., ["water_bottle_1", "cup_2"])
+
+        Example:
+            >>> tracker.set_task_context(
+            ...     task_description="make coffee",
+            ...     available_actions=[
+            ...         {"name": "fill_water", "params": ["?machine", "?source"], "description": "Fill machine with water"},
+            ...         {"name": "insert_pod", "params": ["?pod", "?machine"], "description": "Insert coffee pod"}
+            ...     ],
+            ...     goal_objects=["coffee_machine_1", "water_cup_1"]
+            ... )
+        """
+        if task_description is not None:
+            self.task_context = task_description
+            print(f"ℹ Task context updated: \"{task_description}\"")
+
+        if available_actions is not None:
+            self.available_actions = available_actions
+            print(f"ℹ Available actions updated: {len(available_actions)} actions")
+
+        if goal_objects is not None:
+            self.goal_objects = goal_objects
+            print(f"ℹ Goal objects updated: {len(goal_objects)} objects - {', '.join(goal_objects)}")
+
+    def clear_task_context(self) -> None:
+        """Clear the task context and available actions."""
+        self.task_context = None
+        self.available_actions = []
+        self.goal_objects = []
+        print("ℹ Task context cleared")
+
     def get_pddl_predicates(self) -> List[str]:
         """Get the current list of tracked PDDL predicates."""
         return self.pddl_predicates.copy()
+
+    def _format_task_context_for_detection(self) -> Tuple[str, str]:
+        """
+        Format task context for detection prompts.
+
+        Returns:
+            Tuple of (task_context_section, task_priority_note)
+        """
+        if not self.task_context:
+            return ("", "")
+
+        task_context_section = self.prompts['task_context']['detection_section_template'].format(
+            task_description=self.task_context
+        )
+
+        # Add goal objects information if available
+        if self.goal_objects:
+            # Filter out None/invalid values
+            valid_goal_objects = [obj for obj in self.goal_objects if obj and obj != "None"]
+            if valid_goal_objects:
+                goal_objects_str = ", ".join(valid_goal_objects)
+                task_context_section += f"\n    Expected goal objects: {goal_objects_str}\n    IMPORTANT: When you detect objects matching these goal objects, use these EXACT IDs as labels."
+
+        task_priority_note = self.prompts['task_context']['detection_priority_template'].format(
+            task_description=self.task_context
+        )
+
+        return (task_context_section, task_priority_note)
+
+    def _format_task_context_for_analysis(self) -> str:
+        """
+        Format task context for object analysis prompts.
+
+        Returns:
+            Formatted task context section
+        """
+        if not self.task_context and not self.available_actions:
+            return ""
+
+        # Format available actions
+        actions_list = ""
+        if self.available_actions:
+            actions_summary = []
+            for action in self.available_actions[:10]:  # Limit to 10 actions to avoid token overflow
+                name = action.get('name', 'unknown')
+                desc = action.get('description', '')
+                if desc:
+                    actions_summary.append(f"- {name}: {desc}")
+                else:
+                    actions_summary.append(f"- {name}")
+            actions_list = "\n       ".join(actions_summary)
+
+        task_desc = self.task_context or "General manipulation"
+
+        task_context_str = self.prompts['task_context']['analysis_section_template'].format(
+            task_description=task_desc,
+            actions_list=actions_list if actions_list else "General manipulation actions"
+        )
+
+        # Add goal objects information if available
+        if self.goal_objects:
+            # Filter out None/invalid values
+            valid_goal_objects = [obj for obj in self.goal_objects if obj and obj != "None"]
+            if valid_goal_objects:
+                goal_objects_str = ", ".join(valid_goal_objects)
+                task_context_str += f"\n\n    Goal Objects: {goal_objects_str}\n    Note: These objects are critical for completing the task."
+
+        return task_context_str
 
     async def detect_objects(
         self,
@@ -399,6 +553,21 @@ class ObjectTracker:
                 self.registry.get_all_objects()
             )
 
+        # Add task context to the prompt
+        task_context_section, task_priority_note = self._format_task_context_for_detection()
+        if task_context_section:
+            # Insert task context after the "Previously detected objects" section
+            prompt = prompt.replace(
+                "Instructions:",
+                f"{task_context_section}\n\n      Instructions:"
+            )
+        if task_priority_note:
+            # Add priority note to the instructions
+            prompt = prompt.replace(
+                "- Return bounding boxes",
+                f"{task_priority_note}\n      - Return bounding boxes"
+            )
+
         try:
             response_text = await self._generate_content(
                 image,
@@ -488,6 +657,9 @@ class ObjectTracker:
             pddl_list = ", ".join(self.pddl_predicates)
             pddl_section = self.prompts['pddl']['section_template'].format(pddl_list=pddl_list)
             pddl_example = self.prompts['pddl']['example_template']
+        
+        # Format task context for analysis
+        task_context_section = self._format_task_context_for_analysis()
 
         if self.fast_mode:
             # Fast mode: only detect affordances and properties, no interaction points
@@ -495,7 +667,8 @@ class ObjectTracker:
                 object_name=object_name,
                 crop_note=crop_note,
                 pddl_section=pddl_section,
-                pddl_example=pddl_example
+                pddl_example=pddl_example,
+                task_context_section=task_context_section
             )
         elif cached_data:
             # Use cached affordances, only detect interaction points
@@ -511,7 +684,8 @@ class ObjectTracker:
                 object_name=object_name,
                 crop_note=crop_note,
                 pddl_section=pddl_section,
-                pddl_example=pddl_example
+                pddl_example=pddl_example,
+                task_context_section=task_context_section
             )
 
         try:
@@ -1071,7 +1245,9 @@ class ObjectTracker:
             bbox = item.get("box_2d") or item.get("bounding_box") or item.get("bbox")
             coerced = _coerce_bbox(bbox)
             if label and coerced:
-                detections.append((label, coerced))
+                # Sanitize label: replace hyphens with underscores for PDDL compatibility
+                sanitized_label = str(label).replace('-', '_')
+                detections.append((sanitized_label, coerced))
 
         if detections:
             return detections
@@ -1086,6 +1262,8 @@ class ObjectTracker:
             if '|' in content:
                 parts = content.split('|')
                 object_name = parts[0].strip()
+                # Sanitize name: replace hyphens with underscores for PDDL compatibility
+                object_name = object_name.replace('-', '_')
                 try:
                     bbox_str = parts[1].strip()
                     bounding_box = json.loads(bbox_str)
@@ -1097,7 +1275,9 @@ class ObjectTracker:
                         detections.append((object_name, None))
             else:
                 if content:
-                    detections.append((content, None))
+                    # Sanitize name: replace hyphens with underscores for PDDL compatibility
+                    sanitized_content = content.replace('-', '_')
+                    detections.append((sanitized_content, None))
 
         return detections
 

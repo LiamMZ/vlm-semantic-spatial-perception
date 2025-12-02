@@ -26,7 +26,7 @@ class TaskAnalysis:
     # Scene-specific predicates
     initial_predicates: List[str]  # Current state predicates
     relevant_predicates: List[str]  # Task-relevant predicate types
-
+    relevant_types: List[str]  # Task-relevant PDDL types
     # Action definitions
     required_actions: List[Dict]  # PDDL action schemas
 

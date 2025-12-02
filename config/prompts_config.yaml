@@ -20,6 +20,8 @@ detection:
       ]
       {prior_images_section}
 
+      IMPORTANT: All object IDs use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle".
+
       Wait for the next turn with the current frame before performing detection.
 
     current: |-
@@ -31,9 +33,10 @@ detection:
 
       Instructions:
       - Return bounding boxes as a JSON array with labels. Never return masks or code fencing.
-      - Include all objects you can identify, focusing on new objects that are not in context turn. 
+      - Include all objects you can identify, focusing on new objects that are not in context turn.
       - If the current image is similar or identical to context image with no new objects, it is fine to not return new detections
       - If an object from previous images is visible, re-use the exact id as the "label"; otherwise create a descriptive, unique label (colors, size, position, distinctive traits).
+      - IMPORTANT: Object labels must use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle", "red_cup" not "red-cup"
       - Box format: [ymin, xmin, ymax, xmax] normalized to 0-1000. All values MUST be integers.
       - Prefer tight boxes around each object instance. The bounding box may have moved compared to last capture, so make sure to update all bounding boxes and not just return the same bounding box for existing objects.
       - Output ONLY the JSON array in this format (no prose):
@@ -45,14 +48,14 @@ detection:
 analysis:
   # Fast mode: only affordances and properties, no interaction points
   fast_mode: |-
-    You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
-    
+    You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}{task_context_section}
+
     Provide:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates
     2. Affordances: What robot actions are possible?
        - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
     3. Properties: Color, size, material, state{pddl_section}
-    
+
     Return JSON:
     {{
       "object_type": "cup",
@@ -61,7 +64,7 @@ analysis:
       "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{pddl_example},
       "confidence": 0.95
     }}
-    
+
     All positions in 0-1000 normalized coords relative to THIS image.
 
   # Cached mode: use cached affordances, only detect interaction points
@@ -87,16 +90,16 @@ analysis:
 
   # Full analysis mode
   full: |-
-    You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}
-    
+    You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}{task_context_section}
+
     Provide detailed information:
-    
+
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
     2. Affordances: What robot actions are possible with this object?
        - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
     3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
     4. Properties: Color, size, material, state, etc.{pddl_section}
-    
+
     Return in JSON format:
     {{
       "object_type": "cup",
@@ -122,7 +125,7 @@ analysis:
       }}{pddl_example},
       "confidence": 0.95
     }}
-    
+
     Note: All positions are in 0-1000 normalized coordinates relative to THIS image.
     Analyze the {object_name} based on its visual appearance.
 
@@ -151,7 +154,7 @@ interaction:
 # PDDL Predicate Section Template
 pddl:
   section_template: |
-    
+
     4. PDDL State Predicates: For each of these predicates, determine if it applies to this object:
        - Predicates to check: {pddl_list}
        - Return true/false for each predicate based on visual observation
@@ -164,3 +167,34 @@ pddl:
   example_template: |
     ,
       "pddl_state": {"clean": true, "opened": false, "filled": false}
+
+# Task Context Templates
+task_context:
+  # Detection context section
+  detection_section_template: |
+
+    Current Task: {task_description}
+
+    Prioritize detecting objects relevant to this task.
+
+  # Detection priority note
+  detection_priority_template: |
+
+    - PRIORITY: Focus especially on objects needed for: {task_description}
+
+  # Analysis context section
+  analysis_section_template: |
+
+    Task Context: {task_description}
+    Available Actions: {actions_list}
+
+    Consider what affordances and interaction points would be most useful for this task.
+
+  # Interaction point context section
+  interaction_context_template: |
+
+    Task Context: {task_description}
+    The robot needs to perform: {action_description}
+
+    Consider the task requirements when identifying the optimal interaction point.
+

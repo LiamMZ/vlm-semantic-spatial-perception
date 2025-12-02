@@ -22,7 +22,7 @@ class OrchestratorConfig:
     """Configuration for the orchestrator."""
     # API Configuration
     api_key: str
-    model_name: str = "gemini-2.5-flash"
+    model_name: str = "gemini-robotics-er-1.5-preview"
 
     # Camera Configuration
     camera_width: int = 640
@@ -57,8 +57,37 @@ class OrchestratorConfig:
     # Task Configuration
     exploration_timeout: float = 60.0  # Max time for exploration before forcing decision
 
+    # Robot description: Optional text describing the robot's capabilities and affordances.
+    # This is injected into task analysis and domain refinement prompts to help the LLM
+    # generate actions and predicates that match the robot's actual capabilities.
+    #
+    # Example:
+    #   robot_description = """
+    #   6-DOF robotic arm with parallel jaw gripper.
+    #   Capabilities:
+    #   - Pick and place objects (weight limit: 2kg)
+    #   - Open/close containers with twist or pull mechanisms
+    #   - Push/pull objects on flat surfaces
+    #   - Pour from containers
+    #   Limitations:
+    #   - Cannot grasp objects smaller than 1cm or larger than 15cm
+    #   - Cannot perform fine manipulation (e.g., button pressing, key turning)
+    #   - Limited reach: 80cm radius from base
+    #   """
+    robot_description: Optional[str] = None
+
+    # PDDL Solver Configuration
+    solver_backend: Optional[str] = None  # "auto", "pyperplan", "fast-downward-docker", "fast-downward-apptainer"
+    solver_algorithm: str = "lama-first"  # Search algorithm to use
+    solver_timeout: float = 30.0  # Timeout in seconds for solver
+    solver_verbose: bool = False  # Print solver output
+    auto_solve_when_ready: bool = False  # Automatically solve when ready for planning
+    max_refinement_attempts: int = 3  # Max attempts to refine domain after planning failures
+    auto_refine_on_failure: bool = True  # Automatically refine domain when planning fails
+
     # Callbacks
     on_state_change: Optional[Callable[["OrchestratorState", "OrchestratorState"], None]] = None
     on_detection_update: Optional[Callable[[int], None]] = None
     on_task_state_change: Optional[Callable[["TaskStateDecision"], None]] = None
     on_save_state: Optional[Callable[[Path], None]] = None  # Called after successful save
+    on_plan_generated: Optional[Callable[[Any], None]] = None  # Called after plan is generated (receives SolverResult)

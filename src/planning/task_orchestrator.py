@@ -31,6 +31,7 @@ from .pddl_representation import PDDLRepresentation
 from .pddl_domain_maintainer import PDDLDomainMaintainer
 from .task_state_monitor import TaskStateMonitor, TaskState, TaskStateDecision
 from .llm_task_analyzer import TaskAnalysis
+from .pddl_solver import PDDLSolver, SolverBackend, SearchAlgorithm, SolverResult
 from ..perception import ContinuousObjectTracker
 from ..perception.object_registry import DetectedObject
 from ..camera import RealSenseCamera
@@ -52,6 +53,7 @@ class OrchestratorState(Enum):
     DETECTING = "detecting"  # Running continuous detection
     PAUSED = "paused"  # Detection paused, can resume
     READY_FOR_PLANNING = "ready_for_planning"  # Sufficient observations, ready for plan
+    REFINING_DOMAIN = "refining_domain"  # Refining PDDL domain after planning failure
     EXECUTING_PLAN = "executing_plan"  # Plan is being executed
     TASK_COMPLETE = "task_complete"  # Task successfully completed
     ERROR = "error"  # Error state
@@ -121,11 +123,15 @@ class TaskOrchestrator:
         self.maintainer: Optional[PDDLDomainMaintainer] = None
         self.monitor: Optional[TaskStateMonitor] = None
         self.tracker: Optional[ContinuousObjectTracker] = None
+        self.solver: Optional[PDDLSolver] = None
 
         # Task state
         self.current_task: Optional[str] = None
         self.task_analysis: Optional[TaskAnalysis] = None
         self.last_task_decision: Optional[TaskStateDecision] = None
+        self.current_plan: Optional[SolverResult] = None
+        self.refinement_attempts: int = 0
+        self.last_planning_error: Optional[str] = None
 
         # Detection tracking
         self.detection_count: int = 0
@@ -195,7 +201,8 @@ class TaskOrchestrator:
         self.maintainer = PDDLDomainMaintainer(
             self.pddl,
             api_key=self.config.api_key,
-            model_name=self.config.model_name
+            model_name=self.config.model_name,
+            robot_description=self.config.robot_description
         )
 
         self.monitor = TaskStateMonitor(
@@ -219,6 +226,25 @@ class TaskOrchestrator:
         # Set frame provider
         self.tracker.set_frame_provider(self._get_camera_frames)
         self.logger.info("  • Continuous object tracker initialized")
+
+        # Initialize PDDL solver
+        backend_str = self.config.solver_backend or "auto"
+        backend_map = {
+            "auto": SolverBackend.AUTO,
+            "pyperplan": SolverBackend.PYPERPLAN,
+            "fast-downward-docker": SolverBackend.FAST_DOWNWARD_DOCKER,
+            "fast-downward-apptainer": SolverBackend.FAST_DOWNWARD_APPTAINER,
+        }
+        backend = backend_map.get(backend_str.lower(), SolverBackend.AUTO)
+
+        self.solver = PDDLSolver(
+            backend=backend,
+            verbose=self.config.solver_verbose
+        )
+
+        available = self.solver.get_available_backends()
+        backend_names = [b.value for b in available]
+        print(f"  • PDDL solver initialized (backend: {self.solver.backend.value}, available: {', '.join(backend_names)})")
 
         # Attach default robot provider if none supplied (xArm CuRobo interface)
         if getattr(self.config, "robot", None) is None:
@@ -308,17 +334,35 @@ class TaskOrchestrator:
         )
 
         self.logger.info("✓ Task analyzed!")
-        self.logger.info("  • Goal objects: %s", ", ".join(self.task_analysis.goal_objects))
+        valid_goal_objects = [obj for obj in self.task_analysis.goal_objects if obj and obj != "None"]
+        self.logger.info("  • Goal objects: %s", ", ".join(valid_goal_objects) if valid_goal_objects else "None")
         self.logger.info("  • Estimated steps: %s", self.task_analysis.estimated_steps)
         self.logger.info("  • Complexity: %s", self.task_analysis.complexity)
         self.logger.info("  • Required predicates: %s", len(self.task_analysis.relevant_predicates))
 
-        # Seed perception with predicates
+        # Seed perception with predicates and task context
         if self.tracker:
             self.logger.info("  • Configuring perception with %s predicates...", len(self.task_analysis.relevant_predicates))
             self.tracker.set_pddl_predicates(self.task_analysis.relevant_predicates)
 
-        self.logger.info("%s", "=" * 70)
+            self.logger.info("%s", "=" * 70)
+            # Pass task context and available actions to tracker
+            print(f"  • Setting task context for grounded object detection...")
+            available_actions = [
+                {
+                    "name": action.get("name", "unknown"),
+                    "params": action.get("parameters", []),
+                    "description": action.get("description", "")
+                }
+                for action in self.task_analysis.required_actions
+            ]
+            self.tracker.set_task_context(
+                task_description=task_description,
+                available_actions=available_actions,
+                goal_objects=self.task_analysis.goal_objects
+            )
+
+        print(f"\n{'='*70}\n")
 
         self._set_state(OrchestratorState.IDLE)
         return self.task_analysis
@@ -825,6 +869,10 @@ class TaskOrchestrator:
             if decision.state == TaskState.PLAN_AND_EXECUTE:
                 self._set_state(OrchestratorState.READY_FOR_PLANNING)
 
+                # Auto-solve if enabled
+                if self.config.auto_solve_when_ready:
+                    asyncio.create_task(self._auto_solve())
+
         # Notify detection update callback
         if self.config.on_detection_update:
             self.config.on_detection_update(object_count)
@@ -1020,6 +1068,33 @@ class TaskOrchestrator:
         self.logger.info("GENERATING PDDL FILES")
         self.logger.info("%s", "=" * 70)
 
+        # Sync objects from tracker to PDDL representation
+        if self.tracker and hasattr(self.tracker, 'tracker'):
+            self.logger.info("  • Syncing objects from tracker to PDDL...")
+            registry = self.tracker.registry
+            all_objects = registry.get_all_objects()
+            self.logger.info(f"    Found {len(all_objects)} objects in registry")
+
+            # Check if objects have been detected
+            if len(all_objects) == 0:
+                self.logger.warning("⚠ No objects detected in tracker registry!")
+                self.logger.warning("  Planning requires at least one detected object.")
+                self.logger.warning("  Make sure object detection has run before calling generate_pddl_files().")
+                print("\n⚠ WARNING: Cannot generate PDDL files - no objects detected!")
+                print("  • Ensure the object tracker has detected objects before planning")
+                print("  • Check that detect_objects() has been called and completed")
+                print("  • Verify the camera is providing valid frames")
+
+            # Add objects to PDDL problem
+            for obj in all_objects:
+                # Add object instance if not already present
+                if obj.object_id not in self.pddl.object_instances:
+                    await self.pddl.add_object_instance_async(
+                        obj.object_id,
+                        obj.object_type
+                    )
+                    self.logger.info(f"      Added: {obj.object_id} ({obj.object_type})")
+
         # Set goals if requested
         if set_goals:
             self.logger.info("  • Setting goal state from task analysis...")
@@ -1053,6 +1128,323 @@ class TaskOrchestrator:
         self.logger.info("%s", "=" * 70)
 
         return paths
+
+    async def solve_and_plan(
+        self,
+        algorithm: Optional[SearchAlgorithm] = None,
+        timeout: Optional[float] = None,
+        generate_files: bool = True,
+        output_dir: Optional[Path] = None,
+        wait_for_objects: bool = False,
+        max_wait_seconds: float = 30.0
+    ) -> SolverResult:
+        """
+        Generate PDDL files and solve for a plan.
+
+        Args:
+            algorithm: Search algorithm to use (defaults to config)
+            timeout: Solver timeout in seconds (defaults to config)
+            generate_files: Whether to generate PDDL files first
+            output_dir: Directory for PDDL files (defaults to config.state_dir / "pddl")
+            wait_for_objects: Whether to wait for object detection before planning
+            max_wait_seconds: Maximum time to wait for objects (default: 30s)
+
+        Returns:
+            SolverResult with plan and statistics
+        """
+        if self.solver is None:
+            raise RuntimeError("Solver not initialized")
+
+        # Wait for object detection to complete if requested
+        if wait_for_objects and self.tracker and hasattr(self.tracker, 'registry'):
+            registry = self.tracker.registry
+            objects_count = len(registry.get_all_objects())
+
+            if objects_count == 0:
+                print(f"\n⏳ Waiting for object detection to complete (max {max_wait_seconds}s)...")
+                import asyncio
+                waited = 0.0
+                poll_interval = 0.5
+
+                while objects_count == 0 and waited < max_wait_seconds:
+                    await asyncio.sleep(poll_interval)
+                    waited += poll_interval
+                    objects_count = len(registry.get_all_objects())
+
+                    if waited % 5.0 < poll_interval:  # Print every 5 seconds
+                        print(f"  Still waiting... ({waited:.1f}s elapsed, {objects_count} objects detected)")
+
+                if objects_count == 0:
+                    print(f"\n⚠ WARNING: No objects detected after {max_wait_seconds}s")
+                    print("  Planning will likely fail without detected objects")
+                else:
+                    print(f"✓ Object detection complete: {objects_count} objects detected")
+
+        # Use config defaults if not specified
+        if algorithm is None:
+            algo_map = {
+                "lama-first": SearchAlgorithm.LAMA_FIRST,
+                "lama": SearchAlgorithm.LAMA,
+                "astar(lmcut())": SearchAlgorithm.ASTAR_LMCUT,
+                "lazy_greedy([ff()], preferred=[ff()])": SearchAlgorithm.LAZY_GREEDY_FF,
+            }
+            algorithm = algo_map.get(self.config.solver_algorithm.lower(), SearchAlgorithm.LAMA_FIRST)
+
+        if timeout is None:
+            timeout = self.config.solver_timeout
+
+        print(f"\n{'='*70}")
+        print("SOLVING PDDL PROBLEM")
+        print(f"{'='*70}")
+        print(f"Algorithm: {algorithm.value}")
+        print(f"Backend: {self.solver.backend.value}")
+        print(f"Timeout: {timeout}s")
+        print()
+
+        # Generate PDDL files if requested
+        if generate_files:
+            paths = await self.generate_pddl_files(output_dir=output_dir, set_goals=True)
+            domain_path = paths["domain_path"]
+            problem_path = paths["problem_path"]
+        else:
+            # Use existing files
+            if output_dir is None:
+                output_dir = self.config.state_dir / "pddl"
+            output_dir = Path(output_dir)  # Ensure it's a Path object
+            # Both files use domain_name as the prefix
+            domain_path = output_dir / f"{self.pddl.domain_name}_domain.pddl"
+            problem_path = output_dir / f"{self.pddl.domain_name}_problem.pddl"
+
+            if not domain_path.exists() or not problem_path.exists():
+                raise FileNotFoundError(
+                    f"PDDL files not found at {output_dir}. Set generate_files=True or call generate_pddl_files() first."
+                )
+
+        # Solve
+        print("  • Running solver...")
+        result = await self.solver.solve(
+            domain_path=str(domain_path),
+            problem_path=str(problem_path),
+            algorithm=algorithm,
+            timeout=timeout
+        )
+
+        # Store result
+        self.current_plan = result
+
+        # Print result
+        print()
+        if result.success:
+            print(f"✓ {result}")
+            print(f"\nPlan ({result.plan_length} steps):")
+            for i, action in enumerate(result.plan, 1):
+                print(f"  {i}. {action}")
+        else:
+            print(f"✗ {result}")
+
+        print(f"\n{'='*70}\n")
+
+        # Notify callback
+        if self.config.on_plan_generated:
+            self.config.on_plan_generated(result)
+
+        return result
+
+    async def refine_domain_from_failure(
+        self,
+        error_message: str,
+        pddl_files: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """
+        Refine the PDDL domain based on a planning failure.
+
+        This method analyzes the planning error and attempts to fix the domain
+        by working with the LLM to correct issues like:
+        - Incorrect predicate arities
+        - Missing predicates or actions
+        - Malformed action definitions
+        - Type mismatches
+
+        Args:
+            error_message: The error message from the planner
+            pddl_files: Optional dict with domain_path and problem_path for context
+
+        Returns:
+            True if refinement was attempted, False if max attempts reached
+        """
+        if self.refinement_attempts >= self.config.max_refinement_attempts:
+            print(f"\n⚠ Max refinement attempts ({self.config.max_refinement_attempts}) reached")
+            return False
+
+        self.refinement_attempts += 1
+        self.last_planning_error = error_message
+        self._set_state(OrchestratorState.REFINING_DOMAIN)
+
+        print(f"\n{'='*70}")
+        print(f"REFINING PDDL DOMAIN (Attempt {self.refinement_attempts}/{self.config.max_refinement_attempts})")
+        print(f"{'='*70}")
+        print(f"Planning Error: {error_message}")
+        print()
+
+        try:
+            # Read the current domain and problem files for context if available
+            domain_content = None
+            problem_content = None
+            if pddl_files and "domain_path" in pddl_files:
+                domain_path = Path(pddl_files["domain_path"])
+                if domain_path.exists():
+                    domain_content = domain_path.read_text()
+
+            if pddl_files and "problem_path" in pddl_files:
+                problem_path = Path(pddl_files["problem_path"])
+                if problem_path.exists():
+                    print("Problem file exists!")
+                    problem_content = problem_path.read_text()
+                    print(problem_content)
+                else: 
+                    print("  ⚠ Problem file not found for refinement context")
+            else:
+                print("  ⚠ Problem file not found in pddl files for refinement context")
+            print(pddl_files)
+            # Use the maintainer to refine the domain
+            print("  • Requesting domain refinement from LLM...")
+
+            # Re-analyze the task with error context to get corrected domain
+            if self.maintainer:
+                # The maintainer will analyze the error and fix the domain
+                await self.maintainer.refine_domain_from_error(
+                    error_message=error_message,
+                    current_domain_pddl=domain_content,
+                    current_problem_pddl=problem_content
+                )
+
+                print("  ✓ Domain refinement complete")
+                print()
+
+                # Reset to ready for planning state to try again
+                self._set_state(OrchestratorState.READY_FOR_PLANNING)
+                return True
+            else:
+                print("  ⚠ No maintainer available for refinement")
+                return False
+
+        except Exception as e:
+            print(f"  ⚠ Refinement failed: {e}")
+            self._set_state(OrchestratorState.READY_FOR_PLANNING)
+            return False
+
+    async def solve_and_plan_with_refinement(
+        self,
+        algorithm: Optional[SearchAlgorithm] = None,
+        timeout: Optional[float] = None,
+        output_dir: Optional[Path] = None,
+        wait_for_objects: bool = True,
+        max_wait_seconds: float = 30.0
+    ) -> SolverResult:
+        """
+        Solve for a plan with automatic domain refinement on failures.
+
+        This method attempts to solve the planning problem, and if it fails due to
+        domain issues, it will automatically refine the domain and retry up to
+        max_refinement_attempts times.
+
+        Args:
+            algorithm: Search algorithm to use (defaults to config)
+            timeout: Solver timeout in seconds (defaults to config)
+            output_dir: Directory for PDDL files (defaults to config.state_dir / "pddl")
+            wait_for_objects: Whether to wait for object detection before planning
+            max_wait_seconds: Maximum time to wait for objects (default: 30s)
+
+        Returns:
+            SolverResult with plan and statistics
+        """
+        # Reset refinement attempts for new planning session
+        self.refinement_attempts = 0
+        self.last_planning_error = None
+
+        while self.refinement_attempts <= self.config.max_refinement_attempts:
+            # Try to solve (wait for objects only on first attempt)
+            result = await self.solve_and_plan(
+                algorithm=algorithm,
+                timeout=timeout,
+                generate_files=True,  # Always regenerate after refinement
+                output_dir=output_dir,
+                wait_for_objects=wait_for_objects and self.refinement_attempts == 0,  # Only wait on first attempt
+                max_wait_seconds=max_wait_seconds
+            )
+
+            # Success - return result
+            if result.success:
+                if self.refinement_attempts > 0:
+                    print(f"\n✓ Planning succeeded after {self.refinement_attempts} refinement(s)")
+                return result
+
+            # Check if this is a refinable error
+            if not self._is_refinable_error(result.error_message):
+                print(f"\n✗ Planning failed with non-refinable error")
+                return result
+
+            # Check if auto-refine is enabled
+            if not self.config.auto_refine_on_failure:
+                print(f"\n⚠ Auto-refinement disabled. Use refine_domain_from_failure() manually.")
+                return result
+
+            # Try to refine
+            print(f"\n🔧 Detected refinable planning error, attempting domain refinement...")
+
+            # Get PDDL file paths
+            pddl_files = {
+                "domain_path": str(output_dir or (self.config.state_dir / "pddl")) + f"/{self.pddl.domain_name}_domain.pddl",
+                "problem_path": str(output_dir or (self.config.state_dir / "pddl")) + f"/{self.pddl.domain_name}_problem.pddl"
+            }
+
+            refined = await self.refine_domain_from_failure(
+                error_message=result.error_message,
+                pddl_files=pddl_files
+            )
+
+            if not refined:
+                print(f"\n✗ Could not refine domain further")
+                return result
+
+            # Loop will retry with refined domain
+
+        print(f"\n✗ Max refinement attempts reached")
+        return result
+
+    def _is_refinable_error(self, error_message: Optional[str]) -> bool:
+        """
+        Check if an error message indicates a refinable domain issue.
+
+        Returns:
+            True if the error appears to be fixable via domain refinement
+        """
+        if not error_message:
+            return False
+
+        # Common refinable error patterns
+        refinable_patterns = [
+            # Domain syntax/structure errors
+            "wrong number of arguments",
+            "predicate",
+            "arity",
+            "parse error",
+            "undefined predicate",
+            "type error",
+            "action",
+            "precondition",
+            "effect",
+            "parameter",
+            # Planning failures that might indicate domain issues
+            "no plan found",
+            "no solution",
+            "unsolvable",
+            "empty plan",
+            "goals",  # Goal-related issues
+        ]
+
+        error_lower = error_message.lower()
+        return any(pattern in error_lower for pattern in refinable_patterns)
 
     # ========================================================================
     # State Persistence
@@ -1269,6 +1661,23 @@ class TaskOrchestrator:
     # ========================================================================
     # Internal Helpers
     # ========================================================================
+
+    async def _auto_solve(self) -> None:
+        """
+        Automatically solve for a plan when ready.
+
+        Called internally when auto_solve_when_ready is enabled and
+        the orchestrator transitions to READY_FOR_PLANNING state.
+        """
+        try:
+            print("\n🤖 Auto-solve triggered...")
+            # Use refinement if enabled
+            if self.config.auto_refine_on_failure:
+                await self.solve_and_plan_with_refinement()
+            else:
+                await self.solve_and_plan()
+        except Exception as e:
+            print(f"⚠ Auto-solve failed: {e}")
 
     def _set_state(self, new_state: OrchestratorState) -> None:
         """Update orchestrator state and notify callback."""
