@@ -1300,7 +1300,8 @@ class CuRoboMotionPlanner:
         unconstrained_orientation=False,
         planning_timeout=5.0,   # Reduced from 10.0 seconds
         execute=False,
-        speed_factor=1.0
+        speed_factor=1.0,
+        is_place=False
     ):
         """Plan movement to a target pose with proper batch dimension handling"""
         
@@ -1360,6 +1361,9 @@ class CuRoboMotionPlanner:
                 print(target_position)
                 target_position = target_position[0]
             print(f"Target pose shifted: {target_position}")
+
+            if is_place:
+                target_position[2] += 0.1
             
             # Convert to torch tensors for cuRobo
             target_position_tensor = self.tensor_args.to_device([target_position])

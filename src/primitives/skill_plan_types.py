@@ -248,6 +248,7 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "execute",
             "speed_factor",
             "preset_orientation",
+            "is_place",
         ),
         description="Cartesian move to pose; orientation defaults to top-down when omitted.",
         param_validators={
