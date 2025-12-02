@@ -116,25 +116,32 @@ class PrimitiveExecutor:
                 f"Plan snapshot {plan.source_snapshot_id} missing on disk; "
                 f"using {artifacts.snapshot_id or 'latest available'} instead"
             )
-        warnings.extend(self._translate_plan(plan, artifacts))
+        if self.primitives:
+            joints = (artifacts.robot_state or {}).get("joints")
+            helper = getattr(self.primitives, "camera_pose_from_joints", None)
+            pos, rot = helper(joints)
+            cam_pose =  SnapshotCameraPose(position=np.asarray(pos, dtype=float), rotation=rot)
+            for primitive in plan.primitives:
+                warnings.extend(self._translate_helper_parameters(primitive, artifacts))
+                if cam_pose:
+                    for key in ("target_position", "pivot_point"):
+                        pos = primitive.parameters.get(key)
+                        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+                            continue
+                        base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
+                        primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
 
-        validation_errors = plan.validate(PRIMITIVE_LIBRARY)
-        if validation_errors:
-            errors.extend(validation_errors)
+            validation_errors = plan.validate(PRIMITIVE_LIBRARY)
+            if validation_errors:
+                errors.extend(validation_errors)
 
-        return plan, warnings, errors
+            return plan, warnings, errors
+        else:
+            return None, None, None
 
     # ------------------------------------------------------------------ #
     # Translation
     # ------------------------------------------------------------------ #
-    def _translate_plan(self, plan: SkillPlan, artifacts: SnapshotArtifacts) -> List[str]:
-        warnings: List[str] = []
-        cam_pose = self._snapshot_camera_pose(artifacts)
-        for primitive in plan.primitives:
-            warnings.extend(self._translate_helper_parameters(primitive, artifacts))
-            if cam_pose:
-                self._reframe_to_base(primitive, cam_pose)
-        return warnings
 
     def _translate_helper_parameters(
         self,
@@ -195,42 +202,6 @@ class PrimitiveExecutor:
         if point is None:
             return None
         return [float(point[0]), float(point[1]), float(point[2])]
-
-    def _snapshot_camera_pose(self, artifacts: SnapshotArtifacts) -> Optional[SnapshotCameraPose]:
-        """
-        Fetch camera pose for the snapshot's robot joints using the primitives driver if available.
-        """
-        joints = (artifacts.robot_state or {}).get("joints")
-        if not joints or not self.primitives:
-            return None
-        helper = getattr(self.primitives, "camera_pose_from_joints", None)
-        if not callable(helper):
-            return None
-        try:
-            pos, rot = helper(joints)
-            if pos is None or rot is None:
-                return None
-            return SnapshotCameraPose(position=np.asarray(pos, dtype=float), rotation=rot)
-        except Exception:
-            return None
-
-    def _reframe_to_base(self, primitive: PrimitiveCall, cam_pose: SnapshotCameraPose) -> None:
-        """
-        Convert camera-frame positions to base using the snapshot camera pose.
-        """
-        if primitive.frame != "camera":
-            return
-
-        for key in ("target_position", "pivot_point"):
-            pos = primitive.parameters.get(key)
-            if not isinstance(pos, (list, tuple)) or len(pos) < 3:
-                continue
-            base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
-            primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
-
-        # Prevent downstream double transforms in CuRobo interface
-        primitive.parameters["is_camera_frame"] = False
-        primitive.frame = "base"
 
     # ------------------------------------------------------------------ #
     # Result normalization
