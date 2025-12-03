@@ -72,7 +72,8 @@ class ObjectTracker:
         prompts_config_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         task_context: Optional[str] = None,
-        available_actions: Optional[List[Dict[str, Any]]] = None
+        available_actions: Optional[List[Dict[str, Any]]] = None,
+        robot: Optional[Any] = None
     ):
         """
         Initialize object tracker.
@@ -87,7 +88,6 @@ class ObjectTracker:
             enable_affordance_caching: Cache affordance results for similar objects
             fast_mode: Skip detailed interaction points, only detect affordances
             pddl_predicates: List of PDDL predicate names to extract from objects (e.g., ["clean", "dirty", "opened"])
-            prompts_config_path: Path to prompts config YAML file (defaults to config/object_tracker_prompts.yaml)
             task_context: Optional task description to ground object detection (e.g., "make coffee")
             available_actions: Optional list of available PDDL actions for context
         """
@@ -97,6 +97,7 @@ class ObjectTracker:
         self.crop_target_size = crop_target_size
         self.enable_affordance_caching = enable_affordance_caching
         self.fast_mode = fast_mode
+        self.robot = robot
 
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
@@ -155,6 +156,7 @@ class ObjectTracker:
         self._last_detection_depth: Optional[np.ndarray] = None
         self._last_detection_intrinsics: Optional[Any] = None
         self._last_detection_timestamp: Optional[float] = None
+        self._last_robot_state: Any = None
 
     def set_pddl_predicates(self, predicates: List[str]) -> None:
         """
@@ -336,13 +338,39 @@ class ObjectTracker:
                 task_context_str += f"\n\n    Goal Objects: {goal_objects_str}\n    Note: These objects are critical for completing the task."
 
         return task_context_str
+    
+    def _get_robot_state_struct(self) -> Optional[Dict[str, Any]]:
+        """
+        Obtain robot state via duck-typed get_robot_state() on the provider.
+
+        The orchestrator does not assume any internal structure beyond it being JSON-serializable.
+        """
+        try:
+            raw_state = self.robot.get_robot_state()
+            # Best-effort: ensure it's serializable (convert numpy arrays)
+            def to_serializable(x):
+                if isinstance(x, np.ndarray):
+                    return x.tolist()
+                if isinstance(x, (list, dict, str, int, float, type(None), bool)):
+                    return x
+                if hasattr(x, "__dict__"):
+                    # dataclass / custom object; use dict
+                    return {k: to_serializable(v) for k, v in vars(x).items()}
+                return str(x)
+            if isinstance(raw_state, dict):
+                return {k: to_serializable(v) for k, v in raw_state.items()}
+            # If provider returned a non-dict, wrap it for stability
+            return {"data": to_serializable(raw_state)}
+        except Exception:
+            return None
 
     async def detect_objects(
         self,
         color_frame: Union[np.ndarray, Image.Image],
         depth_frame: Optional[np.ndarray] = None,
         camera_intrinsics: Optional[Any] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        robot_state: Optional[Dict[str, Any]] = None
     ) -> List[DetectedObject]:
         """
         Detect all objects in scene with affordances and interaction points (async).
@@ -370,6 +398,11 @@ class ObjectTracker:
 
         # Prepare image
         pil_image = self._prepare_image(color_frame)
+
+        # Capture frame timestamp and robot state as close to frame prep as possible
+        # Prefer provider-supplied state when available to avoid race conditions.
+        frame_timestamp = time.time()
+        frame_robot_state = robot_state if robot_state is not None else self._get_robot_state_struct()
 
         # Store current frame for analysis
         self._current_color_frame = pil_image
@@ -492,7 +525,9 @@ class ObjectTracker:
 
         # Cache the latest detection bundle for snapshot alignment
         with self._last_detection_lock:
-            self._last_detection_timestamp = time.time()
+            # Use the robot state and timestamp captured at frame acquisition
+            self._last_robot_state = copy.deepcopy(frame_robot_state)
+            self._last_detection_timestamp = frame_timestamp
             self._last_detection_objects = [copy.deepcopy(obj) for obj in detected_objects]
             if self._encoded_image_cache:
                 self._last_detection_png = bytes(self._encoded_image_cache)
@@ -895,6 +930,7 @@ class ObjectTracker:
                 "depth": depth_copy,
                 "intrinsics": intrinsics_copy,
                 "objects": objects_copy,
+                "robot_state": copy.deepcopy(self._last_robot_state)
             }
 
     def clear_registry(self):
@@ -1440,7 +1476,8 @@ class ContinuousObjectTracker(ObjectTracker):
         fast_mode: bool = False,
         update_interval: float = 1.0,
         on_detection_complete: Optional[Callable[[int], None]] = None,
-        logger: Optional[logging.Logger] = None
+        logger: Optional[logging.Logger] = None,
+        robot: Optional[Any] = None
     ):
         super().__init__(
             api_key=api_key,
@@ -1450,6 +1487,7 @@ class ContinuousObjectTracker(ObjectTracker):
             enable_affordance_caching=enable_affordance_caching,
             fast_mode=fast_mode,
             logger=logger,
+            robot=robot
         )
         self.update_interval = update_interval
         self.on_detection_complete = on_detection_complete
@@ -1473,9 +1511,13 @@ class ContinuousObjectTracker(ObjectTracker):
 
     def set_frame_provider(
         self,
-        provider: Callable[[], tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]]
+        provider: Callable[[], tuple]
     ):
-        """Set the frame provider function returning (color, depth, intrinsics)."""
+        """Set the frame provider function.
+
+        The provider should return either a 3-tuple `(color, depth, intrinsics)`
+        or a 4-tuple `(color, depth, intrinsics, robot_state)` captured atomically.
+        """
         self._frame_provider = provider
 
     def start(self):
@@ -1517,7 +1559,13 @@ class ContinuousObjectTracker(ObjectTracker):
             loop_start = time.time()
 
             try:
-                color_frame, depth_frame, intrinsics = self._frame_provider()
+                provided = self._frame_provider()
+                # Support 3-tuple or 4-tuple with robot_state
+                if isinstance(provided, tuple) and len(provided) == 4:
+                    color_frame, depth_frame, intrinsics, robot_state = provided
+                else:
+                    color_frame, depth_frame, intrinsics = provided
+                    robot_state = None
 
                 if not self.should_detect:
                     async with self._lock:
@@ -1540,7 +1588,8 @@ class ContinuousObjectTracker(ObjectTracker):
                 detected_objects = await self.detect_objects(
                     color_frame,
                     depth_frame,
-                    intrinsics
+                    intrinsics,
+                    robot_state=robot_state
                 )
                 detection_time = time.time() - detection_start
                 self._last_detection_count = len(detected_objects)

@@ -212,6 +212,15 @@ class TaskOrchestrator:
         )
         self.logger.info("  • PDDL domain maintainer and monitor initialized")
 
+        # Attach default robot provider if none supplied (xArm CuRobo interface)
+        if getattr(self.config, "robot", None) is None:
+            try:
+                from ..kinematics.xarm_curobo_interface import CuRoboMotionPlanner
+                self.config.robot = CuRoboMotionPlanner()
+                self.logger.info("  • Default robot provider attached: CuRoboMotionPlanner")
+            except Exception as e:
+                self.logger.warning("  • No robot provider attached (default xArm initialization failed: %s)", e)
+
         # Initialize continuous tracker
         self.tracker = ContinuousObjectTracker(
             api_key=self.config.api_key,
@@ -220,6 +229,7 @@ class TaskOrchestrator:
             update_interval=self.config.update_interval,
             on_detection_complete=self._on_detection_callback,
             logger=self.logger.getChild("ObjectTracker"),
+            robot=self.config.robot
         )
 
         # Set frame provider
@@ -245,14 +255,6 @@ class TaskOrchestrator:
         backend_names = [b.value for b in available]
         print(f"  • PDDL solver initialized (backend: {self.solver.backend.value}, available: {', '.join(backend_names)})")
 
-        # Attach default robot provider if none supplied (xArm CuRobo interface)
-        if getattr(self.config, "robot", None) is None:
-            try:
-                from ..kinematics.xarm_curobo_interface import CuRoboMotionPlanner
-                self.config.robot = CuRoboMotionPlanner()
-                self.logger.info("  • Default robot provider attached: CuRoboMotionPlanner")
-            except Exception as e:
-                self.logger.warning("  • No robot provider attached (default xArm initialization failed: %s)", e)
 
         # Configure auto-save (event-driven)
         if self.config.auto_save:
@@ -471,11 +473,11 @@ class TaskOrchestrator:
         try:
             color, depth = self._camera.get_aligned_frames()
             intrinsics = self._camera.get_camera_intrinsics()
-            return color, depth, intrinsics
+            robot_state = self._get_robot_state_struct()
+            return color, depth, intrinsics, robot_state
         except Exception as e:
             self.logger.warning("Camera error: %s", e)
-            return None, None, None
-
+            return None, None, None, None
     # ========================================================================
     # Perception Pool / Snapshot Helpers
     # ========================================================================
@@ -709,6 +711,7 @@ class TaskOrchestrator:
                 bundle_intrinsics = detection_bundle.get("intrinsics")
                 bundle_objects = detection_bundle.get("objects")
                 bundle_timestamp = detection_bundle.get("timestamp")
+                robot_state = detection_bundle.get("robot_state")
 
             color = depth = intrinsics = None
             color_img = None
@@ -717,7 +720,7 @@ class TaskOrchestrator:
                 depth = bundle_depth
                 intrinsics = bundle_intrinsics
             else:
-                color, depth, intrinsics = self._get_camera_frames()
+                color, depth, intrinsics, robot_state = self._get_camera_frames()
                 if color is None or intrinsics is None:
                     raise RuntimeError("Cannot capture snapshot: camera frames unavailable")
                 color_img = Image.fromarray(color) if isinstance(color, np.ndarray) else color
@@ -766,8 +769,6 @@ class TaskOrchestrator:
                 json.dump(det_payload, f, indent=2)
 
             # Robot context (optional, via duck-typed get_robot_state)
-            robot_state = self._get_robot_state_struct()
-            robot_state_path = None
             if robot_state is not None:
                 robot_state_path = snapshot_dir / "robot_state.json"
                 with open(robot_state_path, "w") as f:
