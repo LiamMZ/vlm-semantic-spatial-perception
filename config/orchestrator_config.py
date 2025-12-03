@@ -68,6 +68,7 @@ class OrchestratorConfig:
 
     # Prompt Configuration
     task_analyzer_prompts_path: Optional[Path] = None  # Override for LLMTaskAnalyzer prompt file
+    genai_log_dir: Optional[Path] = None  # Optional GenAI request/response log directory
 
     # Callbacks
     on_state_change: Optional[Callable[["OrchestratorState", "OrchestratorState"], None]] = None

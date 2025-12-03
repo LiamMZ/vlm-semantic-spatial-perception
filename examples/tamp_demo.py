@@ -65,12 +65,19 @@ project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
 from src.task_motion_planner import TaskAndMotionPlanner, TAMPConfig, TAMPState, TAMPResult
+from src.utils.genai_logging import configure_genai_logging
 
 
 class TAMPDemo:
     """Interactive demo for the complete TAMP system."""
 
-    def __init__(self, api_key: str, dry_run: bool = True, snapshot_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        api_key: str,
+        dry_run: bool = True,
+        snapshot_dir: Optional[Path] = None,
+        task_analyzer_prompts_path: Optional[Path] = None,
+    ):
         """
         Initialize TAMP demo.
 
@@ -81,6 +88,7 @@ class TAMPDemo:
         """
         self.dry_run = dry_run
         self.snapshot_dir = snapshot_dir
+        self.task_analyzer_prompts_path = task_analyzer_prompts_path
 
         # Create unique run directory with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -94,6 +102,9 @@ class TAMPDemo:
         # PDDL files are shared across tasks in this run
         self.pddl_dir = self.run_dir / "pddl"
         self.pddl_dir.mkdir(parents=True, exist_ok=True)
+
+        # Route GenAI request/response logs alongside the run outputs (also passed into TAMPConfig)
+        self.genai_log_path = self.run_dir / "genai_logs"
 
         # Configure TAMP
         config = TAMPConfig(
@@ -114,6 +125,8 @@ class TAMPDemo:
             on_plan_generated=self._on_plan_generated,
             on_action_decomposed=self._on_action_decomposed,
             on_action_executed=self._on_action_executed,
+            task_analyzer_prompts_path=task_analyzer_prompts_path,
+            genai_log_dir=self.genai_log_path,
         )
 
         self.tamp = TaskAndMotionPlanner(config)
@@ -170,6 +183,8 @@ class TAMPDemo:
         self.logger.info(f"Logging initialized for {self.run_id}")
         self.logger.info(f"Log file: {log_file}")
         self.logger.info(f"Timing log: {timing_log_file}")
+        if self.genai_log_path:
+            self.logger.info(f"GenAI logs: {self.genai_log_path}")
 
     def _log_timing(self, event: str, duration_s: float, details: str = ""):
         """
@@ -361,6 +376,9 @@ class TAMPDemo:
         try:
             # Initialize
             await self.tamp.initialize()
+            # Set the task before perception so detection can start
+            await self.tamp.orchestrator.process_task_request(task)
+            self.tamp.current_task = task
 
             # Try to load snapshot from specified directory or previous run
             snapshot_loaded = False
@@ -805,6 +823,11 @@ async def main():
         type=str,
         help="Path to snapshot directory to load perception data from (skips perception step)"
     )
+    parser.add_argument(
+        "--task-analyzer-prompts",
+        type=str,
+        help="Path to LLM task analyzer prompts YAML (e.g., config/llm_task_analyzer_prompts_lmh.yaml)"
+    )
 
     args = parser.parse_args()
 
@@ -826,8 +849,18 @@ async def main():
         print(f"Error: Snapshot directory not found: {snapshot_dir}")
         return 1
 
+    prompt_override = Path(args.task_analyzer_prompts) if args.task_analyzer_prompts else None
+    if prompt_override and not prompt_override.exists():
+        print(f"Error: Task analyzer prompts file not found: {prompt_override}")
+        return 1
+
     # Create demo
-    demo = TAMPDemo(api_key=args.api_key, dry_run=dry_run, snapshot_dir=snapshot_dir)
+    demo = TAMPDemo(
+        api_key=args.api_key,
+        dry_run=dry_run,
+        snapshot_dir=snapshot_dir,
+        task_analyzer_prompts_path=prompt_override,
+    )
 
     # Run mode
     if args.interactive:

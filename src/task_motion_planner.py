@@ -62,6 +62,7 @@ from src.planning.pddl_solver import SolverResult
 from src.primitives.skill_decomposer import SkillDecomposer
 from src.primitives.primitive_executor import PrimitiveExecutor, PrimitiveExecutionResult
 from src.primitives.skill_plan_types import SkillPlan
+from src.utils.genai_logging import configure_genai_logging
 from src.camera.realsense_camera import RealSenseCamera
 # Import orchestrator config
 import sys
@@ -96,6 +97,8 @@ class TAMPConfig:
     state_dir: Path = field(default_factory=lambda: Path("./outputs/tamp_state"))
     perception_pool_dir: Optional[Path] = None
     primitive_catalog_path: Optional[Path] = None
+    task_analyzer_prompts_path: Optional[Path] = None
+    genai_log_dir: Optional[Path] = None
 
     # Orchestrator settings (perception + planning)
     update_interval: float = 2.0
@@ -132,6 +135,8 @@ class TAMPConfig:
             solver_backend=self.solver_backend,
             solver_algorithm=self.solver_algorithm,
             solver_timeout=self.solver_timeout,
+            task_analyzer_prompts_path=self.task_analyzer_prompts_path,
+            genai_log_dir=self.genai_log_dir,
             on_plan_generated=self.on_plan_generated,
         )
 
@@ -189,15 +194,17 @@ class TaskAndMotionPlanner:
         """
         self.config = config
         self.state = TAMPState.UNINITIALIZED
+        self.logger = logging.getLogger("TaskAndMotionPlanner")
 
         # Create output directories
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
         perception_pool_dir = self.config.perception_pool_dir or (self.config.state_dir / "perception_pool")
         perception_pool_dir.mkdir(parents=True, exist_ok=True)
+        # Enable GenAI logging if requested
+        configure_genai_logging(self.config.genai_log_dir)
         # Initialize components
         orchestrator_config = config.to_orchestrator_config()
         self.orchestrator = TaskOrchestrator(orchestrator_config)
-        self.orchestrator.initialize()
 
         self.skill_decomposer = SkillDecomposer(
             api_key=config.api_key,
