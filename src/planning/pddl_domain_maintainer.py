@@ -910,24 +910,32 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
                     print(f"    • Goal expects: '{expected}' but detected object is: '{actual}'")
 
                     # Update goal_objects AND goal_predicates in task analysis
-                    if self.task_analysis and expected in self.task_analysis.goal_objects:
-                        # Update goal_objects list
-                        idx = self.task_analysis.goal_objects.index(expected)
-                        self.task_analysis.goal_objects[idx] = actual
-                        print(f"      ✓ Updated task_analysis.goal_objects: '{expected}' → '{actual}'")
+                    if self.task_analysis:
+                        # Update goal_objects list if object is in it
+                        if expected in self.task_analysis.goal_objects:
+                            idx = self.task_analysis.goal_objects.index(expected)
+                            self.task_analysis.goal_objects[idx] = actual
+                            print(f"      ✓ Updated task_analysis.goal_objects: '{expected}' → '{actual}'")
 
-                        # Update goal_predicates to use new object name
+                        # Always update goal_predicates to use new object name
                         updated_predicates = []
+                        any_updated = False
                         for pred in self.task_analysis.goal_predicates:
                             # Replace old object name with new one in predicate strings
-                            # Handle various formats: "(is-open water_bottle_1)" or "is-open(water_bottle_1)"
-                            updated_pred = pred.replace(expected, actual)
+                            # Handle various formats: "(in bottle bag1)" or "in(bottle, bag1)"
+                            # Use word boundaries to avoid partial matches
+                            import re
+                            updated_pred = re.sub(rf'\b{re.escape(expected)}\b', actual, pred)
                             updated_predicates.append(updated_pred)
                             if updated_pred != pred:
                                 print(f"      ✓ Updated goal predicate: '{pred}' → '{updated_pred}'")
+                                any_updated = True
 
-                        self.task_analysis.goal_predicates = updated_predicates
-                        updates_applied += 1
+                        if any_updated:
+                            self.task_analysis.goal_predicates = updated_predicates
+                            updates_applied += 1
+                        else:
+                            print(f"      ℹ Object '{expected}' not found in goal predicates")
                     else:
                         print(f"      → Will update goal when domain is regenerated")
 

@@ -254,30 +254,54 @@ class TaskAndMotionPlanner:
         print(f"{'='*70}")
 
         # Start continuous detection
+        detection_start = asyncio.get_event_loop().time()
         await self.orchestrator.start_detection()
+        detection_init_time = asyncio.get_event_loop().time() - detection_start
+        self.logger.info(f"[TIMING] Detection started in {detection_init_time:.3f}s")
 
         # Wait for sufficient observations or timeout
         start_time = asyncio.get_event_loop().time()
         target_observations = min_observations or self.config.min_observations
+        iteration_count = 0
 
         while True:
+            iteration_count += 1
+            loop_iter_start = asyncio.get_event_loop().time()
+
             status = await self.orchestrator.get_status()
+            elapsed = asyncio.get_event_loop().time() - start_time
+
+            # Log detailed status every iteration
+            self.logger.info(
+                f"[TIMING] Perception loop iteration {iteration_count} at {elapsed:.1f}s: "
+                f"objects={status.get('num_objects', 0)}, "
+                f"ready={self.orchestrator.is_ready_for_planning()}, "
+                f"state={status.get('orchestrator_state', 'unknown')}, "
+                f"task_decision={self.orchestrator.last_task_decision}"
+            )
 
             # Check if ready
             if self.orchestrator.is_ready_for_planning():
                 print(f"✓ Environment sufficiently observed ({status['num_objects']} objects)")
+                self.logger.info(f"[TIMING] Perception ready after {elapsed:.1f}s, {iteration_count} iterations")
                 await self.orchestrator.pause_detection()
                 self._set_state(TAMPState.IDLE)
                 return True
 
             # Check timeout
-            if duration and (asyncio.get_event_loop().time() - start_time) > duration:
+            if duration and elapsed > duration:
                 print(f"⚠ Perception timeout after {duration}s")
+                self.logger.warning(
+                    f"[TIMING] Perception timeout after {duration}s, {iteration_count} iterations. "
+                    f"Objects detected: {status.get('num_objects', 0)}"
+                )
                 await self.orchestrator.pause_detection()
                 self._set_state(TAMPState.IDLE)
                 return False
 
             # Wait and check again
+            iter_time = asyncio.get_event_loop().time() - loop_iter_start
+            self.logger.debug(f"[TIMING] Iteration {iteration_count} took {iter_time:.3f}s")
             await asyncio.sleep(1.0)
 
     async def plan_task(

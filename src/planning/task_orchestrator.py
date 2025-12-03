@@ -1148,7 +1148,7 @@ class TaskOrchestrator:
         generate_files: bool = True,
         output_dir: Optional[Path] = None,
         wait_for_objects: bool = True,
-        max_wait_seconds: float = 30.0
+        max_wait_seconds: float = 60.0
     ) -> SolverResult:
         """
         Generate PDDL files and solve for a plan.
@@ -1353,7 +1353,7 @@ class TaskOrchestrator:
         timeout: Optional[float] = None,
         output_dir: Optional[Path] = None,
         wait_for_objects: bool = True,
-        max_wait_seconds: float = 30.0
+        max_wait_seconds: float = 60.0
     ) -> SolverResult:
         """
         Solve for a plan with automatic domain refinement on failures.
@@ -1449,6 +1449,12 @@ class TaskOrchestrator:
             "precondition",
             "effect",
             "parameter",
+            # Object definition errors
+            "object",
+            "referenced",
+            "not defined",
+            "but not defined",
+            "undefined object",
             # Planning failures that might indicate domain issues
             "no plan found",
             "no solution",

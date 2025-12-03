@@ -438,20 +438,30 @@ class PDDLSolver:
                 search_func = planner.SEARCHES[search_name]
                 heuristic_class = planner.HEURISTICS[heuristic_name]
 
-                return planner.search_plan(
-                    str(domain_path),
-                    str(problem_path),
-                    search=search_func,
-                    heuristic_class=heuristic_class
-                )
+                # Call Pyperplan and convert result to list immediately
+                # This prevents StopIteration from escaping into async context
+                try:
+                    plan = planner.search_plan(
+                        str(domain_path),
+                        str(problem_path),
+                        search=search_func,
+                        heuristic_class=heuristic_class
+                    )
+                    # Convert to list and extract names immediately in sync context
+                    if plan is None:
+                        return None
+                    return [action.name for action in plan]
+                except StopIteration:
+                    # Handle StopIteration explicitly if it escapes from Pyperplan
+                    return None
 
             # Run with timeout
-            plan = await asyncio.wait_for(
+            action_names = await asyncio.wait_for(
                 loop.run_in_executor(None, run_planner),
                 timeout=timeout
             )
 
-            if plan is None:
+            if action_names is None:
                 return SolverResult(
                     success=False,
                     plan=[],
@@ -461,9 +471,6 @@ class PDDLSolver:
                     nodes_expanded=None,
                     error_message="No plan found"
                 )
-
-            # Extract action names
-            action_names = [action.name for action in plan]
 
             return SolverResult(
                 success=True,
