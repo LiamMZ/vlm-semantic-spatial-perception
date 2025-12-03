@@ -33,7 +33,7 @@ class OrchestratorConfig:
     # Detection Configuration
     update_interval: float = 2.0  # Seconds between detections
     min_observations: int = 3  # Minimum objects before planning
-    fast_mode: bool = False  # Skip interaction points for speed
+    fast_mode: bool = True  # Skip interaction points for speed
 
     # Persistence Configuration
     state_dir: Path = field(default_factory=lambda: Path("outputs/orchestrator_state"))

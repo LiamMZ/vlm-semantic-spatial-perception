@@ -864,21 +864,24 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
 
         try:
             # Get LLM's analysis and fix
-            response = await asyncio.to_thread(
-                self.llm_analyzer.client.models.generate_content,
-                model=self.llm_analyzer.model_name,
-                contents=refinement_prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0.1
-                }
+            # Ask the LLM for suggested fixes; limit wait to 30s to avoid hanging
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.llm_analyzer.client.models.generate_content,
+                    model=self.llm_analyzer.model_name,
+                    contents=refinement_prompt,
+                    config={
+                        "response_mime_type": "application/json",
+                        "temperature": 0.1
+                    }
+                ),
+                timeout=30.0,
             )
 
             fix_json = response.text.strip()
             print(f"\n  LLM Response:\n{fix_json[:500]}...\n")
 
             # Parse the JSON response
-            import json
             fix_data = json.loads(fix_json)
 
             analysis = fix_data.get("analysis", "")

@@ -66,7 +66,7 @@ class ObjectTracker:
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
-        fast_mode: bool = False,
+        fast_mode: bool = True,
         pddl_predicates: Optional[List[str]] = None,
         pddl_types: Optional[List[str]] = None,
         prompts_config_path: Optional[str] = None,

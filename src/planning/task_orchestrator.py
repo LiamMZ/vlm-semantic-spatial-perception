@@ -1341,6 +1341,8 @@ class TaskOrchestrator:
                 return False
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"  ⚠ Refinement failed: {e}")
             self._set_state(OrchestratorState.READY_FOR_PLANNING)
             return False

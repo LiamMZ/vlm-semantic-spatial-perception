@@ -84,7 +84,7 @@ class SimpleContinuousDemo:
         print("👁️  Initializing object tracker...")
         self.tracker = ContinuousObjectTracker(
             api_key=api_key,
-            fast_mode=False,
+            fast_mode=True,
             update_interval=update_interval,
             on_detection_complete=self._on_detection
         )

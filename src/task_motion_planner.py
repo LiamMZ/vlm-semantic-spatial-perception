@@ -330,11 +330,16 @@ class TaskAndMotionPlanner:
             # Continue anyway for now, but log the warning
             print("   Proceeding with planning attempt...")
 
-        # Solve with or without refinement
+        # Solve with or without refinement. Wait for object detection first
+        # to avoid generating empty problem files when detection is still warming up.
         if use_refinement and self.config.auto_refine_on_failure:
-            result = await self.orchestrator.solve_and_plan_with_refinement()
+            result = await self.orchestrator.solve_and_plan_with_refinement(
+                wait_for_objects=True
+            )
         else:
-            result = await self.orchestrator.solve_and_plan()
+            result = await self.orchestrator.solve_and_plan(
+                wait_for_objects=True
+            )
 
         # Check for successful plan but empty (no actions needed)
         if result.success and result.plan_length == 0:
@@ -543,6 +548,35 @@ class TaskAndMotionPlanner:
         result.skill_plans = skill_plans
         result.decomposition_time = time.time() - decomp_start
         print(f"\n✓ Decomposed {len(skill_plans)} actions")
+
+        # Persist decomposed skill plans to disk for inspection/debugging
+        try:
+            decomp_dir = Path(self.config.state_dir) / "decomposed_plans"
+            decomp_dir.mkdir(parents=True, exist_ok=True)
+
+            all_plans = {}
+            for idx, (action_str, skill_plan) in enumerate(skill_plans.items(), 1):
+                # Create a filesystem-safe name prefix
+                safe_name = action_str.strip("()").replace(" ", "_").replace("/", "_")
+                file_name = f"{idx:02d}_{safe_name}.json"
+                plan_path = decomp_dir / file_name
+                try:
+                    plan_path.write_text(json.dumps(skill_plan.to_dict(), indent=2))
+                    print(f"  • Wrote decomposed plan: {plan_path}")
+                except Exception as e:
+                    print(f"  ⚠ Failed to write decomposed plan {plan_path}: {e}")
+
+                all_plans[action_str] = skill_plan.to_dict()
+
+            # Write aggregated file
+            agg_path = decomp_dir / "all_skill_plans.json"
+            try:
+                agg_path.write_text(json.dumps(all_plans, indent=2))
+                print(f"  • Wrote aggregated decomposed plans: {agg_path}")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Phase 3: Execution
         self._set_state(TAMPState.EXECUTING)
