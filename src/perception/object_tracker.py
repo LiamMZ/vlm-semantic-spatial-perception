@@ -1464,7 +1464,7 @@ class ContinuousObjectTracker(ObjectTracker):
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
-        fast_mode: bool = False,
+        fast_mode: bool = True,
         update_interval: float = 1.0,
         on_detection_complete: Optional[Callable[[int], None]] = None,
         logger: Optional[logging.Logger] = None
