@@ -7,7 +7,7 @@ Maintains a consistent domain representation that evolves as more information is
 
 import asyncio
 import re
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 from pathlib import Path
 
 import numpy as np
@@ -261,13 +261,32 @@ class PDDLDomainMaintainer:
             return
 
         # Add predicted predicates
-        for predicate_name in self.task_analysis.relevant_predicates:
+        normalized_predicates: List[str] = []
+        seen_normalized: Set[str] = set()
+
+        for predicate_signature in self.task_analysis.relevant_predicates:
+            (
+                predicate_name,
+                parameter_defs,
+                normalized_display,
+            ) = self._normalize_predicate_signature(predicate_signature)
+
+            if not predicate_name:
+                continue
+
             if predicate_name not in self.pddl.predicates:
-                # Most predicates are unary
                 await self.pddl.add_predicate_async(
                     predicate_name,
-                    [("obj", "object")]
+                    parameter_defs,
                 )
+
+            if normalized_display and normalized_display not in seen_normalized:
+                normalized_predicates.append(normalized_display)
+                seen_normalized.add(normalized_display)
+
+        # Replace the task analysis list with normalized, untyped predicate strings
+        if normalized_predicates:
+            self.task_analysis.relevant_predicates = normalized_predicates
 
         # Add LLM-generated actions
         for action_def in self.task_analysis.required_actions:
@@ -430,7 +449,8 @@ class PDDLDomainMaintainer:
 
         # Check if all predicted predicates are in domain
         for predicate in self.task_analysis.relevant_predicates:
-            if predicate not in self.pddl.predicates:
+            pred_name, _, _ = self._normalize_predicate_signature(predicate)
+            if pred_name and pred_name not in self.pddl.predicates:
                 return False
 
         # Check if we have any actions
@@ -499,6 +519,54 @@ class PDDLDomainMaintainer:
             "missing_predicates": missing_predicates,
             "invalid_actions": invalid_actions
         }
+
+    @staticmethod
+    def _normalize_predicate_signature(
+        predicate_str: str,
+    ) -> Tuple[Optional[str], List[Tuple[str, str]], str]:
+        """
+        Strip type annotations from a predicate signature and sanitize it for PDDL.
+
+        Args:
+            predicate_str: Raw predicate string (may include parentheses and types).
+
+        Returns:
+            (predicate_name, parameter_defs, normalized_display)
+        """
+        if not predicate_str:
+            return None, [], ""
+
+        tokens = re.findall(r"[^\s()]+", predicate_str)
+        if not tokens:
+            return None, [], ""
+
+        predicate_name = sanitize_pddl_name(tokens[0])
+        if not predicate_name:
+            return None, [], ""
+
+        variable_tokens = [tok for tok in tokens[1:] if tok.startswith("?")]
+        parameter_defs: List[Tuple[str, str]] = []
+        used_param_names: Set[str] = set()
+
+        for idx, var_token in enumerate(variable_tokens):
+            raw_var = var_token.lstrip("?") or f"param{idx+1}"
+            clean_name = sanitize_pddl_name(raw_var)
+            if not clean_name:
+                clean_name = f"param{idx+1}"
+
+            while clean_name in used_param_names:
+                clean_name = f"{clean_name}_{idx+1}"
+
+            used_param_names.add(clean_name)
+            parameter_defs.append((clean_name, "object"))
+
+        normalized_display = (
+            f"({predicate_name} {' '.join(variable_tokens)})"
+            if variable_tokens
+            else predicate_name
+        )
+
+        return predicate_name, parameter_defs, normalized_display
 
     def _extract_predicates_from_formula(self, formula: str) -> Set[str]:
         """
@@ -645,92 +713,17 @@ class PDDLDomainMaintainer:
             print("   This usually means the LLM failed to extract goals from the task description")
             return
 
-        # Add goal predicates from analysis
+        # Preserve goal predicates exactly as returned by the LLM
         goals_added = 0
         for goal_pred in self.task_analysis.goal_predicates:
             try:
-                # Parse goal predicate format
-                # Supports:
-                #   - PDDL S-expression: "(is-open bottle_1)" or "(not (is-open bottle_1))"
-                #   - Function call format: "is-open(bottle_1, arg2)"
-                negated = False
-                pred_str = goal_pred.strip()
-
-                # Handle negation for both formats
-                if pred_str.startswith("(not "):
-                    negated = True
-                    # Extract inner predicate: "(not (pred args))" -> "(pred args)"
-                    pred_str = pred_str[5:].strip()  # Remove "(not "
-                    if pred_str.endswith(")"):
-                        pred_str = pred_str[:-1]  # Remove trailing )
-                elif pred_str.startswith("not(") or pred_str.startswith("not "):
-                    negated = True
-                    if "(" in pred_str:
-                        pred_str = pred_str[pred_str.index("(") + 1:]
-                        if pred_str.endswith(")"):
-                            pred_str = pred_str[:-1]
-
-                # Detect format: PDDL S-expression starts with "(", function call doesn't
-                if pred_str.startswith("("):
-                    # PDDL S-expression format: "(predicate arg1 arg2)"
-                    pred_str = pred_str[1:]  # Remove leading (
-                    if pred_str.endswith(")"):
-                        pred_str = pred_str[:-1]  # Remove trailing )
-
-                    # Split by whitespace
-                    parts = pred_str.split()
-                    if not parts:
-                        continue
-
-                    pred_name = parts[0]
-                    args = parts[1:] if len(parts) > 1 else []
-
-                elif "(" in pred_str and ")" in pred_str:
-                    # Function call format: "predicate(arg1, arg2)"
-                    pred_name = pred_str[:pred_str.index("(")]
-                    args_str = pred_str[pred_str.index("(") + 1:pred_str.index(")")]
-                    args = [arg.strip() for arg in args_str.split(",") if arg.strip()]
-
-                else:
-                    # Simple predicate with no args: "predicate"
-                    pred_name = pred_str
-                    args = []
-
-                # Map generic object types to actual object instances
-                # e.g., "red_mug" -> "red_mug_1" if red_mug_1 exists
-                mapped_args = []
-                for arg in args:
-                    # Check if this is an exact object instance
-                    if arg in self.pddl.object_instances:
-                        mapped_args.append(arg)
-                    else:
-                        # Try to find an instance with this type
-                        found = False
-                        for obj_name, obj in self.pddl.object_instances.items():
-                            # Match if object type contains arg or vice versa
-                            if arg in obj.object_type or obj.object_type in arg:
-                                mapped_args.append(obj_name)
-                                found = True
-                                break
-                        if not found:
-                            # Use original arg (will fail validation later)
-                            mapped_args.append(arg)
-
-                # Only add if predicate is defined
-                if pred_name in self.pddl.predicates:
-                    await self.pddl.add_goal_literal_async(
-                        pred_name,
-                        mapped_args,
-                        negated=negated
-                    )
-                    goals_added += 1
-                    print(f"    ✓ Added goal: {pred_name}({', '.join(mapped_args)}) {'(negated)' if negated else ''}")
-                else:
-                    print(f"    ⚠ Skipped goal '{goal_pred}': predicate '{pred_name}' not defined")
+                await self.pddl.add_goal_formula_async(goal_pred)
+                goals_added += 1
+                print(f"    ✓ Added goal formula: {goal_pred}")
             except Exception as e:
-                print(f"    ⚠ Failed to parse goal predicate '{goal_pred}': {e}")
+                print(f"    ⚠ Failed to add goal predicate '{goal_pred}': {e}")
 
-        print(f"  ✓ Added {goals_added} goal literals")
+        print(f"  ✓ Added {goals_added} goal formula(s)")
 
     async def refine_domain_from_error(
         self,

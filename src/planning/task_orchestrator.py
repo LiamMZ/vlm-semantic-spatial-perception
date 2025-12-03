@@ -1534,6 +1534,9 @@ class TaskOrchestrator:
         # Save PDDL files
         pddl_dir = path.parent / "pddl"
         if self.pddl:
+            # Ensure goals are populated before writing files
+            if self.maintainer and self.task_analysis:
+                await self.maintainer.set_goal_from_task_analysis()
             await self.pddl.generate_files_async(str(pddl_dir))
 
         # Save orchestrator state

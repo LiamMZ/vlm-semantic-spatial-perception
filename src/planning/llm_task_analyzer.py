@@ -189,6 +189,14 @@ class LLMTaskAnalyzer:
         try:
             data = json.loads(response_text)
 
+            # Accept both legacy and current action keys to stay compatible with prompt schema
+            actions = (
+                data.get("required_actions")
+                or data.get("relevant_actions")
+                or data.get("actions")
+                or []
+            )
+
             return TaskAnalysis(
                 action_sequence=data.get("action_sequence", []),
                 goal_predicates=data.get("goal_predicates", []),
@@ -199,7 +207,7 @@ class LLMTaskAnalyzer:
                 initial_predicates=data.get("initial_predicates", []),
                 relevant_predicates=data.get("relevant_predicates", []),
                 relevant_types=data.get("relevant_types", []),
-                required_actions=data.get("required_actions", []),
+                required_actions=actions,
                 complexity=data.get("complexity", "medium"),
                 estimated_steps=data.get("estimated_steps", 1)
             )

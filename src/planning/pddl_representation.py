@@ -100,6 +100,7 @@ class PDDLRepresentation:
         self.object_instances: Dict[str, ObjectInstance] = {}
         self.initial_literals: Set[Literal] = set()
         self.goal_literals: Set[Literal] = set()
+        self.goal_formulas: List[str] = []
 
         # Metadata
         self.task_description: Optional[str] = None
@@ -255,7 +256,19 @@ class PDDLRepresentation:
         """Clear goal state (async, thread-safe)."""
         async with self._acquire_lock():
             self.goal_literals.clear()
+            self.goal_formulas.clear()
             self.last_modified = time.time()
+
+    async def add_goal_formula_async(self, formula: str) -> None:
+        """
+        Add a raw goal formula (async, thread-safe).
+
+        This preserves quantified/boolean goal expressions as authored by the LLM.
+        """
+        async with self._acquire_lock():
+            if formula and formula not in self.goal_formulas:
+                self.goal_formulas.append(formula)
+                self.last_modified = time.time()
 
     async def generate_domain_pddl_async(self) -> str:
         """Generate PDDL domain file content (async, thread-safe)."""
@@ -649,15 +662,21 @@ class PDDLRepresentation:
 
         # Goal
         lines.append("  (:goal")
-        if not self.goal_literals:
+        goal_entries: List[str] = []
+
+        goal_entries.extend(self.goal_formulas)
+
+        for literal in sorted(self.goal_literals, key=lambda x: (x.predicate, tuple(x.arguments))):
+            goal_entries.append(literal.to_pddl())
+
+        if not goal_entries:
             lines.append("    (and)")
-        elif len(self.goal_literals) == 1:
-            literal = list(self.goal_literals)[0]
-            lines.append(f"    {literal.to_pddl()}")
+        elif len(goal_entries) == 1:
+            lines.append(f"    {goal_entries[0]}")
         else:
             lines.append("    (and")
-            for literal in sorted(self.goal_literals, key=lambda x: (x.predicate, tuple(x.arguments))):
-                lines.append(f"      {literal.to_pddl()}")
+            for entry in goal_entries:
+                lines.append(f"      {entry}")
             lines.append("    )")
         lines.append("  )")
 

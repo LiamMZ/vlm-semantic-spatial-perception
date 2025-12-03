@@ -8,7 +8,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 ## Components
 - `pddl_representation.py` – thread-safe domain/problem model and PDDL writers.
 - `pddl_domain_maintainer.py` – seeds/updates the domain from tasks and observations; LLM refinement instructions live in `config/pddl_domain_maintainer_prompts.yaml`.
-- `llm_task_analyzer.py` – builds prompts from `config/llm_task_analyzer_prompts.yaml`, injecting only the dynamic fields (task text, robot description, JSON summaries of observed objects/relationships) while keeping the rest of the instructions fixed to ensure consistent formatting. The config now exposes a single `analysis_prompt`; the "initial" analyzer pass just renders that template with placeholder text describing the lack of observations, so there is one authoritative prompt definition. Edit the YAML’s `robot_description` field (or set it to `null`) to control whether that section appears in prompts.
+- `llm_task_analyzer.py` – builds prompts from `config/llm_task_analyzer_prompts.yaml`, injecting only the dynamic fields (task text, robot description, JSON summaries of observed objects/relationships) while keeping the rest of the instructions fixed to ensure consistent formatting. The config now exposes a single `analysis_prompt`; the "initial" analyzer pass just renders that template with placeholder text describing the lack of observations, so there is one authoritative prompt definition. Edit the YAML’s `robot_description` field (or set it to `null`) to control whether that section appears in prompts. **Predicates now must be emitted without type annotations** (e.g. `(on ?item ?surface)` instead of `(on ?item - object ?surface - object)`); the maintainer subsequently normalizes those strings and infers arity when constructing the domain. The analyzer accepts both `required_actions` and `relevant_actions` keys from Gemini responses so LLM-suggested action schemas always flow into the domain.
 - `task_state_monitor.py` – gates exploration vs. plan readiness (`TaskState.PLAN_AND_EXECUTE`).
 - `task_orchestrator.py` – orchestrates perception, PDDL maintenance, snapshots, and world-state export.
 - `primitives/skill_decomposer.py` – LLM-backed decomposition of symbolic actions to primitives; attaches latest snapshot bytes and registry slices.
@@ -79,4 +79,5 @@ Add `--dry-run` to skip robot execution; the script expects `registry.json`, `st
 ## Useful Commands
 - Interactive orchestration (representation only): `uv run python examples/orchestrator_demo.py`
 - PDDL-only demos: `uv run python examples/pddl_representation_demo.py`, `uv run python examples/task_monitoring_demo.py`
+- Replay cached snapshots with no camera: `uv run python scripts/replay_cached_demo.py --source outputs/demos/<run>`
 - Tests (LLM-gated suites skip without key): `uv run python -m pytest -q`
