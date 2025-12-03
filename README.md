@@ -22,6 +22,10 @@ Ad-hoc world model generation in PDDL, powered by LLM (Gemini Robotics-ER), whic
   `uv run python examples/orchestrator_demo.py`  
   Drives task analysis, continuous detection, snapshots, and PDDL generation via a Textual TUI; does not command the robot.
 
+- **GenAI log viewer (browse request/response traces)**  
+  `uv run python examples/genai_viewer.py outputs/demos/<run>/genai_logs`  
+  Navigates per-call folders produced by the global GenAI logger, showing metadata, prompts, responses, and media file paths (arrow keys to cycle).
+
 - **Cached plan replay (from test artifacts)**  
   After tests, a translated plan is available at `tests/artifacts/llm_pick/pick_plan_llm_translated.json` with its world assets in `tests/assets/continuous_pick_fixture`. Replay or execute:
   ```bash
@@ -31,6 +35,10 @@ Ad-hoc world model generation in PDDL, powered by LLM (Gemini Robotics-ER), whic
     --robot-ip 192.168.1.224
   ```
   Add `--dry-run` to translate/validate without touching hardware.
+
+- **Replay a recorded demo (same task, cached snapshots)**  
+  `uv run python scripts/replay_cached_demo.py --source outputs/demos/<run>`  
+  Streams the saved frames instead of a live RealSense feed, replays the original task description, and writes fresh state + GenAI logs to a new timestamped folder under `outputs/demos/`.
 
 - **Tests**  
   `uv run -m pytest -q` (LLM-gated suites skip without an API key). Artifacts land under `tests/artifacts/`.
@@ -54,7 +62,7 @@ Ad-hoc world model generation in PDDL, powered by LLM (Gemini Robotics-ER), whic
 │   ├── kinematics/           # CuRobo/XArm primitives
 │   └── utils/                # Shared utilities
 ├── examples/                 # Demos (orchestrator TUI, PDDL samples)
-├── scripts/                  # Utilities (e.g., run_cached_plan.py)
+├── scripts/                  # Utilities (e.g., run_cached_plan.py, replay_cached_demo.py)
 └── tests/                    # Regression suites + cached translation/LLM artifacts
     ├── assets/               # World fixtures used by cached plans
     ├── artifacts/            # Test artifacts
