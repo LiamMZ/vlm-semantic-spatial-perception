@@ -123,16 +123,15 @@ async def main():
         {
             "object_id": "table_1",
             "object_type": "table",
-            "affordances": ["supportable"],
-            "pddl_state": {
-                "graspable": False,
-                "reachable": True,
-                "on": False
-            }
+            "affordances": ["supportable"]
         }
     ]
 
-    update_stats = await maintainer.update_from_observations(observed_objects_1)
+    predicates_1 = [
+        "reachable table_1"
+    ]
+
+    update_stats = await maintainer.update_from_observations(observed_objects_1, predicates=predicates_1)
     print(f"  → Added {update_stats['objects_added']} object(s)")
     print(f"  → New types: {update_stats['new_object_types']}")
     print(f"  → Goal objects found: {update_stats['goal_objects_found']}")
@@ -156,27 +155,25 @@ async def main():
         {
             "object_id": "red_mug_1",
             "object_type": "mug",
-            "affordances": ["graspable", "containable"],
-            "pddl_state": {
-                "graspable": True,
-                "reachable": True,
-                "on": True,
-                "holding": False
-            }
+            "affordances": ["graspable", "containable"]
         },
         {
             "object_id": "shelf_1",
             "object_type": "shelf",
-            "affordances": ["supportable"],
-            "pddl_state": {
-                "graspable": False,
-                "reachable": True
-            }
+            "affordances": ["supportable"]
         }
     ]
 
+    predicates_2 = [
+        "graspable red_mug_1",
+        "reachable red_mug_1",
+        "on red_mug_1 table_1",
+        "reachable shelf_1"
+    ]
+
     update_stats = await maintainer.update_from_observations(
-        observed_objects_1 + observed_objects_2
+        observed_objects_1 + observed_objects_2,
+        predicates=predicates_1 + predicates_2
     )
 
     print(f"  → Total objects: {update_stats['objects_added']}")

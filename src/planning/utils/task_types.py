@@ -25,6 +25,7 @@ class TaskAnalysis:
 
     # Scene-specific predicates
     initial_predicates: List[str]  # Current state predicates
+    global_predicates: List[str]  # Global/robot state predicates (not object-related)
     relevant_predicates: List[str]  # Task-relevant predicate types
     relevant_types: List[str]  # Task-relevant PDDL types
     # Action definitions

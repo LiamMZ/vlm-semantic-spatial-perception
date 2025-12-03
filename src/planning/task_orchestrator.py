@@ -202,6 +202,7 @@ class TaskOrchestrator:
             self.pddl,
             api_key=self.config.api_key,
             model_name=self.config.model_name,
+            task_analyzer_prompts_path=self.config.task_analyzer_prompts_path,
         )
 
         self.monitor = TaskStateMonitor(
@@ -391,7 +392,8 @@ class TaskOrchestrator:
         if all_objects:
             self.logger.info("  • Re-processing %s existing objects with new task...", len(all_objects))
             objects_dict = self._convert_objects_to_dict(all_objects)
-            await self.maintainer.update_from_observations(objects_dict)
+            predicates = self.tracker.registry.get_all_predicates()
+            await self.maintainer.update_from_observations(objects_dict, predicates=predicates)
 
         # Resume detection if it was running
         if was_detecting:
@@ -553,14 +555,11 @@ class TaskOrchestrator:
                 "object_id": obj.object_id,
                 "object_type": obj.object_type,
                 "affordances": list(obj.affordances),
-                "pddl_state": obj.pddl_state,
                 "interaction_points": {
                     affordance: {
                         "snapshot_id": None,  # filled by snapshot_id at write-time
                         "position_2d": point.position_2d,
                         "position_3d": point.position_3d.tolist() if point.position_3d is not None else None,
-                        "confidence": point.confidence,
-                        "reasoning": point.reasoning,
                         "alternative_points": point.alternative_points,
                     }
                     for affordance, point in obj.interaction_points.items()
@@ -571,6 +570,7 @@ class TaskOrchestrator:
             })
         payload = {
             "stamp": time.time(),
+            "predicates": self.tracker.registry.get_all_predicates(),
             "objects": det_objects
         }
         return payload, object_ids
@@ -850,7 +850,8 @@ class TaskOrchestrator:
         objects_dict = self._convert_objects_to_dict(all_objects)
 
         # Update PDDL domain
-        update_stats = await self.maintainer.update_from_observations(objects_dict)
+        predicates = self.tracker.registry.get_all_predicates()
+        update_stats = await self.maintainer.update_from_observations(objects_dict, predicates=predicates)
 
         # Check task state
         decision = await self.monitor.determine_state()
@@ -898,7 +899,6 @@ class TaskOrchestrator:
                 "object_id": obj.object_id,
                 "object_type": obj.object_type,
                 "affordances": list(obj.affordances),
-                "pddl_state": obj.pddl_state,
                 "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None
             }
             for obj in objects
@@ -1068,7 +1068,8 @@ class TaskOrchestrator:
         self.logger.info("%s", "=" * 70)
 
         # Sync objects from tracker to PDDL representation
-        if self.tracker and hasattr(self.tracker, 'tracker'):
+        # Ensure the tracker has a registry before trying to read objects
+        if self.tracker and getattr(self.tracker, 'registry', None) is not None:
             self.logger.info("  • Syncing objects from tracker to PDDL...")
             registry = self.tracker.registry
             all_objects = registry.get_all_objects()
@@ -1093,6 +1094,19 @@ class TaskOrchestrator:
                         obj.object_type
                     )
                     self.logger.info(f"      Added: {obj.object_id} ({obj.object_type})")
+
+            # Add global predicates to initial state
+            if self.maintainer:
+                global_predicates = self.maintainer.get_global_predicates()
+                if global_predicates:
+                    self.logger.info(f"  • Adding {len(global_predicates)} global predicates to initial state...")
+                    for pred_name in global_predicates:
+                        # Global predicates typically have no parameters
+                        try:
+                            await self.pddl.add_initial_literal_async(pred_name, [], negated=False)
+                            self.logger.info(f"      Added global predicate: {pred_name}")
+                        except ValueError as e:
+                            self.logger.warning(f"      Failed to add global predicate '{pred_name}': {e}")
 
         # Set goals if requested
         if set_goals:
@@ -1134,8 +1148,8 @@ class TaskOrchestrator:
         timeout: Optional[float] = None,
         generate_files: bool = True,
         output_dir: Optional[Path] = None,
-        wait_for_objects: bool = False,
-        max_wait_seconds: float = 30.0
+        wait_for_objects: bool = True,
+        max_wait_seconds: float = 60.0
     ) -> SolverResult:
         """
         Generate PDDL files and solve for a plan.
@@ -1328,6 +1342,8 @@ class TaskOrchestrator:
                 return False
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"  ⚠ Refinement failed: {e}")
             self._set_state(OrchestratorState.READY_FOR_PLANNING)
             return False
@@ -1338,7 +1354,7 @@ class TaskOrchestrator:
         timeout: Optional[float] = None,
         output_dir: Optional[Path] = None,
         wait_for_objects: bool = True,
-        max_wait_seconds: float = 30.0
+        max_wait_seconds: float = 60.0
     ) -> SolverResult:
         """
         Solve for a plan with automatic domain refinement on failures.
@@ -1434,6 +1450,12 @@ class TaskOrchestrator:
             "precondition",
             "effect",
             "parameter",
+            # Object definition errors
+            "object",
+            "referenced",
+            "not defined",
+            "but not defined",
+            "undefined object",
             # Planning failures that might indicate domain issues
             "no plan found",
             "no solution",
@@ -1484,8 +1506,6 @@ class TaskOrchestrator:
                     "object_type": obj.object_type,
                     "object_id": obj.object_id,
                     "affordances": list(obj.affordances),
-                    "properties": obj.properties,
-                    "confidence": obj.confidence,
                     "timestamp": obj.timestamp,
                     # Snapshot references - this is the key addition
                     "observations": obj_snapshots,
@@ -1537,7 +1557,14 @@ class TaskOrchestrator:
             # Ensure goals are populated before writing files
             if self.maintainer and self.task_analysis:
                 await self.maintainer.set_goal_from_task_analysis()
-            await self.pddl.generate_files_async(str(pddl_dir))
+
+            # Generate files and capture actual paths to avoid mismatches
+            try:
+                pddl_paths = await self.pddl.generate_files_async(str(pddl_dir))
+            except Exception:
+                # Fall back to attempting generation without capturing paths
+                await self.pddl.generate_files_async(str(pddl_dir))
+                pddl_paths = None
 
         # Save orchestrator state
         state_data = {
@@ -1555,8 +1582,8 @@ class TaskOrchestrator:
             } if self.task_analysis else None,
             "files": {
                 "registry": str(registry_path),
-                "domain": str(pddl_dir / f"{self.pddl.domain_name}.pddl") if self.pddl else None,
-                "problem": str(pddl_dir / f"{self.pddl.problem_name}.pddl") if self.pddl else None,
+                "domain": (pddl_paths.get("domain_path") if pddl_paths else str(pddl_dir / f"{self.pddl.domain_name}_domain.pddl")) if self.pddl else None,
+                "problem": (pddl_paths.get("problem_path") if pddl_paths else str(pddl_dir / f"{self.pddl.domain_name}_problem.pddl")) if self.pddl else None,
                 "perception_pool_index": str(self._get_pool_index_path()) if (self._get_pool_index_path().exists()) else None
             }
         }
@@ -1612,7 +1639,8 @@ class TaskOrchestrator:
             if all_objects:
                 self.logger.info("  • Re-processing %s objects...", len(all_objects))
                 objects_dict = self._convert_objects_to_dict(all_objects)
-                await self.maintainer.update_from_observations(objects_dict)
+                predicates = self.tracker.registry.get_all_predicates()
+                await self.maintainer.update_from_observations(objects_dict, predicates=predicates)
 
         # Load perception pool index into memory if present
         files = state_data.get("files", {})

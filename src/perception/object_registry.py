@@ -7,7 +7,7 @@ with thread safety for concurrent access.
 
 import time
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,8 +19,6 @@ class InteractionPoint:
 
     position_2d: List[int]  # [y, x] in 0-1000 normalized scale
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters (if depth available)
-    confidence: float = 0.0
-    reasoning: str = ""
     alternative_points: List[Dict[str, any]] = field(default_factory=list)
 
 
@@ -37,8 +35,6 @@ class DetectedObject:
         position_2d: Center position [y, x] in 0-1000 scale
         position_3d: Center position [x, y, z] in meters
         bounding_box_2d: Optional 2D bounding box
-        properties: Additional properties (color, size, etc.)
-        pddl_state: Dict mapping PDDL predicate names to boolean values (e.g., {"clean": True, "dirty": False})
     """
 
     object_type: str
@@ -48,9 +44,6 @@ class DetectedObject:
     position_2d: Optional[List[int]] = None  # [y, x] in 0-1000 scale
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters
     bounding_box_2d: Optional[List[int]] = None  # [y1, x1, y2, x2]
-    properties: Dict[str, any] = field(default_factory=dict)
-    pddl_state: Dict[str, bool] = field(default_factory=dict)  # PDDL predicate states
-    confidence: float = 1.0
     timestamp: float = field(default_factory=time.time)
 
 
@@ -71,6 +64,7 @@ class DetectedObjectRegistry:
     def __init__(self):
         """Initialize empty registry with thread safety."""
         self._objects: Dict[str, DetectedObject] = {}
+        self._predicates: Set[str] = set()  # Global predicate set for all objects
         self._lock = threading.RLock()  # Reentrant lock for nested access
 
     def add_object(self, obj: DetectedObject) -> None:
@@ -219,6 +213,51 @@ class DetectedObjectRegistry:
             # Add number suffix
             return f"{base_id}_{count}"
 
+    def add_predicate(self, predicate: str) -> None:
+        """
+        Add a predicate to the global registry (thread-safe).
+
+        Args:
+            predicate: Predicate string (e.g., "on bottle_1 table")
+        """
+        with self._lock:
+            self._predicates.add(predicate)
+
+    def add_predicates(self, predicates: List[str]) -> None:
+        """
+        Add multiple predicates to the global registry (thread-safe).
+
+        Args:
+            predicates: List of predicate strings
+        """
+        with self._lock:
+            self._predicates.update(predicates)
+
+    def remove_predicate(self, predicate: str) -> None:
+        """
+        Remove a predicate from the global registry (thread-safe).
+
+        Args:
+            predicate: Predicate string to remove
+        """
+        with self._lock:
+            self._predicates.discard(predicate)
+
+    def get_all_predicates(self) -> List[str]:
+        """
+        Get all predicates in the registry (thread-safe).
+
+        Returns:
+            Sorted list of all predicates
+        """
+        with self._lock:
+            return sorted(list(self._predicates))
+
+    def clear_predicates(self) -> None:
+        """Clear all predicates from the registry (thread-safe)."""
+        with self._lock:
+            self._predicates.clear()
+
     def to_dict(self) -> dict:
         """
         Convert registry to dictionary format (thread-safe).
@@ -236,8 +275,6 @@ class DetectedObjectRegistry:
                     "object_type": obj.object_type,
                     "object_id": obj.object_id,
                     "affordances": list(obj.affordances),
-                    "properties": obj.properties,
-                    "confidence": obj.confidence,
                     "timestamp": obj.timestamp,
                 }
 
@@ -249,16 +286,13 @@ class DetectedObjectRegistry:
                 if obj.bounding_box_2d:
                     obj_dict["bounding_box_2d"] = obj.bounding_box_2d
 
-                # Add PDDL state if available
-                if obj.pddl_state:
-                    obj_dict["pddl_state"] = obj.pddl_state
-
                 objects_data.append(obj_dict)
 
-        # Return dictionary
+        # Return dictionary with predicates at top level
         return {
             "num_objects": len(objects_data),
             "snapshot_timestamp": datetime.now().isoformat(),
+            "predicates": self.get_all_predicates(),
             "objects": objects_data
         }
 
@@ -292,8 +326,6 @@ class DetectedObjectRegistry:
                     "object_type": obj.object_type,
                     "object_id": obj.object_id,
                     "affordances": list(obj.affordances),
-                    "properties": obj.properties,
-                    "confidence": obj.confidence,
                     "timestamp": obj.timestamp,
                 }
 
@@ -345,8 +377,6 @@ class DetectedObjectRegistry:
                     position_2d=None,
                     position_3d=None,
                     bounding_box_2d=None,
-                    properties=obj_dict.get("properties", {}),
-                    confidence=obj_dict.get("confidence", 1.0),
                     timestamp=obj_dict.get("timestamp", time.time())
                 )
 

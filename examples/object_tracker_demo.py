@@ -164,7 +164,6 @@ def print_detection_results(objects: list):
 
     for i, obj in enumerate(objects, 1):
         print(f"\n{i}. {obj.object_id} ({obj.object_type})")
-        print(f"   Confidence: {obj.confidence:.2f}")
 
         # Position
         if obj.position_2d:
@@ -172,12 +171,6 @@ def print_detection_results(objects: list):
         if obj.position_3d is not None:
             x, y, z = obj.position_3d
             print(f"   Position 3D: [{x:.3f}, {y:.3f}, {z:.3f}] m")
-
-        # Properties
-        if obj.properties:
-            print(f"   Properties:")
-            for key, value in obj.properties.items():
-                print(f"      • {key}: {value}")
 
         # Affordances
         print(f"   Affordances ({len(obj.affordances)}):")
@@ -187,9 +180,7 @@ def print_detection_results(objects: list):
             # Show interaction point if available
             if affordance in obj.interaction_points:
                 point = obj.interaction_points[affordance]
-                print(f" → {point.position_2d} (conf: {point.confidence:.2f})")
-                if point.reasoning:
-                    print(f"         Reasoning: {point.reasoning}")
+                print(f" → {point.position_2d}")
             else:
                 print()
 

@@ -1,0 +1,136 @@
+# Optional default robot description injected into prompts (set to null to omit)
+robot_description: "The robot is a 7-DOF robot arm, with a two-finger rigid gripper as end effector. The end effector cannot grasp objects <1cm or >15cm. The robot has a Realsense RGBD camera mounted at the end effector."
+analysis_prompt: |
+  Your goal is to analyze a task space and formulate a symbolic world representation in
+  PDDL that a robotics system can use to execute the task.
+
+  You are given:
+
+    Task description:
+    <<TASK>>
+
+    Robot description:
+    <<ROBOT_DESCRIPTION>>
+
+    Current observed objects:
+    <<OBJECTS_JSON>>
+
+    Current observed relationships:
+    <<RELATIONSHIPS_JSON>>
+
+  You must respond with **valid JSON only**, following this schema:
+
+  {
+    "relevant_predicates": [
+      "<predicate_signature_1>",
+      "<predicate_signature_2>",
+      "..."
+    ],
+    "relevant_actions": [
+      {
+        "name": "<action_name_1>",
+        "parameters": ["<typed_parameter_1>", "<typed_parameter_2>", "..."],
+        "precondition": "<pddl_precondition_formula>",
+        "effect": "<pddl_effect_formula>"
+      },
+      {
+        "name": "<action_name_2>",
+        "parameters": ["<typed_parameter_1>", "..."],
+        "precondition": "<pddl_precondition_formula>",
+        "effect": "<pddl_effect_formula>"
+      }
+    ],
+    "goal_predicates": [
+      "<pddl_goal_condition_1>",
+      "<pddl_goal_condition_2>",
+      "..."
+    ]
+  }
+
+  Response guidelines:
+
+  1. **Purpose.**  
+    Your goal is *not* to complete the task, but to propose a useful, general set of
+    symbolic primitives (predicates, actions, and goal conditions) that a downstream
+    planner can use to build a world model and operate on it.
+
+  2. **Relevant predicates.**  
+    - `relevant_predicates` should be a detailed and exhaustive list of predicates that
+      might be useful for representing and solving the task.  
+    - Each predicate must be written as a PDDL-style signature string, including parameter
+      lists and types, e.g.:  
+        - `(clear ?x - object)`  
+        - `(on ?x - object ?y - object)`  
+        - `(is_cup ?x - object)`  
+    - Include both:
+      - **Relational predicates** (e.g. spatial, containment, support, reachability,
+        state—such as `(on ?x ?y)`, `(inside ?x ?y)`, `(open ?x)`, `(plugged_in ?x)`), and  
+      - **Semantic / classification predicates** that label objects by their role or type
+        (e.g. `(is_cup ?x)`, `(is_table ?x)`, `(is_container ?x)`, `(is_button ?x)`), which
+        will later be evaluated from perception and object attributes.
+      Add all semantic predicates that are relevant to the task, world, or goal description
+      so that downstream planners can bind those categories during grounding.
+
+  3. **Relevant actions.**  
+    - `relevant_actions` is a list of actions the robot is in principle capable of,
+      given the robot description (e.g. `pick`, `place`, `move_to`, `open`, `close`,
+      `press_button`, `pour`, `plug_in`, etc.).  
+    - For each action:
+      - `name` is a short PDDL-style action name (no spaces).  
+      - `parameters` is a list of typed variables, each given as a string like
+        `"?obj - object"` or `"?src - object"`.  
+      - `precondition` is a single PDDL formula string (often an `(and ...)` expression)
+        using only predicates from `relevant_predicates`.  
+      - `effect` is a single PDDL formula string (again typically an `(and ...)`
+        expression) specifying both positive and negative effects, using only predicates
+        from `relevant_predicates`.  
+    - If you introduce a predicate in any action’s precondition or effect that is not yet
+      in `relevant_predicates`, you **must** add its full signature to
+      `relevant_predicates`.
+
+  4. **Goal predicates.**  
+    - `goal_predicates` should describe the intended task outcome as *general,
+      quantificational conditions over the world*, **not** as facts about specific
+      named objects.  
+    - Express goals in terms of:
+      - Semantic predicates that classify objects (e.g. `is_container`, `is_tool`,
+        `is_target_object`), and  
+      - Relational predicates that describe how these objects should be arranged or
+        configured (e.g. `inside`, `on`, `connected`, `activated`).  
+    - Each element of `goal_predicates` should be a PDDL condition string suitable for a
+      `:goal` field. You may use logical connectives (`and`, `or`, `not`) and quantifiers
+      (`exists`, `forall`) when needed.
+
+    For example, instead of directly naming concrete constants like:
+      “the water bottle is in the paper bag”,
+
+    you should express the goal as a quantificational condition over abstract objects,
+    such as:
+
+      In logical form:
+        “There exist objects w and b such that
+          is_water_bottle(w) ∧ is_paper_bag(b) ∧ inside(w, b).”
+
+      In PDDL-style syntax (goal condition only):
+        (exists (?w - object ?b - object)
+          (and (is_water_bottle ?w)
+                (is_paper_bag ?b)
+                (inside ?w ?b)))
+
+    This way, the goal does **not** refer to any particular object names that may only be
+    introduced later in the problem file. It is written purely in terms of semantic and
+    relational predicates over abstract objects.
+
+    For broader household instructions (e.g., “clear the counter”), write conditions that 
+    universally quantify over semantic categories:
+
+      Logical sketch:
+        “For every movable object m on a counter c, ensure the counter ends up clear:
+          is_kitchen_counter(c) ∧ (on_surface(m, c) → relocated(m)).”
+
+    These formulations stay agnostic to specific object in the world, while still encoding the
+    semantic intent of the task through predicate structure. 
+
+  5. **Output format.**  
+    - Return **only** the JSON object described above.  
+    - Do **not** include comments, explanations, or any text outside the JSON.
