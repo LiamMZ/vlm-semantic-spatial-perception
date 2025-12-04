@@ -67,3 +67,6 @@ calibration/*.json
 
 # Test artifacts
 tests/artifacts/
+
+# Demo
+demos/

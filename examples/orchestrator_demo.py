@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 
 from src.planning import TaskOrchestrator, OrchestratorState, TaskState
 from src.utils.logging_utils import CallbackLogHandler
+from src.utils.genai_logging import configure_genai_logging
 # Import config from config directory
 config_path = Path(__file__).parent.parent / "config"
 if str(config_path) not in sys.path:
@@ -506,6 +507,10 @@ class OrchestratorDemoApp(App):
             # Create timestamp-based output directory
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = Path(f"outputs/demos/{timestamp}")
+
+            # Route GenAI request/response logs alongside the world outputs
+            genai_log_dir = output_dir / "genai_logs"
+            genai_log_path = configure_genai_logging(genai_log_dir)
             
             # Configure orchestrator with callbacks for demo
             config = OrchestratorConfig(
@@ -532,6 +537,8 @@ class OrchestratorDemoApp(App):
                 self._write_log(f"✓ Outputs log: {self.outputs_log_file}")
             if self.debug_log_file:
                 self._write_log(f"✓ Debug log: {self.debug_log_file}")
+            if genai_log_path:
+                self._write_log(f"✓ GenAI logs: {genai_log_path}")
             
             # Initialize orchestrator with logging routed to the UI
             self._write_log("⚙ Initializing components...")
@@ -680,18 +687,25 @@ class OrchestratorDemoApp(App):
             if all_objects:
                 self._write_log("")
                 self._write_log(f"Objects ({len(all_objects)}):")
+
+                # Get all predicates from registry
+                all_predicates = self.orchestrator.tracker.registry.get_all_predicates()
+                # Group predicates by object
+                predicates_by_object = {}
+                for pred_str in all_predicates:
+                    parts = pred_str.split()
+                    if len(parts) >= 2:
+                        obj_id = parts[1]
+                        if obj_id not in predicates_by_object:
+                            predicates_by_object[obj_id] = []
+                        predicates_by_object[obj_id].append(pred_str)
+
                 for obj in all_objects:
                     self._write_log(f"  • {obj.object_id} ({obj.object_type})")
-                    # Extract predicates from pddl_state
-                    if obj.pddl_state:
-                        predicates = []
-                        for key, value in obj.pddl_state.items():
-                            if isinstance(value, bool) and value:
-                                predicates.append(key)
-                            elif value and key not in ['object_id', 'object_type']:
-                                predicates.append(f"{key}={value}")
-                        if predicates:
-                            self._write_log(f"    Predicates: {', '.join(predicates)}")
+                    # Show predicates for this object
+                    obj_predicates = predicates_by_object.get(obj.object_id, [])
+                    if obj_predicates:
+                        self._write_log(f"    Predicates: {', '.join(obj_predicates)}")
                     if obj.affordances:
                         self._write_log(f"    Affordances: {', '.join(obj.affordances)}")
         

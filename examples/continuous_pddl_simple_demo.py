@@ -84,7 +84,7 @@ class SimpleContinuousDemo:
         print("👁️  Initializing object tracker...")
         self.tracker = ContinuousObjectTracker(
             api_key=api_key,
-            fast_mode=False,
+            fast_mode=True,
             update_interval=update_interval,
             on_detection_complete=self._on_detection
         )
@@ -116,8 +116,7 @@ class SimpleContinuousDemo:
                 {
                     "object_id": obj.object_id,
                     "object_type": obj.object_type,
-                    "affordances": list(obj.affordances),
-                    "pddl_state": obj.pddl_state
+                    "affordances": list(obj.affordances)
                 }
                 for obj in all_objects
             ]

@@ -55,13 +55,14 @@ analysis_prompt: |
     planner can use to build a world model and operate on it.
 
   2. **Relevant predicates.**  
-    - `relevant_predicates` should be a detailed and exhaustive list of predicates that
-      might be useful for representing and solving the task.  
-    - Each predicate must be written as a PDDL-style signature string, including parameter
-      lists and types, e.g.:  
-        - `(clear ?x - object)`  
-        - `(on ?x - object ?y - object)`  
-        - `(is_cup ?x - object)`  
+  - `relevant_predicates` should be a detailed and exhaustive list of predicates that
+    might be useful for representing and solving the task.  
+  - **Do _not_ include type annotations (`- object`) anywhere in the predicate string.**
+    Provide either a bare predicate name or an untyped PDDL-style pattern that uses only
+    positional variables, e.g.:  
+      - `clear`  
+      - `(on ?item ?surface)`  
+      - `(is_cup ?obj)`  
     - Include both:
       - **Relational predicates** (e.g. spatial, containment, support, reachability,
         state—such as `(on ?x ?y)`, `(inside ?x ?y)`, `(open ?x)`, `(plugged_in ?x)`), and  

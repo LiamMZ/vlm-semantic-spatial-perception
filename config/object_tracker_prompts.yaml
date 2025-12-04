@@ -34,9 +34,13 @@ detection:
       Instructions:
       - Return bounding boxes as a JSON array with labels. Never return masks or code fencing.
       - Include all objects you can identify, focusing on new objects that are not in context turn.
+      - IMPORTANT: Detect BOTH manipulable objects AND surfaces/support structures:
+        * Manipulable objects: bottles, cups, tools, containers, etc.
+        * Surfaces: tables, counters, shelves, trays, workbenches, floors, etc.
+        * Surfaces are critical for spatial predicates like "on" and "in"
       - If the current image is similar or identical to context image with no new objects, it is fine to not return new detections
       - If an object from previous images is visible, re-use the exact id as the "label"; otherwise create a descriptive, unique label (colors, size, position, distinctive traits).
-      - IMPORTANT: Object labels must use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle", "red_cup" not "red-cup"
+      - IMPORTANT: Object labels must use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle", "red_cup" not "red-cup", "wooden_table" not "wooden-table"
       - Box format: [ymin, xmin, ymax, xmax] normalized to 0-1000. All values MUST be integers.
       - Prefer tight boxes around each object instance. The bounding box may have moved compared to last capture, so make sure to update all bounding boxes and not just return the same bounding box for existing objects.
       - Output ONLY the JSON array in this format (no prose):
@@ -54,14 +58,14 @@ analysis:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates
     2. Affordances: What robot actions are possible?
        - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-    3. Properties: Color, size, material, state{pddl_section}
+    3. Properties: Color, size, material, state{predicates_section}
 
     Return JSON:
     {{
       "object_type": "cup",
       "position": [450, 320],
       "affordances": ["graspable", "pourable", "containable"],
-      "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{pddl_example},
+      "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{predicates_example},
       "confidence": 0.95
     }}
 
@@ -98,7 +102,7 @@ analysis:
     2. Affordances: What robot actions are possible with this object?
        - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
     3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
-    4. Properties: Color, size, material, state, etc.{pddl_section}
+    4. Properties: Color, size, material, state, etc.{predicates_section}
 
     Return in JSON format:
     {{
@@ -122,7 +126,7 @@ analysis:
         "material": "ceramic",
         "size": "medium",
         "state": "upright"
-      }}{pddl_example},
+      }}{predicates_example},
       "confidence": 0.95
     }}
 
@@ -151,22 +155,34 @@ interaction:
     
     Position is [y, x] in 0-1000 normalized coordinates.
 
-# PDDL Predicate Section Template
-pddl:
+# Predicates Section Template
+predicates:
   section_template: |
 
-    4. PDDL State Predicates: For each of these predicates, determine if it applies to this object:
-       - Predicates to check: {pddl_list}
-       - Return true/false for each predicate based on visual observation
-       - Examples:
-         * "clean" - object appears clean vs dirty
-         * "opened" - container/door is open vs closed
-         * "filled" - container has contents vs empty
-         * "wet" - object appears wet vs dry
+    5. PDDL Predicates: Identify all predicates that apply to this object.
+       - Object ID for predicates: {object_id}
+       - Available predicates (from PDDL domain): {pddl_list}
+       - ONLY use predicates from the list above
+
+       Other detected objects in the scene (for relational predicates):{other_objects_list}
+
+       For each applicable predicate from the list:
+       - Use format: "predicate_name {object_id}" for unary predicates
+       - Use format: "predicate_name {object_id} other_object" for binary predicates
+       - Use exact object_id provided above
+       - For relationships (on, in, near, etc.), the other_object MUST be from the detected objects list above
+       - CRITICAL: Do NOT invent object names - only use object IDs from the detected objects list
+       - If you need to reference a surface but it's not in the list, DO NOT add the predicate
+
+       Return a list of predicate strings that apply to this object.
 
   example_template: |
     ,
-      "pddl_state": {"clean": true, "opened": false, "filled": false}
+      "predicates": [
+        "graspable {object_id}",
+        "closed {object_id}",
+        "on {object_id} table"
+      ]
 
 # Task Context Templates
 task_context:

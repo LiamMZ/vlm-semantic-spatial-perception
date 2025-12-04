@@ -144,7 +144,7 @@ class LLMTaskAnalyzer:
                 config=config
             )
             response_text = response.text
-
+            print(f"************************************ {response_text}")
             elapsed = time.time() - start_time
             print(f"   → LLM analysis completed in {elapsed:.2f}s")
 
@@ -162,6 +162,73 @@ class LLMTaskAnalyzer:
             traceback.print_exc()
             return None
 
+    def _build_initial_analysis_prompt(self, task: str) -> str:
+        """
+        Build prompt for INITIAL task analysis (before any observations).
+
+        This prompt asks the LLM to predict what predicates, actions, and objects
+        will likely be needed for the task, even without seeing the environment yet.
+        """
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Consider the robot's capabilities when determining feasible actions and predicates.
+"""
+
+        return f"""Analyze this robotic task and predict required PDDL components.
+
+TASK: {task}
+{robot_context}
+
+Return JSON with:
+{{
+  "action_sequence": ["action1", "action2", ...],
+  "goal_predicates": ["predicate1(obj1, obj2)", ...],
+  "preconditions": ["predicate(obj)", ...],
+  "initial_predicates": ["expected_initial_states"],
+  "relevant_predicates": ["predicate_names"],
+  "goal_objects": ["object_id1", ...],
+  "global_predicates": ["global_predicate1", ...],
+  "tool_objects": ["tool_id", ...],
+  "obstacle_objects": ["obstacle_id", ...],
+  "initial_predicates": ["current_predicate(obj)", ...],
+  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
+  "relevant_types": ["type1", "type2", ...],
+  "required_actions": [
+    {{
+      "name": "pick",
+      "parameters": ["?obj - object"],
+      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "effect": "(and (holding ?obj) (not (empty-hand)))"
+    }}
+  ],
+}}
+
+IMPORTANT: Global Predicates
+- "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
+- These are predicates that should be TRUE INITIALLY before task execution
+- Examples:
+  - hand_is_empty (or empty-hand): Robot gripper has no object
+  - arm_at_home: Robot arm is at home position
+  - gripper_open: Gripper is in open state
+  - robot_ready: Robot system is initialized
+- Do NOT include object-related predicates here (those go in initial_predicates)
+- Global predicates typically have NO parameters or take robot as parameter
+
+IMPORTANT PDDL RULES:
+1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
+2. Preconditions and effects use ONLY variables - NO quoted strings or constants
+3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine)
+4. All predicates should be predicates applied to variables, not string constants
+5. GLOBAL Predicates should not be returned with parenthases
+
+Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
+
     def _build_analysis_prompt(
         self,
         task: str,
@@ -170,24 +237,100 @@ class LLMTaskAnalyzer:
     ) -> str:
         """Build prompt for task analysis with observations."""
 
+        object_list = [obj["object_id"] for obj in objects]
         objects_json = self._format_objects_json(objects)
         relationships_json = self._format_relationships_json(relationships)
 
-        template = self._get_prompt_template("analysis_prompt")
-        return render_prompt_template(
-            template,
-            {
-                "TASK": task,
-                "ROBOT_DESCRIPTION": self._format_robot_description(),
-                "OBJECTS_JSON": objects_json,
-                "RELATIONSHIPS_JSON": relationships_json,
-            },
-        )
+        relationship_list = "\n".join([f"- {rel}" for rel in relationships[:30]])
+
+        robot_context = ""
+        if self.robot_description:
+            robot_context = f"""
+ROBOT CAPABILITIES:
+{self.robot_description}
+
+Consider the robot's capabilities when determining feasible actions.
+"""
+
+        return f"""You are a robotic task planner. Analyze this task given the observed scene.
+
+TASK: {task}
+{robot_context}
+OBSERVED OBJECTS:
+{object_list if object_list else "- No objects detected yet"}
+
+OBSERVED RELATIONSHIPS:
+{relationship_list if relationship_list else "- No relationships observed yet"}
+
+Provide a JSON response with:
+{{
+  "action_sequence": ["action1", "action2", ...],
+  "goal_predicates": ["predicate1(obj1, obj2)", ...],
+  "preconditions": ["predicate(obj)", ...],
+  "initial_predicates": ["expected_initial_states"],
+  "relevant_predicates": ["predicate_names"],
+  "goal_objects": ["object_id1", ...],
+  "global_predicates": ["global_predicate1", ...],
+  "tool_objects": ["tool_id", ...],
+  "obstacle_objects": ["obstacle_id", ...],
+  "initial_predicates": ["current_predicate(obj)", ...],
+  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
+  "relevant_types": ["type1", "type2", ...],
+  "required_actions": [
+    {{
+      "name": "pick",
+      "parameters": ["?obj - object"],
+      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "effect": "(and (holding ?obj) (not (empty-hand)))"
+    }}
+  ],
+  "complexity": "simple|medium|complex",
+  "estimated_steps": 3
+}}
+
+CRITICAL PDDL FORMATTING RULES:
+1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
+2. Preconditions and effects can ONLY use:
+   - Variables (e.g., ?obj, ?container)
+   - Predicate names (e.g., graspable, empty-hand, has-water)
+3. NEVER use quoted strings or constants in preconditions/effects
+4. If referencing a component, make it a predicate:
+   - WRONG: (is-empty ?machine "water_reservoir")
+   - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
+5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
+6. GLOBAL Predicates should not be returned with parenthases
+
+
+IMPORTANT: Global Predicates
+    - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
+    - These are predicates that should be TRUE INITIALLY before task execution
+    - Examples:
+    - hand_is_empty (or empty-hand): Robot gripper has no object
+    - arm_at_home: Robot arm is at home position
+    - gripper_open: Gripper is in open state
+    - robot_ready: Robot system is initialized
+    - Do NOT include object-related predicates here (those go in initial_predicates)
+    - Global predicates typically have NO parameters or take robot as parameter
+
+Focus on:
+1. Use observed objects and their actual IDs
+2. Generate predicates matching observed affordances
+3. Create action sequence using observed objects
+4. Include all task-relevant predicates
+5. Ensure all PDDL actions follow proper syntax (no quoted strings!)"""
 
     def _parse_response(self, response_text: str) -> TaskAnalysis:
         """Parse LLM JSON response into TaskAnalysis."""
         try:
             data = json.loads(response_text)
+
+            # Accept both legacy and current action keys to stay compatible with prompt schema
+            actions = (
+                data.get("required_actions")
+                or data.get("relevant_actions")
+                or data.get("actions")
+                or []
+            )
 
             return TaskAnalysis(
                 action_sequence=data.get("action_sequence", []),
@@ -197,15 +340,35 @@ class LLMTaskAnalyzer:
                 tool_objects=data.get("tool_objects", []),
                 obstacle_objects=data.get("obstacle_objects", []),
                 initial_predicates=data.get("initial_predicates", []),
+                global_predicates=data.get("global_predicates", []),
                 relevant_predicates=data.get("relevant_predicates", []),
                 relevant_types=data.get("relevant_types", []),
-                required_actions=data.get("required_actions", []),
+                required_actions=actions,
                 complexity=data.get("complexity", "medium"),
                 estimated_steps=data.get("estimated_steps", 1)
             )
         except Exception as e:
             print(f"   ⚠ Failed to parse LLM response: {e}")
             raise
+
+    def _create_fallback_analysis(
+        self, task: str, objects: List[Dict]
+    ) -> TaskAnalysis:
+        """Create basic fallback analysis if LLM fails."""
+        return TaskAnalysis(
+            action_sequence=["navigate", "manipulate"],
+            goal_predicates=["completed(task)"],
+            preconditions=["ready(robot)"],
+            goal_objects=[obj.get("object_id", "") for obj in objects[:3]],
+            tool_objects=[],
+            obstacle_objects=[],
+            initial_predicates=[],
+            global_predicates=["hand_is_empty"],
+            relevant_predicates=["at", "holding", "clear"],
+            required_actions=[],
+            complexity="medium",
+            estimated_steps=2
+        )
 
     def _make_cache_key(self, task: str, objects: List[Dict]) -> str:
         """Create cache key from task and objects."""

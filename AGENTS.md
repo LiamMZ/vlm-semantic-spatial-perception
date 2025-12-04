@@ -7,6 +7,18 @@ Use this file as the index for all agent-related docs. Each component lives in i
 - `agents/operations/playbook.md` – implementation guardrails, stage-by-stage best practices, review checklist, and incident procedures.
 - `agents/journal/` – daily logs of experiments, bug hunts, outages, and scheduled maintenance notes. Each day gets its own `YYYY-MM-DD.md` file. See `agents/journal/README.md` for logging guidelines.
 
+## Style Guidelines
+
+When you make changes, make sure to remove all AI generated slop.
+
+This includes:
+- Extra comments that a human wouldn't add or is inconsistent with the rest of the file
+- Extra defensive checks or try/catch blocks that are abnormal for that area of the codebase (especially if called by trusted / validated codepaths)
+- Casts to any to get around type issues
+- Any other style that is inconsistent with the file
+
+Report at the end with only a 1-3 sentence summary of what you changed
+
 ## Maintenance Instructions
 1. **Find the paired doc for your change**:
    - Perception/prompts changes (`src/perception/*`, `config/object_tracker_prompts.yaml`): update `agents/design/prompts_configuration.md` and `docs/perception.md`.
