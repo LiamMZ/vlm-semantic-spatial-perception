@@ -72,35 +72,47 @@ analysis_prompt: |
       Add all semantic predicates that are relevant to the task, world, or goal description
       so that downstream planners can bind those categories during grounding.
 
-  3. **Relevant actions.**  
+  3. **Relevant actions.**
     - `relevant_actions` is a list of actions the robot is in principle capable of,
       given the robot description (e.g. `pick`, `place`, `move_to`, `open`, `close`,
-      `press_button`, `pour`, `plug_in`, etc.).  
+      `press_button`, `pour`, `plug_in`, etc.).
     - For each action:
-      - `name` is a short PDDL-style action name (no spaces).  
+      - `name` is a short PDDL-style action name (no spaces).
       - `parameters` is a list of typed variables, each given as a string like
-        `"?obj - object"` or `"?src - object"`.  
+        `"?obj - object"` or `"?src - object"`.
       - `precondition` is a single PDDL formula string (often an `(and ...)` expression)
-        using only predicates from `relevant_predicates`.  
+        using only predicates from `relevant_predicates`.
       - `effect` is a single PDDL formula string (again typically an `(and ...)`
         expression) specifying both positive and negative effects, using only predicates
-        from `relevant_predicates`.  
-    - If you introduce a predicate in any action’s precondition or effect that is not yet
+        from `relevant_predicates`.
+    - **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
+      the EXACT same number of parameters as defined in `relevant_predicates`. For example:
+      - If you define `(holding ?obj)` in predicates (1 parameter)
+      - Then you MUST use `(holding ?x)` in actions (1 parameter)
+      - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
+    - If you introduce a predicate in any action's precondition or effect that is not yet
       in `relevant_predicates`, you **must** add its full signature to
       `relevant_predicates`.
 
-  4. **Goal predicates.**  
+  4. **Goal predicates.**
     - `goal_predicates` should describe the intended task outcome as *general,
       quantificational conditions over the world*, **not** as facts about specific
-      named objects.  
+      named objects.
     - Express goals in terms of:
       - Semantic predicates that classify objects (e.g. `is_container`, `is_tool`,
-        `is_target_object`), and  
+        `is_target_object`), and
       - Relational predicates that describe how these objects should be arranged or
-        configured (e.g. `inside`, `on`, `connected`, `activated`).  
+        configured (e.g. `inside`, `on`, `connected`, `activated`).
     - Each element of `goal_predicates` should be a PDDL condition string suitable for a
       `:goal` field. You may use logical connectives (`and`, `or`, `not`) and quantifiers
       (`exists`, `forall`) when needed.
+    - **CRITICAL SYNTAX RULE**: Use proper PDDL syntax with parentheses. CORRECT examples:
+      - `(coffee-made ?cup)` - correct
+      - `(inside ?obj1 ?obj2)` - correct
+      WRONG examples (DO NOT USE):
+      - `coffee-made(?cup)` - WRONG (no space before parenthesis)
+      - `coffee-made ?cup` - WRONG (missing parentheses)
+      - `inside(?obj1, ?obj2)` - WRONG (commas not used in PDDL)
 
     For example, instead of directly naming concrete constants like:
       “the water bottle is in the paper bag”,
@@ -132,8 +144,41 @@ analysis_prompt: |
     These formulations stay agnostic to specific object in the world, while still encoding the
     semantic intent of the task through predicate structure. 
 
-  5. **Output format.**  
-    - Return **only** the JSON object described above.  
+  5. **Arity consistency example.**
+    Here is a CORRECT example showing consistent predicate arity:
+
+    {
+      "relevant_predicates": [
+        "(holding ?obj)",
+        "(empty-hand)",
+        "(on ?obj ?surface)",
+        "(graspable ?obj)"
+      ],
+      "relevant_actions": [
+        {
+          "name": "pick",
+          "parameters": ["?obj - object"],
+          "precondition": "(and (empty-hand) (graspable ?obj))",
+          "effect": "(and (holding ?obj) (not (empty-hand)))"
+        },
+        {
+          "name": "place",
+          "parameters": ["?obj - object", "?surface - object"],
+          "precondition": "(holding ?obj)",
+          "effect": "(and (on ?obj ?surface) (empty-hand) (not (holding ?obj)))"
+        }
+      ]
+    }
+
+    Notice how:
+    - `(holding ?obj)` is defined with 1 parameter
+    - `(holding ?obj)` is used with 1 parameter in precondition and effect
+    - `(empty-hand)` is defined with 0 parameters
+    - `(empty-hand)` is used with 0 parameters everywhere
+    - The parameter names can differ (?obj, ?x, ?item) but the COUNT must match
+
+  6. **Output format.**
+    - Return **only** the JSON object described above.
     - Do **not** include comments, explanations, or any text outside the JSON.
 
 

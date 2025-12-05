@@ -14,6 +14,7 @@ import json
 import numpy as np
 from PIL import Image
 import yaml
+from google.genai import types
 
 from ..utils.prompt_utils import render_prompt_template
 from .llm_task_analyzer import LLMTaskAnalyzer, TaskAnalysis
@@ -860,18 +861,21 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
 
         try:
             # Get LLM's analysis and fix
-            # Ask the LLM for suggested fixes; limit wait to 30s to avoid hanging
+            # Use fast Flash model for quick PDDL debugging
+            # Increased timeout to 60s for complex domains
+            refinement_model = "gemini-robotics-er-1.5-preview"
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.llm_analyzer.client.models.generate_content,
-                    model=self.llm_analyzer.model_name,
+                    model=refinement_model,
                     contents=refinement_prompt,
                     config={
                         "response_mime_type": "application/json",
-                        "temperature": 0.1
+                        "temperature": 0.1,
+                        "thinking_config": types.ThinkingConfig(thinking_budget=-1),
                     }
                 ),
-                timeout=30.0,
+                timeout=60.0,
             )
 
             fix_json = response.text.strip()

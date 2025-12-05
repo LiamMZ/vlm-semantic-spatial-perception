@@ -25,28 +25,14 @@ detection:
       Wait for the next turn with the current frame before performing detection.
 
     current: |-
-      You are a robotic vision system. CURRENT FRAME TURN: perform detection ONLY on the newly attached image below.
-      Image order for this turn: the final attached image is the current frame for detection. Ignore any earlier turns and run detection ONLY on that last image.
+      Detect all objects in this image. Return JSON array only:
+      [{{"box_2d": [ymin, xmin, ymax, xmax], "label": "descriptive_name"}}]
 
-      Previously detected objects (reuse these EXACT ids if visible; omit them if occluded/out of frame):
-      {existing_objects_section}
+      Reuse these IDs if visible: {existing_objects_section}
+      Otherwise use descriptive names with underscores: blue_bottle, wooden_table, metal_spoon
 
-      Instructions:
-      - Return bounding boxes as a JSON array with labels. Never return masks or code fencing.
-      - Include all objects you can identify, focusing on new objects that are not in context turn.
-      - IMPORTANT: Detect BOTH manipulable objects AND surfaces/support structures:
-        * Manipulable objects: bottles, cups, tools, containers, etc.
-        * Surfaces: tables, counters, shelves, trays, workbenches, floors, etc.
-        * Surfaces are critical for spatial predicates like "on" and "in"
-      - If the current image is similar or identical to context image with no new objects, it is fine to not return new detections
-      - If an object from previous images is visible, re-use the exact id as the "label"; otherwise create a descriptive, unique label (colors, size, position, distinctive traits).
-      - IMPORTANT: Object labels must use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle", "red_cup" not "red-cup", "wooden_table" not "wooden-table"
-      - Box format: [ymin, xmin, ymax, xmax] normalized to 0-1000. All values MUST be integers.
-      - Prefer tight boxes around each object instance. The bounding box may have moved compared to last capture, so make sure to update all bounding boxes and not just return the same bounding box for existing objects.
-      - Output ONLY the JSON array in this format (no prose):
-      [
-        {{"box_2d": [ymin, xmin, ymax, xmax], "label": "<object label>"}}
-      ]
+      Detect both objects AND surfaces (tables, counters, floors).
+      Box format: [ymin, xmin, ymax, xmax] as integers 0-1000.
 
 # Object Analysis Prompts
 analysis:

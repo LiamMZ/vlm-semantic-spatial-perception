@@ -11,8 +11,8 @@ initial_analysis_prompt: |
   Return JSON with:
   {
     "action_sequence": ["action1", "action2", ...],
-    "goal_predicates": ["predicate1(obj1, obj2)", ...],
-    "preconditions": ["predicate(obj)", ...],
+    "goal_predicates": ["predicate1 obj1 obj2", ...],
+    "preconditions": ["predicate obj", ...],
     "initial_predicates": ["expected_initial_states"],
     "relevant_predicates": ["predicate_names"],
     "goal_objects": ["object_id1", ...],
@@ -52,6 +52,17 @@ initial_analysis_prompt: |
   4. All predicates should be predicates applied to variables, not string constants
   5. GLOBAL Predicates should not be returned with parenthases
 
+  **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
+  the EXACT same number of parameters as when you first define it. For example:
+  - If you define `(holding ?obj)` in predicates (1 parameter)
+  - Then you MUST use `(holding ?x)` in actions (1 parameter)
+  - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
+  - Parameter names can differ (?obj, ?x, ?item) but the COUNT must match
+
+  **CRITICAL SYNTAX RULE for goal_predicates**: Use proper PDDL syntax with parentheses:
+  - CORRECT: `(coffee-made ?cup)` or `(inside ?obj1 ?obj2)`
+  - WRONG: `coffee-made(?cup)` (no space) or `coffee-made ?cup` (missing parens)
+
   Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions.
 
 analysis_prompt: |
@@ -68,7 +79,7 @@ analysis_prompt: |
   Provide a JSON response with:
   {
     "action_sequence": ["action1", "action2", ...],
-    "goal_predicates": ["predicate1(obj1, obj2)", ...],
+    "goal_predicates": ["predicate1 obj1 obj2", ...],
     "preconditions": ["predicate(obj)", ...],
     "initial_predicates": ["expected_initial_states"],
     "relevant_predicates": ["predicate_names"],
@@ -102,6 +113,17 @@ analysis_prompt: |
      - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
   5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
   6. GLOBAL Predicates should not be returned with parenthases
+
+  **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
+  the EXACT same number of parameters as when you first define it. For example:
+  - If you define `(holding ?obj)` in predicates (1 parameter)
+  - Then you MUST use `(holding ?x)` in actions (1 parameter)
+  - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
+  - Parameter names can differ (?obj, ?x, ?item) but the COUNT must match
+
+  **CRITICAL SYNTAX RULE for goal_predicates**: Use proper PDDL syntax with parentheses:
+  - CORRECT: `(coffee-made ?cup)` or `(inside ?obj1 ?obj2)`
+  - WRONG: `coffee-made(?cup)` (no space) or `coffee-made ?cup` (missing parens)
 
 
   IMPORTANT: Global Predicates

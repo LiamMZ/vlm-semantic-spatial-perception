@@ -37,7 +37,7 @@ class LLMTaskAnalyzer:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-pro",
+        model_name: str = "gemini-robotics-er-1.5-preview",
         prompts_config_path: Optional[Union[str, Path]] = None
     ):
         """
@@ -135,7 +135,7 @@ class LLMTaskAnalyzer:
                 top_p=0.9,
                 max_output_tokens=8192,
                 response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=-1)
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
             )
 
             response = self.client.models.generate_content(
@@ -186,7 +186,7 @@ TASK: {task}
 Return JSON with:
 {{
   "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
+  "goal_predicates": ["predicate1 obj1 obj2", ...],
   "preconditions": ["predicate(obj)", ...],
   "initial_predicates": ["expected_initial_states"],
   "relevant_predicates": ["predicate_names"],
@@ -265,7 +265,7 @@ OBSERVED RELATIONSHIPS:
 Provide a JSON response with:
 {{
   "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
+  "goal_predicates": ["predicate1 obj1 obj2", ...],
   "preconditions": ["predicate(obj)", ...],
   "initial_predicates": ["expected_initial_states"],
   "relevant_predicates": ["predicate_names"],
