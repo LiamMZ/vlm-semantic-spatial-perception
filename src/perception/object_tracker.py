@@ -16,6 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass
 import io
 import json
+from urllib import response
 import yaml
 
 import numpy as np
@@ -62,13 +63,14 @@ class ObjectTracker:
         api_key: Optional[str] = None,
         model_name: str = "auto",
         default_temperature: float = 0.5,
-        thinking_budget: int = -1,
+        thinking_budget: int = 0,
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
-        fast_mode: bool = True,
+        fast_mode: bool = False,
         pddl_predicates: Optional[List[str]] = None,
         pddl_types: Optional[List[str]] = None,
+        pddl_actions: Optional[List[str]] = None,
         prompts_config_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         task_context: Optional[str] = None,
@@ -103,6 +105,7 @@ class ObjectTracker:
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
         self.pddl_types: List[str] = pddl_types or []
+        self.pddl_actions: List[str] = pddl_actions or []
         # Task context for grounding
         self.task_context: Optional[str] = task_context
         self.available_actions: List[Dict[str, Any]] = available_actions or []
@@ -190,6 +193,38 @@ class ObjectTracker:
         if predicate in self.pddl_predicates:
             self.pddl_predicates.remove(predicate)
             self.logger.info("Removed PDDL predicate: %s", predicate)
+
+    def set_pddl_actions(self, actions: List[str]) -> None:
+        """
+        Set the list of PDDL actions to track for objects.
+
+        Args:
+            actions: List of predicate names (e.g., ["clean", "dirty", "opened", "filled"])
+        """
+        self.pddl_actions = actions
+        self.logger.info("PDDL actions updated: %s", actions)
+
+    def add_pddl_action(self, action: str) -> None:
+        """
+        Add a single PDDL action to track.
+
+        Args:
+            action: Action name to add
+        """
+        if action not in self.pddl_actions:
+            self.pddl_actions.append(action)
+            self.logger.info("Added PDDL action: %s", action)
+
+    def remove_pddl_action(self, action: str) -> None:
+        """
+        Remove a PDDL action from tracking.
+
+        Args:
+            action: Action name to remove
+        """
+        if action in self.pddl_actions:
+            self.pddl_actions.remove(action)
+            self.logger.info("Removed PDDL predicate: %s", action)
 
     def set_pddl_types(self, types: List[str]) -> None:
         """
@@ -1460,9 +1495,12 @@ class ObjectTracker:
                 start = response_text.find("```") + 3
                 end = response_text.find("```", start)
                 response_text = response_text[start:end]
-
+            # print(response_text)
             return json.loads(response_text.strip())
         except json.JSONDecodeError as e:
+            import traceback
+            traceback.print_exc()
+            print(response_text)
             self.logger.warning("Failed to parse JSON: %s", e)
             self.logger.debug("Response snippet: %s", response_text[:500])
             return {}
@@ -1500,7 +1538,7 @@ class ContinuousObjectTracker(ObjectTracker):
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
-        fast_mode: bool = True,
+        fast_mode: bool = False,
         update_interval: float = 1.0,
         on_detection_complete: Optional[Callable[[int], None]] = None,
         logger: Optional[logging.Logger] = None,

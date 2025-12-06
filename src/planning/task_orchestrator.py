@@ -1333,10 +1333,20 @@ class TaskOrchestrator:
                 )
 
                 print("  ✓ Domain refinement complete")
+
+                # Update ObjectTracker with refined predicates and actions
+                print("  • Updating ObjectTracker with refined predicates/actions...")
+                await self.maintainer.update_object_tracker_from_domain(self.tracker)
                 print()
 
                 # Reset to ready for planning state to try again
                 self._set_state(OrchestratorState.READY_FOR_PLANNING)
+                domain_snapshot = await self.pddl.get_domain_snapshot()
+                self.tracker.set_task_context(
+                    task_description=self.current_task,
+                    available_actions=domain_snapshot.get("predefined_actions", []),
+                    goal_objects=self.task_analysis.goal_objects
+                )
                 return True
             else:
                 print("  ⚠ No maintainer available for refinement")
@@ -1406,7 +1416,7 @@ class TaskOrchestrator:
                 return result
 
             # Try to refine
-            print(f"\n🔧 Detected refinable planning error, attempting domain refinement...")
+            print(f"\n🔧 Detected refinable planning error, attempting domain refinement: {result.error_message}...")
 
             # Get PDDL file paths
             pddl_files = {

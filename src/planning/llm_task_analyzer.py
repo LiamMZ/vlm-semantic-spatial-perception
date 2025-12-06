@@ -37,7 +37,7 @@ class LLMTaskAnalyzer:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-pro",
+        model_name: str = "gemini-robotics-er-1.5-preview",
         prompts_config_path: Optional[Union[str, Path]] = None
     ):
         """
@@ -135,7 +135,7 @@ class LLMTaskAnalyzer:
                 top_p=0.9,
                 max_output_tokens=8192,
                 response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=-1)
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
             )
 
             response = self.client.models.generate_content(
@@ -186,15 +186,15 @@ TASK: {task}
 Return JSON with:
 {{
   "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
-  "preconditions": ["predicate(obj)", ...],
+  "goal_predicates": ["(predicate1 obj1 obj2)", ...],
+  "preconditions": ["(predicate obj)", ...],
   "initial_predicates": ["expected_initial_states"],
   "relevant_predicates": ["predicate_names"],
   "goal_objects": ["object_id1", ...],
   "global_predicates": ["global_predicate1", ...],
   "tool_objects": ["tool_id", ...],
   "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["current_predicate(obj)", ...],
+  "initial_predicates": ["(current_predicate obj)", ...],
   "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
   "relevant_types": ["type1", "type2", ...],
   "required_actions": [
@@ -265,15 +265,15 @@ OBSERVED RELATIONSHIPS:
 Provide a JSON response with:
 {{
   "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
-  "preconditions": ["predicate(obj)", ...],
+  "goal_predicates": ["(predicate1 obj1 obj2)", ...],
+  "preconditions": ["(predicate obj)", ...],
   "initial_predicates": ["expected_initial_states"],
   "relevant_predicates": ["predicate_names"],
   "goal_objects": ["object_id1", ...],
   "global_predicates": ["global_predicate1", ...],
   "tool_objects": ["tool_id", ...],
   "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["current_predicate(obj)", ...],
+  "initial_predicates": ["(current_predicate obj)", ...],
   "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
   "relevant_types": ["type1", "type2", ...],
   "required_actions": [
