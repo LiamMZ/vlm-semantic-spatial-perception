@@ -16,6 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass
 import io
 import json
+from urllib import response
 import yaml
 
 import numpy as np
@@ -1494,9 +1495,12 @@ class ObjectTracker:
                 start = response_text.find("```") + 3
                 end = response_text.find("```", start)
                 response_text = response_text[start:end]
-
+            # print(response_text)
             return json.loads(response_text.strip())
         except json.JSONDecodeError as e:
+            import traceback
+            traceback.print_exc()
+            print(response_text)
             self.logger.warning("Failed to parse JSON: %s", e)
             self.logger.debug("Response snippet: %s", response_text[:500])
             return {}

@@ -393,6 +393,12 @@ class TaskAndMotionPlanner:
                     current_problem_pddl=self.orchestrator.pddl.generate_problem_pddl()
                 )
 
+                # Update ObjectTracker with refined predicates and actions
+                print(f"  • Updating ObjectTracker with refined predicates/actions...")
+                await self.orchestrator.maintainer.update_object_tracker_from_domain(
+                    self.orchestrator.tracker.tracker
+                )
+
                 # Retry planning once after refinement
                 print(f"\n🔄 Retrying planning after refinement...")
                 result = await self.orchestrator.solve_and_plan()

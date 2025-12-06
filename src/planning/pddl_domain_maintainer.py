@@ -718,11 +718,58 @@ class PDDLDomainMaintainer:
             "goals_observable": await self.are_goal_objects_observed()
         }
 
+    def _normalize_goal_predicate(self, pred: str) -> str:
+        """
+        Normalize a goal predicate to ensure proper PDDL syntax with parentheses.
+
+        Handles various input formats:
+        - "on cup table" -> "(on cup table)"
+        - "(on cup table)" -> "(on cup table)" (unchanged)
+        - "on(cup, table)" -> "(on cup table)"
+        - "exists (?x - object) (holding ?x)" -> "(exists (?x - object) (holding ?x))"
+
+        Args:
+            pred: Goal predicate string
+
+        Returns:
+            Normalized predicate with proper PDDL syntax
+        """
+        import re
+
+        pred = pred.strip()
+
+        # Already has proper PDDL syntax (starts with parenthesis or quantifier)
+        if pred.startswith('(') or pred.startswith('exists') or pred.startswith('forall'):
+            return pred
+
+        # Remove commas if present (e.g., "on(cup, table)" -> "on(cup table)")
+        pred = pred.replace(',', ' ')
+
+        # Handle format: "predicate(args)" -> "(predicate args)"
+        if '(' in pred and ')' in pred:
+            # Extract predicate name and arguments
+            match = re.match(r'([a-zA-Z][a-zA-Z0-9_-]*)\s*\((.*)\)', pred)
+            if match:
+                pred_name = match.group(1)
+                args = match.group(2).strip()
+                # Clean up extra spaces
+                args = re.sub(r'\s+', ' ', args)
+                return f"({pred_name} {args})" if args else f"({pred_name})"
+
+        # Handle format: "predicate arg1 arg2" -> "(predicate arg1 arg2)"
+        if not pred.startswith('('):
+            # Clean up extra spaces
+            pred = re.sub(r'\s+', ' ', pred)
+            return f"({pred})"
+
+        return pred
+
     async def set_goal_from_task_analysis(self) -> None:
         """
         Set goal state based on task analysis.
 
         Uses LLM-predicted goal predicates to populate PDDL goal state.
+        Normalizes predicates to ensure proper PDDL syntax with parentheses.
         """
         if not self.task_analysis:
             print("⚠ No task analysis available - cannot set goals")
@@ -740,13 +787,20 @@ class PDDLDomainMaintainer:
             print("   This usually means the LLM failed to extract goals from the task description")
             return
 
-        # Preserve goal predicates exactly as returned by the LLM
+        # Normalize and add goal predicates
         goals_added = 0
         for goal_pred in self.task_analysis.goal_predicates:
             try:
-                await self.pddl.add_goal_formula_async(goal_pred)
+                # Normalize to ensure proper PDDL syntax
+                normalized_pred = self._normalize_goal_predicate(goal_pred)
+
+                # Show if normalization changed the predicate
+                if normalized_pred != goal_pred:
+                    print(f"    ℹ Normalized: '{goal_pred}' → '{normalized_pred}'")
+
+                await self.pddl.add_goal_formula_async(normalized_pred)
                 goals_added += 1
-                print(f"    ✓ Added goal formula: {goal_pred}")
+                print(f"    ✓ Added goal formula: {normalized_pred}")
             except Exception as e:
                 print(f"    ⚠ Failed to add goal predicate '{goal_pred}': {e}")
 
@@ -926,9 +980,13 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
                             # Use word boundaries to avoid partial matches
                             import re
                             updated_pred = re.sub(rf'\b{re.escape(expected)}\b', actual, pred)
-                            updated_predicates.append(updated_pred)
-                            if updated_pred != pred:
-                                print(f"      ✓ Updated goal predicate: '{pred}' → '{updated_pred}'")
+
+                            # Normalize to ensure proper PDDL syntax after modification
+                            normalized_pred = self._normalize_goal_predicate(updated_pred)
+
+                            updated_predicates.append(normalized_pred)
+                            if normalized_pred != pred:
+                                print(f"      ✓ Updated goal predicate: '{pred}' → '{normalized_pred}'")
                                 any_updated = True
 
                         if any_updated:
@@ -995,6 +1053,12 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
                 print(f"\n  ✓ Applied {fixes_applied} domain fix(es) successfully")
                 if fixes_failed > 0:
                     print(f"  ⚠ Failed to apply {fixes_failed} fix(es)")
+
+                # Update ObjectTracker with refined predicates/actions
+                # Note: This requires the object_tracker to be passed to refine_domain_from_error
+                # For now, we'll add a separate method that the caller can use
+                # after refinement is complete
+
             elif fixes_failed > 0:
                 print(f"\n  ✗ All {fixes_failed} fix(es) failed to match domain text")
             elif len(fixes) == 0 and goal_object_recommendations:
@@ -1083,3 +1147,36 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
     def clear_global_predicates(self) -> None:
         """Clear all global predicates."""
         self.global_predicates.clear()
+
+    async def update_object_tracker_from_domain(self, object_tracker) -> None:
+        """
+        Update the ObjectTracker's predicates and actions from the current PDDL domain.
+
+        This should be called after domain refinement to ensure the ObjectTracker
+        uses the latest predicates and actions for object analysis.
+
+        Args:
+            object_tracker: ObjectTracker instance to update
+        """
+        try:
+            # Get all predicates from the PDDL representation
+            predicates_dict = await self.pddl.get_all_predicates()
+            predicate_names = list(predicates_dict.keys())
+
+            # Get all actions from the PDDL representation
+            actions_dict = await self.pddl.get_all_actions()
+            action_names = list(actions_dict.keys())
+
+            # Update the object tracker
+            if predicate_names:
+                object_tracker.set_pddl_predicates(predicate_names)
+                print(f"  ✓ Updated ObjectTracker with {len(predicate_names)} predicates: {predicate_names}")
+
+            if action_names:
+                object_tracker.set_pddl_actions(action_names)
+                print(f"  ✓ Updated ObjectTracker with {len(action_names)} actions: {action_names}")
+
+        except Exception as e:
+            print(f"  ⚠ Error updating ObjectTracker from domain: {e}")
+            import traceback
+            traceback.print_exc()

@@ -1333,6 +1333,10 @@ class TaskOrchestrator:
                 )
 
                 print("  ✓ Domain refinement complete")
+
+                # Update ObjectTracker with refined predicates and actions
+                print("  • Updating ObjectTracker with refined predicates/actions...")
+                await self.maintainer.update_object_tracker_from_domain(self.tracker)
                 print()
 
                 # Reset to ready for planning state to try again

@@ -11,15 +11,15 @@ initial_analysis_prompt: |
   Return JSON with:
   {
     "action_sequence": ["action1", "action2", ...],
-    "goal_predicates": ["predicate1 obj1 obj2", ...],
-    "preconditions": ["predicate obj", ...],
-    "initial_predicates": ["expected_initial_states"],
+    "goal_predicates": ["(predicate1 obj1 obj2)", ...],
+    "preconditions": ["(predicate obj)", ...],
+    "initial_predicates": ["(expected_initial_states)", ...],
     "relevant_predicates": ["predicate_names"],
     "goal_objects": ["object_id1", ...],
     "global_predicates": ["global_predicate1", ...],
     "tool_objects": ["tool_id", ...],
     "obstacle_objects": ["obstacle_id", ...],
-    "initial_predicates": ["current_predicate(obj)", ...],
+    "initial_predicates": ["(current_predicate obj)", ...],
     "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
     "relevant_types": ["type1", "type2", ...],
     "required_actions": [
@@ -63,6 +63,18 @@ initial_analysis_prompt: |
   - CORRECT: `(coffee-made ?cup)` or `(inside ?obj1 ?obj2)`
   - WRONG: `coffee-made(?cup)` (no space) or `coffee-made ?cup` (missing parens)
 
+  **VERIFICATION STEPS (complete these BEFORE returning your response):**
+  Step 1: List ALL predicates you defined in `relevant_predicates`
+  Step 2: For EACH action in `required_actions`:
+    a) Extract all predicates from precondition
+    b) Extract all predicates from effect
+    c) For each predicate usage, count its parameters
+    d) Find its definition in `relevant_predicates`
+    e) VERIFY the parameter count EXACTLY matches
+    f) If mismatch, FIX the action OR add missing predicate definition
+  Step 3: Ensure every predicate used exists in `relevant_predicates`
+  Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
+
   Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions.
 
 analysis_prompt: |
@@ -79,15 +91,15 @@ analysis_prompt: |
   Provide a JSON response with:
   {
     "action_sequence": ["action1", "action2", ...],
-    "goal_predicates": ["predicate1 obj1 obj2", ...],
-    "preconditions": ["predicate(obj)", ...],
-    "initial_predicates": ["expected_initial_states"],
+    "goal_predicates": ["(predicate1 obj1 obj2)", ...],
+    "preconditions": ["(predicate obj)", ...],
+    "initial_predicates": ["(expected_initial_states)", ...],
     "relevant_predicates": ["predicate_names"],
     "goal_objects": ["object_id1", ...],
     "global_predicates": ["global_predicate1", ...],
     "tool_objects": ["tool_id", ...],
     "obstacle_objects": ["obstacle_id", ...],
-    "initial_predicates": ["current_predicate(obj)", ...],
+    "initial_predicates": ["(current_predicate obj)", ...],
     "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
     "relevant_types": ["type1", "type2", ...],
     "required_actions": [
@@ -136,6 +148,26 @@ analysis_prompt: |
       - robot_ready: Robot system is initialized
       - Do NOT include object-related predicates here (those go in initial_predicates)
       - Global predicates typically have NO parameters or take robot as parameter
+
+  **VERIFICATION STEPS (complete these BEFORE returning your response):**
+  Step 1: List ALL predicates you defined in `relevant_predicates`
+  Step 2: For EACH action in `required_actions`:
+    a) Extract all predicates from precondition
+    b) Extract all predicates from effect
+    c) For each predicate usage, count its parameters
+    d) Find its definition in `relevant_predicates`
+    e) VERIFY the parameter count EXACTLY matches
+    f) If mismatch, FIX the action OR add missing predicate definition
+  Step 3: Ensure every predicate used exists in `relevant_predicates`
+  Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
+
+  Example verification for action "pick":
+  - Precondition uses: `(empty-hand)` → 0 params
+  - Check definition: `(empty-hand)` → 0 params ✓ MATCH
+  - Precondition uses: `(graspable ?obj)` → 1 param
+  - Check definition: `(graspable ?obj)` → 1 param ✓ MATCH
+  - Effect uses: `(holding ?obj)` → 1 param
+  - Check definition: `(holding ?obj)` → 1 param ✓ MATCH
 
   Focus on:
   1. Use observed objects and their actual IDs
