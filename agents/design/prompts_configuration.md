@@ -4,8 +4,8 @@
 
 ## File Layout (`config/object_tracker_prompts.yaml`)
 - `detection.streaming` – scene-level object discovery (normalized `[ymin, xmin, ymax, xmax]` integers in the 0–1000 range). Streaming is the only detection path and is split into two YAML templates: `prior` (IDs + prior images, no detection) and `current` (current frame + detection instructions). The tracker now sends these as two explicit content turns to Gemini: prior images + prior prompt first (context only), then a second turn with ONLY the current frame appended last; detection must run solely on that final image. The current turn follows the Gemini cookbook style: return ONLY a JSON array of `{box_2d, label}` entries (no code fences), reuse existing IDs in the `label` field when visible, create descriptive labels for new instances, clamp to 25 objects, and keep boxes tight.
-- `analysis.response_schema` – structured JSON contract enforced via `response_json_schema`; requires `object_type` and `position`, and allows `affordances`, `interaction_points` as a list of `{affordance, position, reasoning}` entries, plus optional `predicates`.
-- `analysis.fast_mode` / `analysis.cached_mode` / `analysis.full` – affordances, interaction points, optional PDDL predicates. Each prompt now inlines the schema above and relies on structured generation instead of a single example blob.
+- `analysis.response_schema` – structured JSON contract enforced via `response_json_schema`; requires `object_type` and `position`, and allows `affordances` as a list of `{affordance, position, reasoning}` entries plus optional `predicates`.
+- `analysis.fast_mode` / `analysis.cached_mode` / `analysis.full` – affordances with embedded interaction points, optional PDDL predicates. Each prompt now inlines the schema above and relies on structured generation instead of a single example blob.
 - `interaction.update` – single-affordance interaction point refinement.
 - `pddl.section_template` / `pddl.example_template` – injected when predicates are provided.
 

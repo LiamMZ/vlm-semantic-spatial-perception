@@ -52,29 +52,24 @@ analysis:
           type: number
       affordances:
         type: array
-        description: List of affordances supported by the object.
-        items:
-          type: string
-      interaction_points:
-        type: array
-        description: List of interaction point entries keyed by affordance.
+        description: List of affordances with optional interaction points.
         items:
           type: object
-          required: ["affordance", "position"]
+          required: ["affordance"]
           properties:
             affordance:
               type: string
               description: Affordance name (e.g., graspable, pourable).
+            reasoning:
+              type: string
+              description: Brief rationale for the interaction point.
             position:
               type: array
-              description: Interaction point [y, x] normalized to 0-1000.
+              description: Interaction point [y, x] normalized to 0-1000 (if applicable).
               minItems: 2
               maxItems: 2
               items:
                 type: number
-            reasoning:
-              type: string
-              description: Brief rationale for the interaction point.
 
   # Fast mode: only affordances and properties, no interaction points
   fast_mode: |-
@@ -82,7 +77,7 @@ analysis:
 
     Provide:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates
-    2. Affordances: What robot actions are possible?
+    2. Affordances: What robot actions are possible (include interaction point y/x for each when relevant)?
        - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
     3. PDDL Predicates (if requested):{predicates_section}
 
@@ -97,7 +92,7 @@ analysis:
     
     Known affordances: {cached_affordances}
     
-    For EACH affordance, identify the optimal interaction point and return JSON that follows this schema (also enforced via response_json_schema):
+    For EACH affordance, identify the optimal interaction point and encode it inside the affordances list entries. Return JSON that follows this schema (also enforced via response_json_schema):
     {analysis_schema}
     
     All positions in 0-1000 normalized coords relative to THIS image.
@@ -109,9 +104,9 @@ analysis:
     Provide detailed information:
 
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
-    2. Affordances: What robot actions are possible with this object?
+    2. Affordances: What robot actions are possible with this object? Include interaction point y/x for each affordance.
        - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-    3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image){predicates_section}
+    3. PDDL Predicates (if requested){predicates_section}
 
     Return JSON only. Follow this schema (also enforced via response_json_schema):
     {analysis_schema}
