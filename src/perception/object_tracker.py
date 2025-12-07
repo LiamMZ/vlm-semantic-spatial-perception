@@ -804,28 +804,13 @@ class ObjectTracker:
                 self.logger.warning("Unexpected list response for %s, skipping", object_name)
                 return None
 
+            raw_affordances = data.get("affordances", []) or []
+
             # Extract affordances (use cached if available)
             if cached_data:
                 affordances = set(cached_data["affordances"])
             else:
-                raw_affordances = data.get("affordances", []) or []
                 affordances: set[str] = set()
-
-                def _coerce_affordance(item: Any) -> None:
-                    """Normalize affordance entries into strings to avoid unhashable dicts."""
-                    if isinstance(item, str):
-                        affordances.add(item)
-                    elif isinstance(item, dict):
-                        for key in item.keys():
-                            if isinstance(key, str):
-                                affordances.add(key)
-                    elif isinstance(item, (list, tuple)):
-                        for sub in item:
-                            if isinstance(sub, str):
-                                affordances.add(sub)
-
-                for aff in raw_affordances:
-                    _coerce_affordance(aff)
 
             # Helper function to back-project coordinates from crop to full image
             def backproject_to_full_image(crop_pos_2d: List[int]) -> List[int]:
@@ -854,17 +839,26 @@ class ObjectTracker:
 
                 return [full_norm_y, full_norm_x]
 
-            # Extract interaction points from list entries {affordance, position, reasoning}
+            # Extract affordances and interaction points from affordance entries
             interaction_points_result: Dict[str, InteractionPoint] = {}
-            for entry in data.get("interaction_points") or []:
+            for entry in raw_affordances:
+                if isinstance(entry, str):
+                    affordances.add(entry)
+                    continue
                 if not isinstance(entry, dict):
                     continue
-                affordance = entry.get("affordance")
-                point_data = entry if isinstance(entry, dict) else {}
-                if not isinstance(affordance, str):
+                affordance_name = entry.get("affordance") or entry.get("name")
+                if isinstance(affordance_name, str):
+                    affordances.add(affordance_name)
+                else:
                     continue
-
-                pos_2d_crop = point_data.get("position", [500, 500])
+                point_data = entry.get("interaction_point") if isinstance(entry.get("interaction_point"), dict) else entry
+                if not isinstance(point_data, dict):
+                    continue
+                pos_value = point_data.get("position")
+                if not isinstance(pos_value, (list, tuple)) or len(pos_value) < 2:
+                    continue
+                pos_2d_crop = list(pos_value[:2])
                 # Back-project to full image coordinates
                 pos_2d = backproject_to_full_image(pos_2d_crop)
 
@@ -881,7 +875,7 @@ class ObjectTracker:
                         use_intrinsics
                     )
 
-                interaction_points_result[affordance] = InteractionPoint(
+                interaction_points_result[affordance_name] = InteractionPoint(
                     position_2d=pos_2d,
                     position_3d=pos_3d,
                     alternative_points=[]
