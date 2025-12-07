@@ -281,8 +281,6 @@ class TAMPDemo:
                 executions.append({
                     "action": action_name,
                     "success": exec_result.executed,
-                    "warnings": exec_result.warnings,
-                    "errors": exec_result.errors,
                     "primitive_count": len(exec_result.primitive_results) if hasattr(exec_result, 'primitive_results') else 0
                 })
             (task_dir / "execution_results.json").write_text(json.dumps(executions, indent=2))
@@ -336,18 +334,16 @@ class TAMPDemo:
         self.execution_log.append({
             "action": action,
             "success": result.executed,
-            "warnings": result.warnings,
-            "errors": result.errors
+            "primitive_count": len(result.primitive_results or []),
         })
         if hasattr(self, 'logger'):
             status = "SUCCESS" if result.executed else "FAILED"
-            self.logger.info(f"Action executed '{action}': {status}")
-            if result.warnings:
-                for w in result.warnings:
-                    self.logger.warning(f"  {w}")
-            if result.errors:
-                for e in result.errors:
-                    self.logger.error(f"  {e}")
+            self.logger.info(
+                "Action executed '%s': %s (%d primitive results)",
+                action,
+                status,
+                len(result.primitive_results or []),
+            )
 
     async def run_single_task(self, task: str):
         """
@@ -727,13 +723,8 @@ class TAMPDemo:
                         print(f"\nExecution Log ({len(self.execution_log)} entries):")
                         for i, entry in enumerate(self.execution_log, 1):
                             status = "✓" if entry["success"] else "✗"
-                            print(f"  {i}. {status} {entry['action']}")
-                            if entry["warnings"]:
-                                for w in entry["warnings"]:
-                                    print(f"     ⚠ {w}")
-                            if entry["errors"]:
-                                for e in entry["errors"]:
-                                    print(f"     ✗ {e}")
+                            count = entry.get("primitive_count", 0)
+                            print(f"  {i}. {status} {entry['action']} ({count} primitive results)")
 
                 elif action == "clear":
                     self.execution_log.clear()

@@ -13,7 +13,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 - `task_orchestrator.py` – orchestrates perception, PDDL maintenance, snapshots, and world-state export.
 - `primitives/skill_decomposer.py` – LLM-backed decomposition of symbolic actions to primitives; attaches latest snapshot bytes and registry slices.
 - `primitives/skill_plan_types.py` – `PrimitiveCall`, `SkillPlan`, validators, and registry hashing for plan freshness tracking.
-- `primitives/primitive_executor.py` – translates helper fields (e.g., `target_pixel_yx`) into metric targets using depth/intrinsics from the perception pool and optionally drives `CuRoboMotionPlanner`.
+- `primitives/primitive_executor.py` – translates helper fields (e.g., `target_pixel_yx`) into metric targets using depth/intrinsics from the perception pool and optionally drives `CuRoboMotionPlanner`; when no helper pixels exist, primitives pass through unchanged, and base-frame transforms only run when the primitives driver exposes `camera_pose_from_joints`.
 - `planning/utils/snapshot_utils.py` – loads color/depth/intrinsics for a snapshot ID from `perception_pool/index.json`.
 
 ## Workflow (end-to-end)
@@ -22,7 +22,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 3. **Gating**: `TaskStateMonitor.determine_state()` sets `READY_FOR_PLANNING` once predicates/objects meet `min_observations`.
 4. **PDDL outputs**: `TaskOrchestrator.generate_pddl_files()` writes domain/problem under `state_dir/pddl/`.
 5. **Primitive planning** (optional): `SkillDecomposer.plan(action_name, parameters, orchestrator=...)` pulls the latest registry + snapshot, uses `config/primitive_descriptions.md` and `config/skill_decomposer_prompts.yaml`, and validates against `PRIMITIVE_LIBRARY`. The decomposer reads interaction points from the latest snapshot detections (`perception_pool/snapshots/<id>/detections.json`), merges them into the working registry view, and passes their pixel `[y, x]` coordinates into the prompt; the LLM is instructed to reuse those points (leaving `interaction_points` empty) and only emit new affordance+point entries when choosing a novel location.
-6. **Execution/translation**: `PrimitiveExecutor.execute_plan(...)` back-projects helper pixels to 3D using the perception pool and calls the motion planner (or dry-runs).
+6. **Execution/translation**: `PrimitiveExecutor.execute_plan(...)` back-projects helper pixels to 3D using the perception pool and calls the motion planner (or dry-runs). Primitives without helper pixels bypass translation, and base-frame transforms only run when the primitives driver provides `camera_pose_from_joints`. Translation/validation failures raise exceptions instead of being accumulated on the result payload.
 
 ## Skill Decomposition + Execution (code-backed)
 ```python
@@ -53,10 +53,10 @@ executor = PrimitiveExecutor(
     perception_pool_dir=Path("outputs/orchestrator_state/perception_pool"),
 )
 result = executor.execute_plan(plan, world_state, dry_run=True)
-print(result.warnings)
+print(result.executed)  # False when dry_run=True
 ```
 
-Helper fields expected from the LLM (`target_pixel_yx`, `pivot_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) are normalized `[y, x]` inputs (0–1000, Robotics-ER style) that the executor converts to metric parameters; when `metadata.resolved_interaction_point.position_3d` is present the executor prefers that 3D point over recomputing from depth. Leave metric-only fields unset unless already known in meters.
+Helper fields expected from the LLM (`target_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) are normalized `[y, x]` inputs (0–1000, Robotics-ER style) that the executor converts to metric parameters; when `metadata.resolved_interaction_point.position_3d` is present the executor prefers that 3D point over recomputing from depth. Primitives without helper pixels pass through unchanged, and base-frame transforms only run when the primitives driver exposes `camera_pose_from_joints`. Leave metric-only fields unset unless already known in meters.
 
 ## Cached Plans and Replay
 - Translation and LLM plans from the pick pipeline live under `tests/artifacts/translation_pick/` and `tests/artifacts/llm_pick/`.

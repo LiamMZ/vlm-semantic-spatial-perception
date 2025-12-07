@@ -4,13 +4,14 @@ tests/assets/continuous_pick_fixture. Calls SkillDecomposer.plan (real _call_llm
 for recording) and PrimitiveExecutor.prepare_plan to translate helper params.
 
 Artifacts: tests/artifacts/llm_pick/pick_plan_llm_response.json (raw LLM) and
-tests/artifacts/llm_pick/pick_plan_llm_translated.json (executor-ready plan + warnings/errors).
+tests/artifacts/llm_pick/pick_plan_llm_translated.json (executor-ready plan).
 
 Assertions: plan contains at least one primitive, references the cloth object, has a graspable-like
 interaction point, and includes helper parameters; artifacts are written.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Dict
@@ -81,7 +82,7 @@ def _recording_llm_call(original_call):
     return _wrapper
 
 
-def test_pick_plan_decomposes_with_real_llm(genai_api_key):
+def test_pick_plan_decomposes_with_real_llm(genai_api_key, caplog):
     """
     Source data: fixture registry/snapshots in tests/assets/continuous_pick_fixture; real Gemini call.
     Methods covered: SkillDecomposer.plan (real _call_llm wrapped for recording) and PrimitiveExecutor.prepare_plan.
@@ -126,15 +127,16 @@ def test_pick_plan_decomposes_with_real_llm(genai_api_key):
         primitives=None,
         perception_pool_dir=FIXTURE_DIR / "perception_pool",
     )
-    _, warnings, errors = executor.prepare_plan(plan, world_state)
+    with caplog.at_level(logging.WARNING):
+        executor.prepare_plan(plan, world_state)
+    warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
     TRANSLATED_PLAN_PATH.write_text(
         json.dumps(
             {
                 "plan": plan.to_dict(),
-                "warnings": warnings,
-                "errors": errors,
             },
             indent=2,
         )
     )
     assert TRANSLATED_PLAN_PATH.exists()
+    assert warnings == []
