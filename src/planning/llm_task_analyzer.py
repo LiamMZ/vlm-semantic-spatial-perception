@@ -162,81 +162,6 @@ class LLMTaskAnalyzer:
             traceback.print_exc()
             return None
 
-    def _build_initial_analysis_prompt(self, task: str) -> str:
-        """
-        Build prompt for INITIAL task analysis (before any observations).
-
-        This prompt asks the LLM to predict what predicates, actions, and objects
-        will likely be needed for the task, even without seeing the environment yet.
-        """
-        robot_context = ""
-        if self.robot_description:
-            robot_context = f"""
-ROBOT CAPABILITIES:
-{self.robot_description}
-
-Consider the robot's capabilities when determining feasible actions and predicates.
-"""
-
-        return f"""Analyze this robotic task and predict required PDDL components.
-
-TASK: {task}
-{robot_context}
-
-Return JSON with:
-{{
-  "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["(predicate1 obj1 obj2)", ...],
-  "preconditions": ["(predicate obj)", ...],
-  "initial_predicates": ["(expected_initial_states)", ...],
-  "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
-  "goal_objects": ["object_id1", ...],
-  "global_predicates": ["global_predicate1", ...],
-  "tool_objects": ["tool_id", ...],
-  "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["(current_predicate obj)", ...],
-  "relevant_types": ["type1", "type2", ...],
-  "required_actions": [
-    {{
-      "name": "pick",
-      "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
-      "effect": "(and (holding ?obj) (not (empty-hand)))"
-    }}
-  ],
-}}
-
-IMPORTANT: Relevant Predicates Format
-- "relevant_predicates" MUST include parameters in PDDL format:
-  - "(graspable ?obj)" - NOT just "graspable"
-  - "(clear ?obj)" - NOT just "clear"
-  - "(on ?obj ?surface)" - binary predicate
-  - "(empty-hand)" - zero-parameter predicate
-  - "(holding ?obj)" - NOT just "holding"
-- Parameter count MUST match usage in action preconditions/effects
-
-IMPORTANT: Global Predicates
-- "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
-- These are predicates that should be TRUE INITIALLY before task execution
-- Examples:
-  - hand_is_empty (or empty-hand): Robot gripper has no object
-  - arm_at_home: Robot arm is at home position
-  - gripper_open: Gripper is in open state
-  - robot_ready: Robot system is initialized
-- Do NOT include object-related predicates here (those go in initial_predicates)
-- Global predicates typically have NO parameters or take robot as parameter
-
-IMPORTANT PDDL RULES:
-1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
-2. Preconditions and effects use ONLY variables - NO quoted strings or constants
-3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
-   - WRONG: (is-empty ?machine "water_reservoir")
-   - RIGHT: (water-reservoir-empty ?machine)
-4. All predicates should be predicates applied to variables, not string constants
-5. GLOBAL Predicates should not be returned with parenthases
-
-Include 8-12 relevant_predicates with proper PDDL format like "(graspable ?obj)", "(on ?x ?y)", "(clear ?obj)", "(empty-hand)", and 3-5 required_actions."""
-
     def _build_analysis_prompt(
         self,
         task: str,
@@ -362,25 +287,6 @@ Focus on:
         except Exception as e:
             print(f"   ⚠ Failed to parse LLM response: {e}")
             raise
-
-    def _create_fallback_analysis(
-        self, task: str, objects: List[Dict]
-    ) -> TaskAnalysis:
-        """Create basic fallback analysis if LLM fails."""
-        return TaskAnalysis(
-            action_sequence=["navigate", "manipulate"],
-            goal_predicates=["completed(task)"],
-            preconditions=["ready(robot)"],
-            goal_objects=[obj.get("object_id", "") for obj in objects[:3]],
-            tool_objects=[],
-            obstacle_objects=[],
-            initial_predicates=[],
-            global_predicates=["hand_is_empty"],
-            relevant_predicates=["at", "holding", "clear"],
-            required_actions=[],
-            complexity="medium",
-            estimated_steps=2
-        )
 
     def _make_cache_key(self, task: str, objects: List[Dict]) -> str:
         """Create cache key from task and objects."""
