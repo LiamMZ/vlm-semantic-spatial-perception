@@ -75,7 +75,7 @@ class SkillDecomposer:
             "top_p": 0.8,
             "max_output_tokens": 4096,
             "response_mime_type": "application/json",
-            "thinking_config": types.ThinkingConfig(thinking_budget=0),
+            "thinking_config": types.ThinkingConfig(thinking_budget=-1),
         }
         self.llm_config_kwargs = {**default_llm_config, **(llm_config_kwargs or {})}
 

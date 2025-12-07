@@ -29,10 +29,14 @@ def main():
     # Convert camera-frame target to base frame first for move_to_pose
     pos_base, quat_base = planner.convert_cam_pose_to_base([0.0, 0.0, 0.5], [0.0, 1.0, 0.0, 0.0])
     success, trajectory, dt = planner.move_to_pose(
-        target_position=pos_base,
+        target_position=[
+            0.4257207583414897,
+            -0.33239454733845436,
+            0.19909752107068024
+          ],
         target_orientation=None,
         force_top_down=False,
-        preset_orientation="side",
+        preset_orientation="top_down",
         unconstrained_orientation=False,
         planning_timeout=5.0,
         execute=True,
