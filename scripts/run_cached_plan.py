@@ -178,25 +178,16 @@ def main() -> None:
         plan = SkillPlan.from_dict(entry_plan_dict)
         label = entry_key or plan.action_name or f"plan_{idx}"
         print(f"--> Executing plan '{label}' with {len(plan.primitives)} primitives")
-        result_payload = executor.execute_plan(
-            plan,
-            world_state,
-            dry_run=not execute,
-        )
+        result_payload = executor.execute_plan(plan, world_state, dry_run=not execute)
         run_result: Dict[str, Any] = {
             "plan_key": entry_key,
             "action_name": plan.action_name,
             "plan": plan.to_dict(),
-            "warnings": result_payload.warnings,
-            "errors": result_payload.errors,
             "executed": result_payload.executed,
         }
         if result_payload.primitive_results:
             run_result["primitive_results"] = result_payload.primitive_results
         cumulative_results.append(run_result)
-        if result_payload.errors:
-            print(f"Plan '{label}' reported errors; skipping remaining plans.")
-            break
 
     if len(cumulative_results) == 1:
         output_payload: Dict[str, Any] | List[Dict[str, Any]] = cumulative_results[0]

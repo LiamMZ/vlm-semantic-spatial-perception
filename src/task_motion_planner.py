@@ -217,6 +217,7 @@ class TaskAndMotionPlanner:
         self.primitive_executor = PrimitiveExecutor(
             primitives=config.primitives_interface,
             perception_pool_dir=perception_pool_dir,
+            logger=self.orchestrator.logger.getChild("PrimitiveExecutor"),
         )
 
         # Execution tracking
@@ -470,7 +471,7 @@ class TaskAndMotionPlanner:
             dry_run: If True, validate but don't execute
 
         Returns:
-            Execution result with success status and any errors
+            Execution result with success status; exceptions propagate on failure.
         """
         print(f"\n  Executing: {action_name} ({'DRY RUN' if dry_run else 'LIVE'})")
 
@@ -478,40 +479,16 @@ class TaskAndMotionPlanner:
         # This includes: registry, last_snapshot_id, snapshot_index, robot_state
         world_state = self.orchestrator.get_world_state_snapshot()
 
-        # Execute plan
-        try:
-            result = self.primitive_executor.execute_plan(
-                plan=skill_plan,
-                world_state=world_state,
-                dry_run=dry_run
-            )
-        except Exception as e:
-            print(f"    ✗ EXCEPTION during execute_plan: {e}")
-            import traceback
-            traceback.print_exc()
-            # Return a failed result
-            from src.primitives.primitive_executor import PrimitiveExecutionResult
-            result = PrimitiveExecutionResult(
-                executed=False,
-                errors=[f"Exception during execution: {str(e)}"],
-                warnings=[]
-            )
+        result = self.primitive_executor.execute_plan(
+            plan=skill_plan,
+            world_state=world_state,
+            dry_run=dry_run
+        )
 
         if result.executed:
             print(f"    ✓ Executed {len(skill_plan.primitives)} primitives")
         else:
-            print(f"    ✗ Execution failed")
-            if result.errors:
-                print(f"    Errors ({len(result.errors)}):")
-                for error in result.errors:
-                    print(f"      • {error}")
-            else:
-                print(f"      ⚠ No error messages returned (this is a bug!)")
-
-        if result.warnings:
-            print(f"    Warnings ({len(result.warnings)}):")
-            for warning in result.warnings:
-                print(f"      • {warning}")
+            print(f"    ✓ Validated {len(skill_plan.primitives)} primitives (dry run)")
 
         if self.config.on_action_executed:
             self.config.on_action_executed(action_name, result)

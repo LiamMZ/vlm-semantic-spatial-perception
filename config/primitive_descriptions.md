@@ -4,7 +4,7 @@ This is the ground-truth reference for every primitive callable on `CuRoboMotion
 - Positions: meters
 - Orientations: quaternions `[x, y, z, w]`
 
-Read this top-to-bottom if you are new to the stack—each entry explains what the primitive does, its arguments, defaults, typical uses, and safety notes. Gemini only sees RGB; emit the helper parameters listed for each primitive (e.g., `target_pixel_yx`, `pivot_pixel_yx`, `depth_offset_m`) and the `PrimitiveExecutor` will convert them into metric poses/points immediately before execution. 
+Read this top-to-bottom if you are new to the stack—each entry explains what the primitive does, its arguments, defaults, typical uses, and safety notes. Gemini only sees RGB; emit the helper parameters listed for each primitive (e.g., `target_pixel_yx`, `depth_offset_m`) and the `PrimitiveExecutor` will convert them into metric poses/points immediately before execution. 
 
 ## move_to_pose
 - **What it does**: Converts a camera-frame pose into the base frame and plans a trajectory to move the gripper to the pose

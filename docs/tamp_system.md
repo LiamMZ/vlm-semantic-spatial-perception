@@ -334,8 +334,6 @@ result = await tamp.execute_skill_plan(
 ```python
 {
   "executed": True,
-  "warnings": [],
-  "errors": [],
   "primitive_results": [...]
 }
 ```
@@ -417,10 +415,7 @@ if not result.success:
     elif result.failed_at_stage == "decomposition":
         print(f"Failed to decompose action to primitives")
     elif result.failed_at_stage == "execution":
-        print(f"Primitive execution failed")
-        for exec_result in result.execution_results:
-            if exec_result.errors:
-                print(f"Errors: {exec_result.errors}")
+        print("Primitive execution failed; check executor logs for details")
 ```
 
 ### Decomposition Failures

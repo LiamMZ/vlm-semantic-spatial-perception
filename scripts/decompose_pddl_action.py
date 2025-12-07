@@ -151,14 +151,12 @@ def main() -> None:
         primitives=None,
         perception_pool_dir=world_dir / "perception_pool",
     )
-    _, warnings, errors = executor.prepare_plan(plan, world_state)
+    executor.prepare_plan(plan, world_state)
 
     translated_path.write_text(
         json.dumps(
             {
                 "plan": plan.to_dict(),
-                "warnings": warnings,
-                "errors": errors,
             },
             indent=2,
         )
