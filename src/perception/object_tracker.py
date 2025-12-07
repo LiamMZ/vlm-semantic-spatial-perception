@@ -751,6 +751,11 @@ class ObjectTracker:
 
         # Format task context for analysis
         task_context_section = self._format_task_context_for_analysis()
+        analysis_schema = json.dumps(
+            self.prompts["analysis"].get("response_schema", {}),
+            ensure_ascii=True,
+            indent=2
+        )
 
         if self.fast_mode:
             # Fast mode: only detect affordances and properties, no interaction points
@@ -759,7 +764,8 @@ class ObjectTracker:
                 crop_note=crop_note,
                 predicates_section=predicates_section,
                 predicates_example=predicates_example,
-                task_context_section=task_context_section
+                task_context_section=task_context_section,
+                analysis_schema=analysis_schema
             )
         elif cached_data:
             # Use cached affordances, only detect interaction points
@@ -767,7 +773,8 @@ class ObjectTracker:
                 object_name=object_name,
                 crop_note=crop_note,
                 cached_affordances=cached_data['affordances'],
-                object_type=cached_data['object_type']
+                object_type=cached_data['object_type'],
+                analysis_schema=analysis_schema
             )
         else:
             # Full analysis
@@ -776,14 +783,16 @@ class ObjectTracker:
                 crop_note=crop_note,
                 predicates_section=predicates_section,
                 predicates_example=predicates_example,
-                task_context_section=task_context_section
+                task_context_section=task_context_section,
+                analysis_schema=analysis_schema
             )
 
         try:
             response_text = await self._generate_content(
                 analysis_image,
                 prompt,
-                temperature
+                temperature,
+                response_schema=self.prompts["analysis"].get("response_schema")
             )
             data = self._parse_json_response(response_text)
 
@@ -845,11 +854,16 @@ class ObjectTracker:
 
                 return [full_norm_y, full_norm_x]
 
-            # Extract interaction points
-            interaction_points = {}
-            interaction_points_data = data.get("interaction_points", {})
+            # Extract interaction points from list entries {affordance, position, reasoning}
+            interaction_points_result: Dict[str, InteractionPoint] = {}
+            for entry in data.get("interaction_points") or []:
+                if not isinstance(entry, dict):
+                    continue
+                affordance = entry.get("affordance")
+                point_data = entry if isinstance(entry, dict) else {}
+                if not isinstance(affordance, str):
+                    continue
 
-            for affordance, point_data in interaction_points_data.items():
                 pos_2d_crop = point_data.get("position", [500, 500])
                 # Back-project to full image coordinates
                 pos_2d = backproject_to_full_image(pos_2d_crop)
@@ -867,10 +881,10 @@ class ObjectTracker:
                         use_intrinsics
                     )
 
-                interaction_points[affordance] = InteractionPoint(
+                interaction_points_result[affordance] = InteractionPoint(
                     position_2d=pos_2d,
                     position_3d=pos_3d,
-                    alternative_points=point_data.get("alternative_points", [])
+                    alternative_points=[]
                 )
 
             # Extract center position
@@ -917,7 +931,7 @@ class ObjectTracker:
                 object_type=object_type,
                 object_id=existing_object_id or object_id,
                 affordances=affordances,
-                interaction_points=interaction_points,
+                interaction_points=interaction_points_result,
                 position_2d=pos_2d,
                 position_3d=pos_3d,
                 bounding_box_2d=final_bbox
@@ -1414,6 +1428,7 @@ class ObjectTracker:
         image: Image.Image,
         prompt: str,
         temperature: Optional[float],
+        response_schema: Optional[Dict[str, Any]] = None,
         additional_image_parts: Optional[List[types.Part]] = None,
         content_parts: Optional[List[Any]] = None,
         contents: Optional[List[Any]] = None
@@ -1427,6 +1442,7 @@ class ObjectTracker:
             image,
             prompt,
             temperature,
+            response_schema=response_schema,
             additional_image_parts=additional_image_parts,
             content_parts=content_parts,
             contents=contents
@@ -1439,6 +1455,7 @@ class ObjectTracker:
         image: Image.Image,
         prompt: str,
         temperature: Optional[float],
+        response_schema: Optional[Dict[str, Any]] = None,
         additional_image_parts: Optional[List[types.Part]] = None,
         content_parts: Optional[List[Any]] = None,
         contents: Optional[List[Any]] = None
@@ -1464,12 +1481,17 @@ class ObjectTracker:
         payload = contents if contents is not None else content_parts
 
         temp = temperature if temperature is not None else self.default_temperature
-        config = types.GenerateContentConfig(
-            temperature=temp,
-            thinking_config=types.ThinkingConfig(
+        config_kwargs: Dict[str, Any] = {
+            "temperature": temp,
+            "thinking_config": types.ThinkingConfig(
                 thinking_budget=self.thinking_budget
             )
-        )
+        }
+        if response_schema:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_json_schema"] = response_schema
+
+        config = types.GenerateContentConfig(**config_kwargs)
 
         # Use async streaming via client.aio
         stream = await self.client.aio.models.generate_content_stream(
