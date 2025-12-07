@@ -36,6 +36,46 @@ detection:
 
 # Object Analysis Prompts
 analysis:
+  response_schema:
+    type: object
+    required: ["object_type", "position"]
+    properties:
+      object_type:
+        type: string
+        description: Canonical object type or label.
+      position:
+        type: array
+        description: Object center [y, x] normalized to 0-1000.
+        minItems: 2
+        maxItems: 2
+        items:
+          type: number
+      affordances:
+        type: array
+        description: List of affordances supported by the object.
+        items:
+          type: string
+      interaction_points:
+        type: array
+        description: List of interaction point entries keyed by affordance.
+        items:
+          type: object
+          required: ["affordance", "position"]
+          properties:
+            affordance:
+              type: string
+              description: Affordance name (e.g., graspable, pourable).
+            position:
+              type: array
+              description: Interaction point [y, x] normalized to 0-1000.
+              minItems: 2
+              maxItems: 2
+              items:
+                type: number
+            reasoning:
+              type: string
+              description: Brief rationale for the interaction point.
+
   # Fast mode: only affordances and properties, no interaction points
   fast_mode: |-
     You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}{task_context_section}
@@ -44,16 +84,10 @@ analysis:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates
     2. Affordances: What robot actions are possible?
        - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-    3. Properties: Color, size, material, state{predicates_section}
+    3. PDDL Predicates (if requested):{predicates_section}
 
-    Return JSON:
-    {{
-      "object_type": "cup",
-      "position": [450, 320],
-      "affordances": ["graspable", "pourable", "containable"],
-      "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{predicates_example},
-      "confidence": 0.95
-    }}
+    Return JSON only. Follow this schema (also enforced via response_json_schema):
+    {analysis_schema}
 
     All positions in 0-1000 normalized coords relative to THIS image.
 
@@ -63,18 +97,8 @@ analysis:
     
     Known affordances: {cached_affordances}
     
-    For EACH affordance, identify the optimal interaction point:
-    
-    Return JSON:
-    {{
-      "object_type": "{object_type}",
-      "position": [450, 320],
-      "interaction_points": {{
-        "graspable": {{"position": [450, 340], "confidence": 0.95, "reasoning": "..."}},
-        "pourable": {{"position": [450, 320], "confidence": 0.90, "reasoning": "..."}}
-      }},
-      "confidence": 0.95
-    }}
+    For EACH affordance, identify the optimal interaction point and return JSON that follows this schema (also enforced via response_json_schema):
+    {analysis_schema}
     
     All positions in 0-1000 normalized coords relative to THIS image.
 
@@ -87,34 +111,11 @@ analysis:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
     2. Affordances: What robot actions are possible with this object?
        - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-    3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
-    4. Properties: Color, size, material, state, etc.{predicates_section}
+    3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image){predicates_section}
 
-    Return in JSON format:
-    {{
-      "object_type": "cup",
-      "position": [450, 320],
-      "affordances": ["graspable", "pourable", "containable"],
-      "interaction_points": {{
-        "graspable": {{
-          "position": [450, 340],
-          "confidence": 0.95,
-          "reasoning": "Handle on the right side provides stable grasp point"
-        }},
-        "pourable": {{
-          "position": [450, 320],
-          "confidence": 0.90,
-          "reasoning": "Top rim center for tilting and pouring"
-        }}
-      }},
-      "properties": {{
-        "color": "red",
-        "material": "ceramic",
-        "size": "medium",
-        "state": "upright"
-      }}{predicates_example},
-      "confidence": 0.95
-    }}
+    Return JSON only. Follow this schema (also enforced via response_json_schema):
+    {analysis_schema}
+    Include `predicates` only when requested: {predicates_example}
 
     Note: All positions are in 0-1000 normalized coordinates relative to THIS image.
     Analyze the {object_name} based on its visual appearance.
@@ -212,4 +213,3 @@ task_context:
     The robot needs to perform: {action_description}
 
     Consider the task requirements when identifying the optimal interaction point.
-
