@@ -171,9 +171,7 @@ class PrimitiveExecutor:
                     if key not in primitive.parameters:
                         continue
                     pos = primitive.parameters[key]
-                    if not isinstance(pos, (list, tuple)) or len(pos) < 3:
-                        raise ValueError(f"{primitive.name}: invalid {key} for base transform ({pos})")
-                    base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
+                    base_pos = cam_pose.rotation.apply(pos) + cam_pose.position
                     primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
                     self.logger.debug("Transformed %s: %s -> %s", key, pos, primitive.parameters[key])
 
