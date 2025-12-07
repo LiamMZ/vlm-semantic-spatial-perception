@@ -155,8 +155,9 @@ predicates:
        **CRITICAL RULES FOR PREDICATES:**
        - ONLY use predicates from the available predicates list above
        - For unary predicates: "predicate_name {object_id}"
-       - For binary/relational predicates: "predicate_name {object_id} other_object"
+       - For binary/relational predicates: "predicate_name {object_id} other_object_id"
        - Use the EXACT {object_id} provided (not a variation or abbreviation)
+       - Use the EXACT other_object_id provided in the detected scene objects list (not a variation or abbreviation)
 
        **CRITICAL: Object Name Validation**
        - EVERY object name in predicates MUST be from the detected objects list above
