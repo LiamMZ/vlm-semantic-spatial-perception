@@ -188,14 +188,13 @@ Return JSON with:
   "action_sequence": ["action1", "action2", ...],
   "goal_predicates": ["(predicate1 obj1 obj2)", ...],
   "preconditions": ["(predicate obj)", ...],
-  "initial_predicates": ["expected_initial_states"],
-  "relevant_predicates": ["predicate_names"],
+  "initial_predicates": ["(expected_initial_states)", ...],
+  "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
   "goal_objects": ["object_id1", ...],
   "global_predicates": ["global_predicate1", ...],
   "tool_objects": ["tool_id", ...],
   "obstacle_objects": ["obstacle_id", ...],
   "initial_predicates": ["(current_predicate obj)", ...],
-  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
   "relevant_types": ["type1", "type2", ...],
   "required_actions": [
     {{
@@ -206,6 +205,15 @@ Return JSON with:
     }}
   ],
 }}
+
+IMPORTANT: Relevant Predicates Format
+- "relevant_predicates" MUST include parameters in PDDL format:
+  - "(graspable ?obj)" - NOT just "graspable"
+  - "(clear ?obj)" - NOT just "clear"
+  - "(on ?obj ?surface)" - binary predicate
+  - "(empty-hand)" - zero-parameter predicate
+  - "(holding ?obj)" - NOT just "holding"
+- Parameter count MUST match usage in action preconditions/effects
 
 IMPORTANT: Global Predicates
 - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
@@ -227,7 +235,7 @@ IMPORTANT PDDL RULES:
 4. All predicates should be predicates applied to variables, not string constants
 5. GLOBAL Predicates should not be returned with parenthases
 
-Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
+Include 8-12 relevant_predicates with proper PDDL format like "(graspable ?obj)", "(on ?x ?y)", "(clear ?obj)", "(empty-hand)", and 3-5 required_actions."""
 
     def _build_analysis_prompt(
         self,
@@ -267,14 +275,13 @@ Provide a JSON response with:
   "action_sequence": ["action1", "action2", ...],
   "goal_predicates": ["(predicate1 obj1 obj2)", ...],
   "preconditions": ["(predicate obj)", ...],
-  "initial_predicates": ["expected_initial_states"],
-  "relevant_predicates": ["predicate_names"],
+  "initial_predicates": ["(expected_initial_states)", ...],
+  "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
   "goal_objects": ["object_id1", ...],
   "global_predicates": ["global_predicate1", ...],
   "tool_objects": ["tool_id", ...],
   "obstacle_objects": ["obstacle_id", ...],
   "initial_predicates": ["(current_predicate obj)", ...],
-  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
   "relevant_types": ["type1", "type2", ...],
   "required_actions": [
     {{
@@ -287,6 +294,11 @@ Provide a JSON response with:
   "complexity": "simple|medium|complex",
   "estimated_steps": 3
 }}
+
+CRITICAL: Relevant Predicates Format
+- "relevant_predicates" MUST include parameters: ["(graspable ?obj)", "(on ?x ?y)", "(empty-hand)"]
+- NOT bare names: ["graspable", "on", "empty-hand"]
+- Parameter count must match action usage
 
 CRITICAL PDDL FORMATTING RULES:
 1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)

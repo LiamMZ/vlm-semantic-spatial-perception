@@ -14,14 +14,12 @@ initial_analysis_prompt: |
     "goal_predicates": ["(predicate1 obj1 obj2)", ...],
     "preconditions": ["(predicate obj)", ...],
     "initial_predicates": ["(expected_initial_states)", ...],
-    "relevant_predicates": ["predicate_names"],
     "goal_objects": ["object_id1", ...],
     "global_predicates": ["global_predicate1", ...],
     "tool_objects": ["tool_id", ...],
     "obstacle_objects": ["obstacle_id", ...],
     "initial_predicates": ["(current_predicate obj)", ...],
-    "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
-    "relevant_types": ["type1", "type2", ...],
+    "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
     "required_actions": [
       {
         "name": "pick",
@@ -94,14 +92,12 @@ analysis_prompt: |
     "goal_predicates": ["(predicate1 obj1 obj2)", ...],
     "preconditions": ["(predicate obj)", ...],
     "initial_predicates": ["(expected_initial_states)", ...],
-    "relevant_predicates": ["predicate_names"],
     "goal_objects": ["object_id1", ...],
     "global_predicates": ["global_predicate1", ...],
     "tool_objects": ["tool_id", ...],
     "obstacle_objects": ["obstacle_id", ...],
     "initial_predicates": ["(current_predicate obj)", ...],
-    "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
-    "relevant_types": ["type1", "type2", ...],
+    "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
     "required_actions": [
       {
         "name": "pick",

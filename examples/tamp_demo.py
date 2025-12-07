@@ -66,7 +66,7 @@ sys.path.insert(0, str(project_root))
 
 from src.task_motion_planner import TaskAndMotionPlanner, TAMPConfig, TAMPState, TAMPResult
 from src.utils.genai_logging import configure_genai_logging
-
+from src.kinematics.xarm_curobo_interface import CuroboboMotionPlanner
 
 class TAMPDemo:
     """Interactive demo for the complete TAMP system."""
@@ -120,7 +120,7 @@ class TAMPDemo:
             solver_algorithm="lama-first",
             solver_timeout=60.0,
             dry_run_default=dry_run,
-            primitives_interface=None,  # Would be robot interface in real deployment
+            primitives_interface=CuroboboMotionPlanner(robot_ip="192.168.1.224"),  # Would be robot interface in real deployment
             on_state_change=self._on_state_change,
             on_plan_generated=self._on_plan_generated,
             on_action_decomposed=self._on_action_decomposed,

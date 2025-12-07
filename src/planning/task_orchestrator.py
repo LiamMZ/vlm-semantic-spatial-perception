@@ -1315,6 +1315,8 @@ class TaskOrchestrator:
                     print("Problem file exists!")
                     problem_content = problem_path.read_text()
                     print(problem_content)
+                    print("############################")
+                    print(domain_content)
                 else: 
                     print("  ⚠ Problem file not found for refinement context")
             else:

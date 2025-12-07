@@ -280,6 +280,9 @@ class PDDLDomainMaintainer:
                     await self.pddl.add_predicate_async(pred_name, [])
 
         # Add predicted predicates
+        # First, infer parameter counts from action definitions
+        predicate_param_counts = self._infer_predicate_arities_from_actions()
+
         normalized_predicates: List[str] = []
         seen_normalized: Set[str] = set()
 
@@ -292,6 +295,15 @@ class PDDLDomainMaintainer:
 
             if not predicate_name:
                 continue
+
+            # If predicate has no parameters but is used with parameters in actions,
+            # infer the parameter count from action usage
+            if not parameter_defs and predicate_name in predicate_param_counts:
+                param_count = predicate_param_counts[predicate_name]
+                parameter_defs = [(f"obj{i+1}", "object") for i in range(param_count)]
+                # Update normalized display
+                param_vars = ' '.join([f"?{name}" for name, _ in parameter_defs])
+                normalized_display = f"({predicate_name} {param_vars})" if param_vars else predicate_name
 
             if predicate_name not in self.pddl.predicates:
                 await self.pddl.add_predicate_async(
@@ -546,6 +558,61 @@ class PDDLDomainMaintainer:
             "missing_predicates": missing_predicates,
             "invalid_actions": invalid_actions
         }
+
+    def _infer_predicate_arities_from_actions(self) -> Dict[str, int]:
+        """
+        Infer the number of parameters (arity) for each predicate by analyzing
+        how they're used in action preconditions and effects.
+
+        Returns:
+            Dict mapping predicate names to their parameter counts
+        """
+        import re
+        predicate_arities: Dict[str, int] = {}
+
+        if not self.task_analysis or not self.task_analysis.required_actions:
+            return predicate_arities
+
+        for action_def in self.task_analysis.required_actions:
+            # Extract predicates from precondition and effect
+            precondition = action_def.get("precondition", "")
+            effect = action_def.get("effect", "")
+
+            for formula in [precondition, effect]:
+                if not formula:
+                    continue
+
+                # Find all predicate usages like (predicate ?x ?y)
+                # Pattern matches: (predicate_name param1 param2 ...)
+                pattern = r'\(([a-zA-Z][a-zA-Z0-9_-]*)\s+([^)]+)\)'
+                matches = re.findall(pattern, formula)
+
+                for pred_name, params_str in matches:
+                    # Skip logical operators
+                    if pred_name in {'and', 'or', 'not', 'forall', 'exists', 'when'}:
+                        continue
+
+                    # Count parameters (split on whitespace)
+                    params = params_str.split()
+                    param_count = len(params)
+
+                    # Store the maximum arity seen for this predicate
+                    if pred_name in predicate_arities:
+                        predicate_arities[pred_name] = max(predicate_arities[pred_name], param_count)
+                    else:
+                        predicate_arities[pred_name] = param_count
+
+                # Also handle zero-parameter predicates like (empty-hand)
+                pattern_zero = r'\(([a-zA-Z][a-zA-Z0-9_-]*)\)'
+                matches_zero = re.findall(pattern_zero, formula)
+                for pred_name in matches_zero:
+                    if pred_name in {'and', 'or', 'not', 'forall', 'exists', 'when'}:
+                        continue
+                    # Only set to 0 if we haven't seen it with parameters
+                    if pred_name not in predicate_arities:
+                        predicate_arities[pred_name] = 0
+
+        return predicate_arities
 
     @staticmethod
     def _normalize_predicate_signature(

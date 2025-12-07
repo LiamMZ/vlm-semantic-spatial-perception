@@ -62,6 +62,7 @@ from src.planning.pddl_solver import SolverResult
 from src.primitives.skill_decomposer import SkillDecomposer
 from src.primitives.primitive_executor import PrimitiveExecutor, PrimitiveExecutionResult
 from src.primitives.skill_plan_types import SkillPlan
+from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
 from src.utils.genai_logging import configure_genai_logging
 from src.camera.realsense_camera import RealSenseCamera
 # Import orchestrator config
@@ -113,7 +114,7 @@ class TAMPConfig:
 
     # Execution settings
     dry_run_default: bool = False  # Default dry-run mode for execution
-    primitives_interface: Optional[Any] = None  # Actual robot primitives interface
+    primitives_interface: Optional[Any] = CuRoboMotionPlanner(robot_ip="192.168.1.224")  # Actual robot primitives interface
 
     # Callbacks
     on_state_change: Optional[Callable[[TAMPState], None]] = None
@@ -473,27 +474,44 @@ class TaskAndMotionPlanner:
         """
         print(f"\n  Executing: {action_name} ({'DRY RUN' if dry_run else 'LIVE'})")
 
-        # Get current world state from orchestrator
-        world_state = {
-            "registry": self.orchestrator.tracker.registry.to_dict() if self.orchestrator.tracker else {},
-            "snapshots": {}  # Executor will load from perception pool
-        }
+        # Get complete world state from orchestrator (matches run_cached_plan.py format)
+        # This includes: registry, last_snapshot_id, snapshot_index, robot_state
+        world_state = self.orchestrator.get_world_state_snapshot()
 
         # Execute plan
-        result = self.primitive_executor.execute_plan(
-            plan=skill_plan,
-            world_state=world_state,
-            dry_run=dry_run
-        )
+        try:
+            result = self.primitive_executor.execute_plan(
+                plan=skill_plan,
+                world_state=world_state,
+                dry_run=dry_run
+            )
+        except Exception as e:
+            print(f"    ✗ EXCEPTION during execute_plan: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return a failed result
+            from src.primitives.primitive_executor import PrimitiveExecutionResult
+            result = PrimitiveExecutionResult(
+                executed=False,
+                errors=[f"Exception during execution: {str(e)}"],
+                warnings=[]
+            )
 
         if result.executed:
             print(f"    ✓ Executed {len(skill_plan.primitives)} primitives")
         else:
-            print(f"    ✗ Execution failed: {result.errors}")
+            print(f"    ✗ Execution failed")
+            if result.errors:
+                print(f"    Errors ({len(result.errors)}):")
+                for error in result.errors:
+                    print(f"      • {error}")
+            else:
+                print(f"      ⚠ No error messages returned (this is a bug!)")
 
         if result.warnings:
+            print(f"    Warnings ({len(result.warnings)}):")
             for warning in result.warnings:
-                print(f"    ⚠ {warning}")
+                print(f"      • {warning}")
 
         if self.config.on_action_executed:
             self.config.on_action_executed(action_name, result)

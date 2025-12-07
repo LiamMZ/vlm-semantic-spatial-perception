@@ -56,15 +56,18 @@ class PrimitiveExecutor:
         """
         Translate (and optionally execute) a primitive plan.
         """
+        print("Executing plan:", plan)
         translated_plan, warnings, errors = self.prepare_plan(plan, world_state)
         if errors:
+            print(f"    ✗ Preparation failed with errors: {errors}")
             return PrimitiveExecutionResult(executed=False, warnings=warnings, errors=errors)
         if dry_run or self.primitives is None:
             return PrimitiveExecutionResult(executed=False, warnings=warnings)
-
+        print("Executing translated plan...")
         primitive_results: List[Any] = []
         runtime_errors: List[str] = []
         for idx, primitive in enumerate(translated_plan.primitives):
+            print(f"    Executing primitive [{idx}]: {primitive.name} with parameters {primitive.parameters}")
             schema = PRIMITIVE_LIBRARY.get(primitive.name)
             if (
                 self.primitives is not None
@@ -78,6 +81,7 @@ class PrimitiveExecutor:
                 runtime_errors.append(f"[{idx}] primitives missing primitive '{primitive.name}'")
                 break
             try:
+                print(f"      Calling primitive method '{primitive.name}' with parameters: {primitive.parameters}")
                 raw_result = method(**primitive.parameters)
                 result = self._json_safe(raw_result)
                 primitive_results.append(result)
@@ -105,39 +109,93 @@ class PrimitiveExecutor:
         warnings: List[str] = []
         errors: List[str] = []
 
-        artifacts = load_snapshot_artifacts(
-            world_state,
-            self.perception_pool_dir,
-            cache=self._snapshot_cache,
-            snapshot_id=getattr(plan, "source_snapshot_id", None),
-        )
-        if getattr(plan, "source_snapshot_id", None) and plan.source_snapshot_id != artifacts.snapshot_id:
-            warnings.append(
-                f"Plan snapshot {plan.source_snapshot_id} missing on disk; "
-                f"using {artifacts.snapshot_id or 'latest available'} instead"
+        try:
+            print(f"    [prepare_plan] Starting - {len(plan.primitives)} primitives to translate")
+
+            artifacts = load_snapshot_artifacts(
+                world_state,
+                self.perception_pool_dir,
+                cache=self._snapshot_cache,
+                snapshot_id=getattr(plan, "source_snapshot_id", None),
             )
-        if self.primitives:
+            print(f"    [prepare_plan] Snapshot artifacts loaded: snapshot_id={artifacts.snapshot_id}")
+
+            if getattr(plan, "source_snapshot_id", None) and plan.source_snapshot_id != artifacts.snapshot_id:
+                warning = f"Plan snapshot {plan.source_snapshot_id} missing; using {artifacts.snapshot_id or 'latest'}"
+                print(f"    [prepare_plan] ⚠ {warning}")
+                warnings.append(warning)
+
+            if not self.primitives:
+                print("    [prepare_plan] No primitives interface - skipping translation")
+                return None, None, None
+
+            # Get camera pose from robot joints
             joints = (artifacts.robot_state or {}).get("joints")
+            print(f"    [prepare_plan] Robot joints: {joints}")
+
             helper = getattr(self.primitives, "camera_pose_from_joints", None)
+            if not helper:
+                error = "Primitives interface missing 'camera_pose_from_joints' method"
+                print(f"    [prepare_plan] ✗ ERROR: {error}")
+                errors.append(error)
+                return plan, warnings, errors
+
+            print(f"    [prepare_plan] Getting camera pose from joints...")
             pos, rot = helper(joints)
-            cam_pose =  SnapshotCameraPose(position=np.asarray(pos, dtype=float), rotation=rot)
-            for primitive in plan.primitives:
-                warnings.extend(self._translate_helper_parameters(primitive, artifacts))
+            print(f"    [prepare_plan] Camera pose: pos={pos}, rot={rot}")
+
+            cam_pose = SnapshotCameraPose(position=np.asarray(pos, dtype=float), rotation=rot)
+
+            # Translate each primitive
+            for idx, primitive in enumerate(plan.primitives):
+                print(f"    [prepare_plan] [{idx+1}/{len(plan.primitives)}] {primitive.name}: {primitive.parameters}")
+
+                try:
+                    prim_warnings = self._translate_helper_parameters(primitive, artifacts)
+                    if prim_warnings:
+                        print(f"      ⚠ Warnings: {prim_warnings}")
+                        warnings.extend(prim_warnings)
+                except Exception as e:
+                    error = f"Translation failed for {primitive.name}: {e}"
+                    print(f"      ✗ ERROR: {error}")
+                    import traceback
+                    traceback.print_exc()
+                    errors.append(error)
+                    continue
+
+                # Transform coordinates to base frame
                 if cam_pose:
                     for key in ("target_position", "pivot_point"):
                         pos = primitive.parameters.get(key)
                         if not isinstance(pos, (list, tuple)) or len(pos) < 3:
                             continue
-                        base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
-                        primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
+                        try:
+                            base_pos = cam_pose.rotation.apply(np.asarray(pos, dtype=float)) + cam_pose.position
+                            primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
+                            print(f"      Transformed {key}: {pos} → {primitive.parameters[key]}")
+                        except Exception as e:
+                            error = f"Coordinate transform failed for {key}: {e}"
+                            print(f"      ✗ ERROR: {error}")
+                            errors.append(error)
 
+            # Validate the translated plan
+            print("    [prepare_plan] Validating plan...")
             validation_errors = plan.validate(PRIMITIVE_LIBRARY)
             if validation_errors:
+                print(f"    [prepare_plan] ✗ Validation errors: {validation_errors}")
                 errors.extend(validation_errors)
+            else:
+                print("    [prepare_plan] ✓ Validation passed")
 
             return plan, warnings, errors
-        else:
-            return None, None, None
+
+        except Exception as e:
+            error = f"Unexpected exception in prepare_plan: {e}"
+            print(f"    [prepare_plan] ✗ EXCEPTION: {error}")
+            import traceback
+            traceback.print_exc()
+            errors.append(error)
+            return None, warnings, errors
 
     # ------------------------------------------------------------------ #
     # Translation
