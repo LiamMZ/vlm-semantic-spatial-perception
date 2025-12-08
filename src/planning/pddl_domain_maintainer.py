@@ -328,9 +328,16 @@ class PDDLDomainMaintainer:
                     param_list = action_def["parameters"]
                     if isinstance(param_list, list):
                         for p in param_list:
-                            if isinstance(p, str) and " - " in p:
+                            if not isinstance(p, str):
+                                continue
+                            if " - " in p:
                                 name, type_ = p.split(" - ")
                                 params.append((name.strip("?"), type_.strip()))
+                            else:
+                                param_name = p.strip().lstrip("?")
+                                if param_name:
+                                    # Default to untyped STRIPS parameter
+                                    params.append((param_name, "object"))
 
                 # Sanitize preconditions and effects to remove quoted strings
                 # LLMs sometimes add invalid quoted strings like: (is-empty ?obj "reservoir")

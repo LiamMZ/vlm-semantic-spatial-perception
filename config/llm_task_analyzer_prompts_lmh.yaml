@@ -1,173 +1,174 @@
 # Optional default robot description injected into prompts (set to null to omit)
 robot_description: "The robot is a 7-DOF robot arm, with a two-finger rigid gripper as end effector. The end effector cannot grasp objects <1cm or >15cm. The robot has a Realsense RGBD camera mounted at the end effector."
 
-# Extracted verbatim from the inline prompts in lmh/object-registry-updates
-initial_analysis_prompt: |
-  Analyze this robotic task and predict required PDDL components.
-
-  TASK: <<TASK>>
-  <<ROBOT_CONTEXT>>
-
-  Return JSON with:
-  {
-    "action_sequence": ["action1", "action2", ...],
-    "goal_predicates": ["(predicate1 obj1 obj2)", ...],
-    "preconditions": ["(predicate obj)", ...],
-    "initial_predicates": ["(expected_initial_states)", ...],
-    "goal_objects": ["object_id1", ...],
-    "global_predicates": ["global_predicate1", ...],
-    "tool_objects": ["tool_id", ...],
-    "obstacle_objects": ["obstacle_id", ...],
-    "initial_predicates": ["(current_predicate obj)", ...],
-    "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
-    "required_actions": [
-      {
-        "name": "pick",
-        "parameters": ["?obj - object"],
-        "precondition": "(and (graspable ?obj) (clear ?obj))",
-        "effect": "(and (holding ?obj) (not (empty-hand)))"
-      }
-    ],
-  }
-
-  IMPORTANT: Global Predicates
-  - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
-  - These are predicates that should be TRUE INITIALLY before task execution
-  - Examples:
-    - hand_is_empty (or empty-hand): Robot gripper has no object
-    - arm_at_home: Robot arm is at home position
-    - gripper_open: Gripper is in open state
-    - robot_ready: Robot system is initialized
-  - Do NOT include object-related predicates here (those go in initial_predicates)
-  - Global predicates typically have NO parameters or take robot as parameter
-
-  IMPORTANT PDDL RULES:
-  1. Parameters MUST use variables starting with ? (e.g., ?obj, ?location, ?container)
-  2. Preconditions and effects use ONLY variables - NO quoted strings or constants
-  3. If you need to reference a specific part (like "water_reservoir"), create a separate predicate:
-     - WRONG: (is-empty ?machine "water_reservoir")
-     - RIGHT: (water-reservoir-empty ?machine)
-  4. All predicates should be predicates applied to variables, not string constants
-  5. GLOBAL Predicates should not be returned with parenthases
-
-  **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
-  the EXACT same number of parameters as when you first define it. For example:
-  - If you define `(holding ?obj)` in predicates (1 parameter)
-  - Then you MUST use `(holding ?x)` in actions (1 parameter)
-  - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
-  - Parameter names can differ (?obj, ?x, ?item) but the COUNT must match
-
-  **CRITICAL SYNTAX RULE for goal_predicates**: Use proper PDDL syntax with parentheses:
-  - CORRECT: `(coffee-made ?cup)` or `(inside ?obj1 ?obj2)`
-  - WRONG: `coffee-made(?cup)` (no space) or `coffee-made ?cup` (missing parens)
-
-  **VERIFICATION STEPS (complete these BEFORE returning your response):**
-  Step 1: List ALL predicates you defined in `relevant_predicates`
-  Step 2: For EACH action in `required_actions`:
-    a) Extract all predicates from precondition
-    b) Extract all predicates from effect
-    c) For each predicate usage, count its parameters
-    d) Find its definition in `relevant_predicates`
-    e) VERIFY the parameter count EXACTLY matches
-    f) If mismatch, FIX the action OR add missing predicate definition
-  Step 3: Ensure every predicate used exists in `relevant_predicates`
-  Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
-
-  Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions.
-
 analysis_prompt: |
-  You are a robotic task planner. Analyze this task given the observed scene.
+  Your goal is to analyze a task space and formulate a symbolic world representation in
+  PDDL that a robotics system can use to execute the task.
 
-  TASK: <<TASK>>
-  <<ROBOT_CONTEXT>>
-  OBSERVED OBJECTS:
-  <<OBJECT_LIST>>
+  You are given:
 
-  OBSERVED RELATIONSHIPS:
-  <<RELATIONSHIP_LIST>>
+    Task description:
+    <<TASK>>
 
-  Provide a JSON response with:
+    Robot description:
+    <<ROBOT_DESCRIPTION>>
+
+    Current observed objects:
+    <<OBJECTS_JSON>>
+
+    Current observed relationships:
+    <<RELATIONSHIPS_JSON>>
+
+  Ground your answer in the provided scene: use `object_id` values from the observations
+  when listing goal_objects, and express goal_predicates as literals over those goal_objects
+  (no quantifiers or abstract variables).
+
+  You must respond with **valid JSON only**, following this schema:
+
   {
-    "action_sequence": ["action1", "action2", ...],
-    "goal_predicates": ["(predicate1 obj1 obj2)", ...],
-    "preconditions": ["(predicate obj)", ...],
-    "initial_predicates": ["(expected_initial_states)", ...],
-    "goal_objects": ["object_id1", ...],
-    "global_predicates": ["global_predicate1", ...],
-    "tool_objects": ["tool_id", ...],
-    "obstacle_objects": ["obstacle_id", ...],
-    "initial_predicates": ["(current_predicate obj)", ...],
-    "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
-    "required_actions": [
+    "relevant_predicates": [
+      "<predicate_signature_1>",
+      "<predicate_signature_2>",
+      "..."
+    ],
+    "relevant_actions": [
       {
-        "name": "pick",
-        "parameters": ["?obj - object"],
-        "precondition": "(and (graspable ?obj) (clear ?obj))",
-        "effect": "(and (holding ?obj) (not (empty-hand)))"
+        "name": "<action_name_1>",
+        "parameters": ["<param_var_1>", "<param_var_2>", "..."],
+        "precondition": "<pddl_precondition_formula>",
+        "effect": "<pddl_effect_formula>"
+      },
+      {
+        "name": "<action_name_2>",
+        "parameters": ["<param_var_1>", "..."],
+        "precondition": "<pddl_precondition_formula>",
+        "effect": "<pddl_effect_formula>"
       }
     ],
-    "complexity": "simple|medium|complex",
-    "estimated_steps": 3
+    "goal_predicates": [
+      "<goal_literal_1>",
+      "<goal_literal_2>",
+      "..."
+    ],
+    "preconditions": ["(predicate obj)", "..."],
+    "initial_predicates": ["(current_predicate obj)", "..."],
+    "goal_objects": ["object_id1", "..."],
+    "global_predicates": ["global_predicate1", "..."],
+    "required_actions": [ ... ]
   }
 
-  CRITICAL PDDL FORMATTING RULES:
-  1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
-  2. Preconditions and effects can ONLY use:
-     - Variables (e.g., ?obj, ?container)
-     - Predicate names (e.g., graspable, empty-hand, has-water)
-  3. NEVER use quoted strings or constants in preconditions/effects
-  4. If referencing a component, make it a predicate:
-     - WRONG: (is-empty ?machine "water_reservoir")
-     - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
-  5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
-  6. GLOBAL Predicates should not be returned with parenthases
+  Response guidelines:
 
-  **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
-  the EXACT same number of parameters as when you first define it. For example:
-  - If you define `(holding ?obj)` in predicates (1 parameter)
-  - Then you MUST use `(holding ?x)` in actions (1 parameter)
-  - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
-  - Parameter names can differ (?obj, ?x, ?item) but the COUNT must match
+  1. **Purpose.**
+    Your goal is *not* to complete the task, but to propose a useful, general set of
+    symbolic primitives (predicates, actions, and goal conditions) that a downstream
+    planner can use to build a world model and operate on it.
 
-  **CRITICAL SYNTAX RULE for goal_predicates**: Use proper PDDL syntax with parentheses:
-  - CORRECT: `(coffee-made ?cup)` or `(inside ?obj1 ?obj2)`
-  - WRONG: `coffee-made(?cup)` (no space) or `coffee-made ?cup` (missing parens)
+  2. **Relevant predicates.**
+  - `relevant_predicates` should be a detailed and exhaustive list of predicates that
+    might be useful for representing and solving the task.
+  - **IMPORTANT**: Provide predicates with their parameters in PDDL format, e.g.:
+      - `(clear ?obj)` - unary predicate
+      - `(on ?item ?surface)` - binary predicate
+      - `(empty-hand)` - zero-parameter predicate
+      - `(is_cup ?obj)` - unary classification predicate
+  - Include both:
+      - **Relational predicates** (e.g. spatial, containment, support, reachability,
+        state—such as `(on ?x ?y)`, `(inside ?x ?y)`, `(open ?x)`, `(plugged_in ?x)`), and
+      - **Semantic / classification predicates** that label objects by their role or type
+        (e.g. `(is_cup ?x)`, `(is_table ?x)`, `(is_container ?x)`, `(is_button ?x)`), which
+        will later be evaluated from perception and object attributes.
+      Add all semantic predicates that are relevant to the task, world, or goal description
+      so that downstream planners can bind those categories during grounding.
+  - **CRITICAL**: The parameter count in predicate definitions MUST match how they're used in actions.
+      Example: If you define `(graspable ?obj)`, then use `(graspable ?x)` in actions, not `(graspable)`.
+  - Align predicates with observed affordances and task requirements; avoid generic placeholders.
 
+  3. **Relevant actions.**
+    - `relevant_actions` is a list of actions the robot is in principle capable of,
+      given the robot description (e.g. `pick`, `place`, `move_to`, `open`, `close`,
+      `press_button`, `pour`, `plug_in`, etc.).
+    - For each action:
+      - `name` is a short PDDL-style action name (no spaces).
+      - `parameters` is a list of variables, each given as a string like `"?obj"` or `"?src"`.
+      - `precondition` is a single PDDL formula string (often an `(and ...)` expression)
+        using only predicates from `relevant_predicates`.
+      - `effect` is a single PDDL formula string (again typically an `(and ...)`
+        expression) specifying both positive and negative effects, using only predicates
+        from `relevant_predicates`.
+    - **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
+      the EXACT same number of parameters as defined in `relevant_predicates`. For example:
+      - If you define `(holding ?obj)` in predicates (1 parameter)
+      - Then you MUST use `(holding ?x)` in actions (1 parameter)
+      - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
+    - If you introduce a predicate in any action's precondition or effect that is not yet
+      in `relevant_predicates`, you **must** add its full signature to
+      `relevant_predicates`.
 
-  IMPORTANT: Global Predicates
-      - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
-      - These are predicates that should be TRUE INITIALLY before task execution
-      - Examples:
-      - hand_is_empty (or empty-hand): Robot gripper has no object
-      - arm_at_home: Robot arm is at home position
-      - gripper_open: Gripper is in open state
-      - robot_ready: Robot system is initialized
-      - Do NOT include object-related predicates here (those go in initial_predicates)
-      - Global predicates typically have NO parameters or take robot as parameter
+  4. **Goal predicates.**
+    - `goal_predicates` should describe the intended task outcome as literal facts about
+      the `goal_objects` (use their observed object_ids), not quantified/abstract
+      conditions. Examples:
+        - `(inside bottle_1 bag_2)`
+        - `(on cup_3 table_1)`
+    - Avoid quantifiers and abstract placeholders; write direct literals over the goal_objects list.
+    - Use only predicates that appear in `relevant_predicates`.
 
-  **VERIFICATION STEPS (complete these BEFORE returning your response):**
-  Step 1: List ALL predicates you defined in `relevant_predicates`
-  Step 2: For EACH action in `required_actions`:
-    a) Extract all predicates from precondition
-    b) Extract all predicates from effect
-    c) For each predicate usage, count its parameters
-    d) Find its definition in `relevant_predicates`
-    e) VERIFY the parameter count EXACTLY matches
-    f) If mismatch, FIX the action OR add missing predicate definition
-  Step 3: Ensure every predicate used exists in `relevant_predicates`
-  Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
+  5. **Global and initial predicates.**
+    - `global_predicates` describe robot/environment state that should be TRUE before task execution (e.g., `hand_is_empty`, `arm_at_home`, `gripper_open`, `robot_ready`).
+    - Do NOT include object-related facts in `global_predicates`; place those in `initial_predicates`.
+    - Global predicates typically have no parameters (or take the robot as the sole parameter) and should be returned without parentheses.
 
-  Example verification for action "pick":
-  - Precondition uses: `(empty-hand)` → 0 params
-  - Check definition: `(empty-hand)` → 0 params ✓ MATCH
-  - Precondition uses: `(graspable ?obj)` → 1 param
-  - Check definition: `(graspable ?obj)` → 1 param ✓ MATCH
-  - Effect uses: `(holding ?obj)` → 1 param
-  - Check definition: `(holding ?obj)` → 1 param ✓ MATCH
+  6. **PDDL formatting rules (apply everywhere).**
+    - Parameters MUST use variables with ? prefix (e.g., `?obj`, `?location`, `?machine`) and keep everything untyped (no `- object` or other type annotations).
+    - Preconditions and effects can ONLY use variables and predicate names; NEVER include quoted strings or constants.
+    - Represent components as predicates, not strings:
+      - WRONG: `(is-empty ?machine "water_reservoir")`
+      - RIGHT: `(water-reservoir-empty ?machine)` or `(reservoir-has-water ?machine)`
+    - Use hyphens for multi-word predicates (e.g., `has-water`, `water-reservoir-empty`).
 
-  Focus on:
-  1. Use observed objects and their actual IDs
-  2. Generate predicates matching observed affordances
-  3. Create action sequence using observed objects
-  4. Include all task-relevant predicates
-  5. Ensure all PDDL actions follow proper syntax (no quoted strings!)
+  7. **Arity consistency example.**
+    Here is a CORRECT example showing consistent predicate arity:
+
+    {
+      "relevant_predicates": [
+        "(holding ?obj)",
+        "(empty-hand)",
+        "(on ?obj ?surface)",
+        "(graspable ?obj)"
+      ],
+      "relevant_actions": [
+        {
+          "name": "pick",
+          "parameters": ["?obj"],
+          "precondition": "(and (empty-hand) (graspable ?obj))",
+          "effect": "(and (holding ?obj) (not (empty-hand)))"
+        },
+        {
+          "name": "place",
+          "parameters": ["?obj", "?surface"],
+          "precondition": "(holding ?obj)",
+          "effect": "(and (on ?obj ?surface) (empty-hand) (not (holding ?obj)))"
+        }
+      ]
+    }
+
+    Notice how:
+    - `(holding ?obj)` is defined with 1 parameter
+    - `(holding ?obj)` is used with 1 parameter in precondition and effect
+    - `(empty-hand)` is defined with 0 parameters
+    - `(empty-hand)` is used with 0 parameters everywhere
+    - The parameter names can differ (?obj, ?x, ?item) but the COUNT must match
+
+  8. **VERIFICATION STEPS (complete these BEFORE returning your response).**
+    Step 1: List ALL predicates you defined in `relevant_predicates`
+    Step 2: For EACH action in `relevant_actions`:
+      a) Extract all predicates from precondition
+      b) Extract all predicates from effect
+      c) For each predicate usage, count its parameters
+      d) Find its definition in `relevant_predicates`
+      e) VERIFY the parameter count EXACTLY matches
+      f) If mismatch, FIX the action OR add missing predicate definition
+    Step 3: Ensure every predicate used exists in `relevant_predicates`
+    Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
+    Step 5: Confirm global_predicates follow the rules above (no object-specific entries, no parentheses)

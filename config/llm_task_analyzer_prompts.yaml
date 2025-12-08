@@ -18,6 +18,9 @@ analysis_prompt: |
     Current observed relationships:
     <<RELATIONSHIPS_JSON>>
 
+  Ground your answer in the provided scene: use `object_id` values from the observations
+  when listing goal_objects if they are already identified.
+
   You must respond with **valid JSON only**, following this schema:
 
   {
@@ -29,13 +32,13 @@ analysis_prompt: |
     "relevant_actions": [
       {
         "name": "<action_name_1>",
-        "parameters": ["<typed_parameter_1>", "<typed_parameter_2>", "..."],
+        "parameters": ["<param_var_1>", "<param_var_2>", "..."],
         "precondition": "<pddl_precondition_formula>",
         "effect": "<pddl_effect_formula>"
       },
       {
         "name": "<action_name_2>",
-        "parameters": ["<typed_parameter_1>", "..."],
+        "parameters": ["<param_var_1>", "..."],
         "precondition": "<pddl_precondition_formula>",
         "effect": "<pddl_effect_formula>"
       }
@@ -44,12 +47,17 @@ analysis_prompt: |
       "<pddl_goal_condition_1>",
       "<pddl_goal_condition_2>",
       "..."
-    ]
+    ],
+    "preconditions": ["(predicate obj)", "..."],
+    "initial_predicates": ["(current_predicate obj)", "..."],
+    "goal_objects": ["object_id1", "..."],
+    "global_predicates": ["global_predicate1", "..."],
+    "required_actions": [ ... ]
   }
 
   Response guidelines:
 
-  1. **Purpose.**  
+  1. **Purpose.**
     Your goal is *not* to complete the task, but to propose a useful, general set of
     symbolic primitives (predicates, actions, and goal conditions) that a downstream
     planner can use to build a world model and operate on it.
@@ -62,9 +70,7 @@ analysis_prompt: |
       - `(on ?item ?surface)` - binary predicate
       - `(empty-hand)` - zero-parameter predicate
       - `(is_cup ?obj)` - unary classification predicate
-  - **Do _not_ include type annotations (`- object`) in the predicate definitions.**
-    Use simple parameter variables like `?obj`, `?x`, `?surface`, etc.
-  - Include both:
+  - Include:
       - **Relational predicates** (e.g. spatial, containment, support, reachability,
         state—such as `(on ?x ?y)`, `(inside ?x ?y)`, `(open ?x)`, `(plugged_in ?x)`), and
       - **Semantic / classification predicates** that label objects by their role or type
@@ -72,24 +78,24 @@ analysis_prompt: |
         will later be evaluated from perception and object attributes.
       Add all semantic predicates that are relevant to the task, world, or goal description
       so that downstream planners can bind those categories during grounding.
-  - **CRITICAL**: The parameter count in predicate definitions MUST match how they're used in actions.
-      Example: If you define `(graspable ?obj)`, then use `(graspable ?x)` in actions, not `(graspable)`.
+  - **CRITICAL**: The name of the predicate is the unique identifier for a predicate, and should
+  be consistently used throughout, with the correct number of arguments.
 
   3. **Relevant actions.**
     - `relevant_actions` is a list of actions the robot is in principle capable of,
       given the robot description (e.g. `pick`, `place`, `move_to`, `open`, `close`,
       `press_button`, `pour`, `plug_in`, etc.).
     - For each action:
-      - `name` is a short PDDL-style action name (no spaces).
-      - `parameters` is a list of typed variables, each given as a string like
-        `"?obj - object"` or `"?src - object"`.
-      - `precondition` is a single PDDL formula string (often an `(and ...)` expression)
-        using only predicates from `relevant_predicates`.
+      - `name` is a short PDDL-style action name, containing no spaces and using underscore
+        to separate words.
+      - `parameters` is a list of variables, each given as a string like `"?obj"` or `"?src"`.
+      - `precondition` is a single PDDL formula string using only predicates from 
+        `relevant_predicates`.
       - `effect` is a single PDDL formula string (again typically an `(and ...)`
         expression) specifying both positive and negative effects, using only predicates
         from `relevant_predicates`.
-    - **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
-      the EXACT same number of parameters as defined in `relevant_predicates`. For example:
+    - Predicates in preconditions and effects should use the exact same number of parameters
+      as defined in `relevant_predicates`. For example:
       - If you define `(holding ?obj)` in predicates (1 parameter)
       - Then you MUST use `(holding ?x)` in actions (1 parameter)
       - NEVER use `(holding)` (0 parameters) or `(holding ?x ?y)` (2 parameters)
@@ -109,13 +115,13 @@ analysis_prompt: |
     - Each element of `goal_predicates` should be a PDDL condition string suitable for a
       `:goal` field. You may use logical connectives (`and`, `or`, `not`) and quantifiers
       (`exists`, `forall`) when needed.
-    - **CRITICAL SYNTAX RULE**: Use proper PDDL syntax with parentheses. CORRECT examples:
+    - Use proper PDDL syntax with parentheses. CORRECT examples:
       - `(coffee-made ?cup)` - correct
       - `(inside ?obj1 ?obj2)` - correct
-      WRONG examples (DO NOT USE):
-      - `coffee-made(?cup)` - WRONG (no space before parenthesis)
-      - `coffee-made ?cup` - WRONG (missing parentheses)
-      - `inside(?obj1, ?obj2)` - WRONG (commas not used in PDDL)
+      Wrong examples:
+      - `coffee-made(?cup)`
+      - `coffee-made ?cup`
+      - `inside(?obj1, ?obj2)`
 
     For example, instead of directly naming concrete constants like:
       “the water bottle is in the paper bag”,
@@ -128,7 +134,7 @@ analysis_prompt: |
           is_water_bottle(w) ∧ is_paper_bag(b) ∧ inside(w, b).”
 
       In PDDL-style syntax (goal condition only):
-        (exists (?w - object ?b - object)
+        (exists (?w ?b)
           (and (is_water_bottle ?w)
                 (is_paper_bag ?b)
                 (inside ?w ?b)))
@@ -137,7 +143,7 @@ analysis_prompt: |
     introduced later in the problem file. It is written purely in terms of semantic and
     relational predicates over abstract objects.
 
-    For broader household instructions (e.g., “clear the counter”), write conditions that 
+    For broader household instructions (e.g., “clear the counter”), write conditions that
     universally quantify over semantic categories:
 
       Logical sketch:
@@ -145,9 +151,23 @@ analysis_prompt: |
           is_kitchen_counter(c) ∧ (on_surface(m, c) → relocated(m)).”
 
     These formulations stay agnostic to specific object in the world, while still encoding the
-    semantic intent of the task through predicate structure. 
+    semantic intent of the task through predicate structure.
 
-  5. **Arity consistency example.**
+  5. **Global and initial predicates.**
+    - `global_predicates` describe robot/environment state that should be TRUE before task execution (e.g., `hand_is_empty`, `arm_at_home`, `gripper_open`, `robot_ready`).
+    - Do NOT include object-related facts in `global_predicates`; place those in `initial_predicates`.
+    - Global predicates typically have no parameters (or take the robot as the sole parameter) and should be returned without parentheses.
+
+  6. **PDDL formatting rules (apply everywhere).**
+    - Parameters MUST use variables with ? prefix (e.g., `?obj`, `?location`, `?machine`).
+    - Keep everything untyped: do not include `- object`, `- surface`, or any other type annotations.
+    - Preconditions and effects can ONLY use variables and predicate names; NEVER include quoted strings or constants.
+    - Represent components as predicates, not strings:
+      - WRONG: `(is-empty ?machine "water_reservoir")`
+      - RIGHT: `(water-reservoir-empty ?machine)` or `(reservoir-has-water ?machine)`
+    - Use hyphens for multi-word predicates (e.g., `has-water`, `water-reservoir-empty`).
+
+  7. **Arity consistency example.**
     Here is a CORRECT example showing consistent predicate arity:
 
     {
@@ -160,13 +180,13 @@ analysis_prompt: |
       "relevant_actions": [
         {
           "name": "pick",
-          "parameters": ["?obj - object"],
+          "parameters": ["?obj"],
           "precondition": "(and (empty-hand) (graspable ?obj))",
           "effect": "(and (holding ?obj) (not (empty-hand)))"
         },
         {
           "name": "place",
-          "parameters": ["?obj - object", "?surface - object"],
+          "parameters": ["?obj", "?surface"],
           "precondition": "(holding ?obj)",
           "effect": "(and (on ?obj ?surface) (empty-hand) (not (holding ?obj)))"
         }
@@ -180,7 +200,7 @@ analysis_prompt: |
     - `(empty-hand)` is used with 0 parameters everywhere
     - The parameter names can differ (?obj, ?x, ?item) but the COUNT must match
 
-  6. **VERIFICATION STEPS (complete these BEFORE returning your response).**
+  8. **VERIFICATION STEPS (complete these BEFORE returning your response).**
     Step 1: List ALL predicates you defined in `relevant_predicates`
     Step 2: For EACH action in `relevant_actions`:
       a) Extract all predicates from precondition
@@ -191,6 +211,7 @@ analysis_prompt: |
       f) If mismatch, FIX the action OR add missing predicate definition
     Step 3: Ensure every predicate used exists in `relevant_predicates`
     Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
+    Step 5: Confirm global_predicates follow the rules above (no object-specific entries, no parentheses)
 
     Example verification for action "pick":
     - Precondition uses: `(empty-hand)` → 0 params
@@ -200,11 +221,6 @@ analysis_prompt: |
     - Effect uses: `(holding ?obj)` → 1 param
     - Check definition: `(holding ?obj)` → 1 param ✓ MATCH
 
-  7. **Output format.**
+  9. **Output format.**
     - Return **only** the JSON object described above.
     - Do **not** include comments, explanations, or any text outside the JSON.
-
-
-
-
-

@@ -62,7 +62,7 @@ class LLMTaskAnalyzer:
         self.prompt_templates = {
             key: value
             for key, value in config_data.items()
-            if key.endswith("_prompt")
+            if key.endswith("_prompt") and isinstance(value, str)
         }
         self.robot_description = config_data.get("robot_description")
 
@@ -112,149 +112,57 @@ class LLMTaskAnalyzer:
             pil_image = self._prepare_image(environment_image)
 
         # Build prompt (analysis template handles empty observations)
-        prompt = self._build_analysis_prompt(
-            task_description, observed_objects, observed_relationships
+        template = self._get_prompt_template("analysis_prompt")
+        prompt = render_prompt_template(
+            template,
+            {
+                "TASK": task_description,
+                "ROBOT_DESCRIPTION": self._format_robot_description(),
+                "OBJECTS_JSON": self._format_objects_json(observed_objects),
+                "RELATIONSHIPS_JSON": self._format_relationships_json(observed_relationships),
+            },
         )
 
         # Call LLM with timeout
         start_time = time.time()
-        try:
-            # Build content parts
-            content_parts = []
-            if pil_image:
-                # Encode image
-                img_byte_arr = io.BytesIO()
-                pil_image.save(img_byte_arr, format='PNG')
-                img_bytes = img_byte_arr.getvalue()
-                content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
-            content_parts.append(prompt)
 
-            # Generate content
-            config = types.GenerateContentConfig(
-                temperature=0.1,  # Low for consistency
-                top_p=0.9,
-                max_output_tokens=8192,
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            )
+        # Build content parts
+        content_parts = []
+        if pil_image:
+            # Encode image
+            img_byte_arr = io.BytesIO()
+            pil_image.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+            content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
+        content_parts.append(prompt)
 
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=content_parts,
-                config=config
-            )
-            response_text = response.text
-            print(f"************************************ {response_text}")
-            elapsed = time.time() - start_time
-            print(f"   → LLM analysis completed in {elapsed:.2f}s")
+        # Generate content
+        config = types.GenerateContentConfig(
+            temperature=0.1,  # Low for consistency
+            top_p=0.9,
+            max_output_tokens=8192,
+            response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_budget=0)
+        )
 
-            # Parse response
-            analysis = self._parse_response(response_text)
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=content_parts,
+            config=config
+        )
+        response_text = response.text
+        print(f"************************************ {response_text}")
+        elapsed = time.time() - start_time
+        print(f"   → LLM analysis completed in {elapsed:.2f}s")
 
-            # Cache result
-            self._cache[cache_key] = analysis
+        # Parse response
+        analysis = self._parse_response(response_text)
 
-            return analysis
+        # Cache result
+        self._cache[cache_key] = analysis
 
-        except Exception as e:
-            print(f"   ⚠ LLM analysis failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        return analysis
 
-    def _build_analysis_prompt(
-        self,
-        task: str,
-        objects: List[Dict],
-        relationships: List[str]
-    ) -> str:
-        """Build prompt for task analysis with observations."""
-
-        object_list = [obj["object_id"] for obj in objects]
-        objects_json = self._format_objects_json(objects)
-        relationships_json = self._format_relationships_json(relationships)
-
-        relationship_list = "\n".join([f"- {rel}" for rel in relationships[:30]])
-
-        robot_context = ""
-        if self.robot_description:
-            robot_context = f"""
-ROBOT CAPABILITIES:
-{self.robot_description}
-
-Consider the robot's capabilities when determining feasible actions.
-"""
-
-        return f"""You are a robotic task planner. Analyze this task given the observed scene.
-
-TASK: {task}
-{robot_context}
-OBSERVED OBJECTS:
-{object_list if object_list else "- No objects detected yet"}
-
-OBSERVED RELATIONSHIPS:
-{relationship_list if relationship_list else "- No relationships observed yet"}
-
-Provide a JSON response with:
-{{
-  "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["(predicate1 obj1 obj2)", ...],
-  "preconditions": ["(predicate obj)", ...],
-  "initial_predicates": ["(expected_initial_states)", ...],
-  "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
-  "goal_objects": ["object_id1", ...],
-  "global_predicates": ["global_predicate1", ...],
-  "tool_objects": ["tool_id", ...],
-  "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["(current_predicate obj)", ...],
-  "relevant_types": ["type1", "type2", ...],
-  "required_actions": [
-    {{
-      "name": "pick",
-      "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
-      "effect": "(and (holding ?obj) (not (empty-hand)))"
-    }}
-  ],
-  "complexity": "simple|medium|complex",
-  "estimated_steps": 3
-}}
-
-CRITICAL: Relevant Predicates Format
-- "relevant_predicates" MUST include parameters: ["(graspable ?obj)", "(on ?x ?y)", "(empty-hand)"]
-- NOT bare names: ["graspable", "on", "empty-hand"]
-- Parameter count must match action usage
-
-CRITICAL PDDL FORMATTING RULES:
-1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
-2. Preconditions and effects can ONLY use:
-   - Variables (e.g., ?obj, ?container)
-   - Predicate names (e.g., graspable, empty-hand, has-water)
-3. NEVER use quoted strings or constants in preconditions/effects
-4. If referencing a component, make it a predicate:
-   - WRONG: (is-empty ?machine "water_reservoir")
-   - RIGHT: (water-reservoir-empty ?machine) or (reservoir-has-water ?machine)
-5. Multi-word predicates use hyphens: has-water, is-empty, water-reservoir-empty
-6. GLOBAL Predicates should not be returned with parenthases
-
-
-IMPORTANT: Global Predicates
-    - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
-    - These are predicates that should be TRUE INITIALLY before task execution
-    - Examples:
-    - hand_is_empty (or empty-hand): Robot gripper has no object
-    - arm_at_home: Robot arm is at home position
-    - gripper_open: Gripper is in open state
-    - robot_ready: Robot system is initialized
-    - Do NOT include object-related predicates here (those go in initial_predicates)
-    - Global predicates typically have NO parameters or take robot as parameter
-
-Focus on:
-1. Use observed objects and their actual IDs
-2. Generate predicates matching observed affordances
-3. Create action sequence using observed objects
-4. Include all task-relevant predicates
-5. Ensure all PDDL actions follow proper syntax (no quoted strings!)"""
 
     def _parse_response(self, response_text: str) -> TaskAnalysis:
         """Parse LLM JSON response into TaskAnalysis."""
