@@ -200,7 +200,7 @@ Return JSON with:
     {{
       "name": "pick",
       "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "precondition": "(and (graspable ?obj))",
       "effect": "(and (holding ?obj) (not (empty-hand)))"
     }}
   ],
@@ -209,7 +209,6 @@ Return JSON with:
 IMPORTANT: Relevant Predicates Format
 - "relevant_predicates" MUST include parameters in PDDL format:
   - "(graspable ?obj)" - NOT just "graspable"
-  - "(clear ?obj)" - NOT just "clear"
   - "(on ?obj ?surface)" - binary predicate
   - "(empty-hand)" - zero-parameter predicate
   - "(holding ?obj)" - NOT just "holding"
@@ -235,7 +234,7 @@ IMPORTANT PDDL RULES:
 4. All predicates should be predicates applied to variables, not string constants
 5. GLOBAL Predicates should not be returned with parenthases
 
-Include 8-12 relevant_predicates with proper PDDL format like "(graspable ?obj)", "(on ?x ?y)", "(clear ?obj)", "(empty-hand)", and 3-5 required_actions."""
+Include 8-12 relevant_predicates with proper PDDL format like "(graspable ?obj)", "(on ?x ?y)", "(empty-hand)", and 3-5 required_actions."""
 
     def _build_analysis_prompt(
         self,
@@ -287,7 +286,7 @@ Provide a JSON response with:
     {{
       "name": "pick",
       "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "precondition": "(and (graspable ?obj))",
       "effect": "(and (holding ?obj) (not (empty-hand)))"
     }}
   ],
@@ -376,7 +375,7 @@ Focus on:
             obstacle_objects=[],
             initial_predicates=[],
             global_predicates=["hand_is_empty"],
-            relevant_predicates=["at", "holding", "clear"],
+            relevant_predicates=["at", "holding"],
             required_actions=[],
             complexity="medium",
             estimated_steps=2
