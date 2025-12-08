@@ -817,8 +817,8 @@ async def main():
     parser.add_argument(
         "--task-analyzer-prompts",
         type=str,
-        default='config/llm_task_analyzer_prompts_lmh.yaml',
-        help="Path to LLM task analyzer prompts YAML (e.g., config/llm_task_analyzer_prompts_lmh.yaml)"
+        default='config/llm_task_analyzer_prompts.yaml',
+        help="Path to LLM task analyzer prompts YAML (e.g., config/llm_task_analyzer_prompts.yaml)"
     )
 
     args = parser.parse_args()
