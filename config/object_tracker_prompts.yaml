@@ -70,6 +70,11 @@ analysis:
               maxItems: 2
               items:
                 type: number
+      predicates:
+        type: array
+        description: PDDL predicate strings using detected object ids (e.g., \"on cup_1 table_1\").
+        items:
+          type: string
 
   # Fast mode: only affordances and properties, no interaction points
   fast_mode: |-

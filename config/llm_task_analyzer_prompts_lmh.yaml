@@ -90,10 +90,8 @@ analysis_prompt: |
     - For each action:
       - `name` is a short PDDL-style action name (no spaces).
       - `parameters` is a list of variables, each given as a string like `"?obj"` or `"?src"`.
-      - `precondition` is a single PDDL formula string (often an `(and ...)` expression)
-        using only predicates from `relevant_predicates`.
-      - `effect` is a single PDDL formula string (again typically an `(and ...)`
-        expression) specifying both positive and negative effects, using only predicates
+      - `precondition` is a single PDDL formula string using only predicates from `relevant_predicates`.
+      - `effect` is a single PDDL formula string  specifying the effects of the action
         from `relevant_predicates`.
     - **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
       the EXACT same number of parameters as defined in `relevant_predicates`. For example:
