@@ -110,7 +110,7 @@ class TAMPConfig:
     # Solver settings
     solver_backend: str = "auto"  # "auto", "pyperplan", "fast-downward-docker", etc.
     solver_algorithm: str = "lama-first"
-    solver_timeout: float = 30.0
+    solver_timeout: float = 60.0
 
     # Execution settings
     dry_run_default: bool = False  # Default dry-run mode for execution

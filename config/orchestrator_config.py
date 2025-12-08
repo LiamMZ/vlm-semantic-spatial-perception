@@ -60,7 +60,7 @@ class OrchestratorConfig:
     # PDDL Solver Configuration
     solver_backend: Optional[str] = None  # "auto", "pyperplan", "fast-downward-docker", "fast-downward-apptainer"
     solver_algorithm: str = "lama-first"  # Search algorithm to use
-    solver_timeout: float = 30.0  # Timeout in seconds for solver
+    solver_timeout: float = 60.0  # Timeout in seconds for solver
     solver_verbose: bool = False  # Print solver output
     auto_solve_when_ready: bool = False  # Automatically solve when ready for planning
     max_refinement_attempts: int = 3  # Max attempts to refine domain after planning failures
