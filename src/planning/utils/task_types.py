@@ -14,26 +14,18 @@ class TaskAnalysis:
     """Result of LLM task analysis."""
 
     # Task understanding
-    action_sequence: List[str]  # High-level action steps
     goal_predicates: List[str]  # Goal state predicates
     preconditions: List[str]  # Required preconditions
 
     # Relevant objects
     goal_objects: List[str]  # Primary objects for task
-    tool_objects: List[str]  # Tools/intermediate objects
-    obstacle_objects: List[str]  # Objects to avoid
 
     # Scene-specific predicates
     initial_predicates: List[str]  # Current state predicates
     global_predicates: List[str]  # Global/robot state predicates (not object-related)
     relevant_predicates: List[str]  # Task-relevant predicate types
-    relevant_types: List[str]  # Task-relevant PDDL types
     # Action definitions
     required_actions: List[Dict]  # PDDL action schemas
-
-    # Metadata
-    complexity: str  # 'simple', 'medium', 'complex'
-    estimated_steps: int
 
 
 class TaskState(Enum):

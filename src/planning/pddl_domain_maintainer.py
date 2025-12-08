@@ -320,7 +320,11 @@ class PDDLDomainMaintainer:
             self.task_analysis.relevant_predicates = normalized_predicates
 
         # Add LLM-generated actions
-        for action_def in self.task_analysis.required_actions:
+        for idx, action_def in enumerate(self.task_analysis.required_actions):
+            if not isinstance(action_def, dict):
+                raise ValueError(
+                    f"Invalid required_actions[{idx}] type: expected dict, got {type(action_def).__name__}"
+                )
             try:
                 # Parse parameters
                 params = []
@@ -580,7 +584,11 @@ class PDDLDomainMaintainer:
         if not self.task_analysis or not self.task_analysis.required_actions:
             return predicate_arities
 
-        for action_def in self.task_analysis.required_actions:
+        for idx, action_def in enumerate(self.task_analysis.required_actions):
+            if not isinstance(action_def, dict):
+                raise ValueError(
+                    f"Invalid required_actions[{idx}] type: expected dict, got {type(action_def).__name__}"
+                )
             # Extract predicates from precondition and effect
             precondition = action_def.get("precondition", "")
             effect = action_def.get("effect", "")

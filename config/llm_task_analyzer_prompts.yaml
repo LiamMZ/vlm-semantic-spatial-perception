@@ -52,7 +52,6 @@ analysis_prompt: |
     "initial_predicates": ["(current_predicate obj)", "..."],
     "goal_objects": ["object_id1", "..."],
     "global_predicates": ["global_predicate1", "..."],
-    "required_actions": [ ... ]
   }
 
   Response guidelines:

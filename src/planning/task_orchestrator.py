@@ -338,8 +338,8 @@ class TaskOrchestrator:
         self.logger.info("✓ Task analyzed!")
         valid_goal_objects = [obj for obj in self.task_analysis.goal_objects if obj and obj != "None"]
         self.logger.info("  • Goal objects: %s", ", ".join(valid_goal_objects) if valid_goal_objects else "None")
-        self.logger.info("  • Estimated steps: %s", self.task_analysis.estimated_steps)
-        self.logger.info("  • Complexity: %s", self.task_analysis.complexity)
+        self.logger.info("  • Estimated steps: n/a")
+        self.logger.info("  • Complexity: n/a")
         self.logger.info("  • Required predicates: %s", len(self.task_analysis.relevant_predicates))
 
         # Seed perception with predicates and task context
@@ -1590,8 +1590,6 @@ class TaskOrchestrator:
             "task_analysis": {
                 "goal_objects": self.task_analysis.goal_objects if self.task_analysis else [],
                 "relevant_predicates": self.task_analysis.relevant_predicates if self.task_analysis else [],
-                "estimated_steps": self.task_analysis.estimated_steps if self.task_analysis else 0,
-                "complexity": self.task_analysis.complexity if self.task_analysis else "unknown",
             } if self.task_analysis else None,
             "files": {
                 "registry": str(registry_path),

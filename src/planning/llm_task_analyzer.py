@@ -178,19 +178,13 @@ class LLMTaskAnalyzer:
             )
 
             return TaskAnalysis(
-                action_sequence=data.get("action_sequence", []),
                 goal_predicates=data.get("goal_predicates", []),
                 preconditions=data.get("preconditions", []),
                 goal_objects=data.get("goal_objects", []),
-                tool_objects=data.get("tool_objects", []),
-                obstacle_objects=data.get("obstacle_objects", []),
                 initial_predicates=data.get("initial_predicates", []),
                 global_predicates=data.get("global_predicates", []),
                 relevant_predicates=data.get("relevant_predicates", []),
-                relevant_types=data.get("relevant_types", []),
                 required_actions=actions,
-                complexity=data.get("complexity", "medium"),
-                estimated_steps=data.get("estimated_steps", 1)
             )
         except Exception as e:
             print(f"   ⚠ Failed to parse LLM response: {e}")
