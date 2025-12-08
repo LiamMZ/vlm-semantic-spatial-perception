@@ -161,7 +161,7 @@ class PDDLSolver:
         domain_path: str,
         problem_path: str,
         algorithm: SearchAlgorithm = SearchAlgorithm.LAMA_FIRST,
-        timeout: float = 30.0,
+        timeout: float = 60.0,
         working_dir: Optional[str] = None
     ) -> SolverResult:
         """
