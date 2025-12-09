@@ -371,7 +371,7 @@ class ObjectTracker:
             valid_goal_objects = [obj for obj in self.goal_objects if obj and obj != "None"]
             if valid_goal_objects:
                 goal_objects_str = ", ".join(valid_goal_objects)
-                task_context_str += f"\n\n    Goal Objects: {goal_objects_str}\n    Note: These objects are critical for completing the task."
+                task_context_str += f"\n\n    Goal Objects: {goal_objects_str}\n    Note: These objects are critical for completing the task. However, you are not allowed to use these placeholder names for the predicates (you can only use objects that have been detected)."
 
         return task_context_str
     
@@ -536,7 +536,8 @@ class ObjectTracker:
                 camera_intrinsics,
                 temperature,
                 bounding_box,
-                existing_object_id=object_name if object_name in existing_ids else None
+                existing_object_id=object_name if object_name in existing_ids else None,
+                other_objects=object_data_list
             )
             for object_name, bounding_box in object_data_list
         ]
@@ -663,7 +664,8 @@ class ObjectTracker:
         camera_intrinsics: Optional[Any],
         temperature: Optional[float],
         bounding_box: Optional[List[int]] = None,
-        existing_object_id: Optional[str] = None
+        existing_object_id: Optional[str] = None,
+        other_objects: Optional[List[Tuple[str, Optional[List[int]]]]] = None
     ) -> Optional[DetectedObject]:
         """
         Analyze a single object: affordances, properties, and interaction points.
@@ -727,15 +729,14 @@ class ObjectTracker:
             pddl_list = ", ".join(self.pddl_predicates)
 
             # Get list of other detected objects for relational predicates
-            other_objects = self.registry.get_all_objects()
             other_objects_list = ""
             if other_objects:
-                other_objects_list = "\n"
-                for obj in other_objects:
-                    # Skip the current object being analyzed
-                    if obj.object_id != existing_object_id and obj.object_id != object_name:
-                        other_objects_list += f"       - {obj.object_id} ({obj.object_type})\n"
-                if other_objects_list.strip() == "":
+                # other_objects is a list of tuples: (name, bbox)
+                names = [name for name, _ in other_objects
+                         if name != object_name and (existing_object_id is None or name != existing_object_id)]
+                if names:
+                    other_objects_list = "\n" + "".join(f"       - {name}\n" for name in names)
+                else:
                     other_objects_list = "\n       (No other objects detected yet)"
             else:
                 other_objects_list = "\n       (No other objects detected yet)"

@@ -317,7 +317,7 @@ IMPORTANT: Global Predicates
     - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
     - These are predicates that should be TRUE INITIALLY before task execution
     - Examples:
-    - hand_is_empty (or empty-hand): Robot gripper has no object
+    - empty-hand: Robot gripper has no object (Note: We assume that we will always have this predicate in initial_predicates!)
     - arm_at_home: Robot arm is at home position
     - gripper_open: Gripper is in open state
     - robot_ready: Robot system is initialized

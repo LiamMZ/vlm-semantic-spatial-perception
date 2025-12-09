@@ -97,7 +97,7 @@ analysis:
     
     Known affordances: {cached_affordances}
     
-    For EACH affordance, identify the optimal interaction point and encode it inside the affordances list entries. Return JSON that follows this schema (also enforced via response_json_schema):
+    For EACH affordance, identify the optimal interaction point and encode it inside the affordances list entries. Return JSON that follows this schema (also enforced via response_json_schema) but DO NOT add any new predicates:
     {analysis_schema}
     
     All positions in 0-1000 normalized coords relative to THIS image.
