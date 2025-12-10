@@ -1421,9 +1421,13 @@ class CuRoboMotionPlanner:
             print(f"Target pose shifted: {target_position}")
 
             if is_place:
-                target_position[2] += 0.02
+                target_position[2] += 0.1
                 if target_position[2] > 0.4:
                     target_position[2] = 0.4
+            else:
+                target_position[2] -= 0.02
+                if target_position[2] < 0.2:
+                    target_position[2] = 0.2
             # Convert to torch tensors for cuRobo
             target_position_tensor = self.tensor_args.to_device([target_position])
             target_orientation_tensor = self.tensor_args.to_device([target_orientation])

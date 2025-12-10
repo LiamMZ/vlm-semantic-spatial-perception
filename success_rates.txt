@@ -3,3 +3,8 @@ bad grasp position (left of robot), bad grasp position (left of robot)
 
 wipe drawing off counter: 0,1, 1, 0, 0, 1, 1, 1, 0, 1
 goal not in cnf, unknown precond pred refinement failed, collision, grasp failure
+
+pack the groceries: 0, 0, 1, 1, 1, 0, 1, 1, 0,1 
+
+N/A goal, bg + only cucumber det, collision, collision
+
