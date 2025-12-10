@@ -687,6 +687,22 @@ This system builds on:
 
 ---
 
+## Contributors
+
+### Liam Hoffmeister (liammz) - 35 commits
+
+Liam created the foundational TAMP system architecture, implementing the core object detection and tracking pipeline, PDDL planning integration with automatic domain generation, and the TaskOrchestrator that coordinates the entire system. His work spans from initial repository setup through recent refinements in prompt engineering, performance optimizations, and the addition of new manipulation capabilities like the twist action.
+
+### Enyan Zhang - 47 commits (most active)
+
+Enyan built essential infrastructure and developer tools that make the system maintainable and debuggable, including the comprehensive GenAI logging system with visual inspection utilities, the snapshot persistence architecture for reproducible execution, and a major refactor of the skill decomposition pipeline to use snapshot-grounded coordinate frames. His contributions include environment setup (UV package management), prompt externalization to YAML configs, CuRobo integration, numerous debugging utilities, and extensive documentation improvements.
+
+### TJ Vitchutripop (tjvitchutripop) - 21 commits
+
+TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor and contributions to a Building Information Modeling (BIM) integration.
+
+---
+
 ## Support
 
 For questions or issues:
