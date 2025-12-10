@@ -1,70 +1,695 @@
-# VLM Semantic Spatial Perception
+# VLM-Based Task and Motion Planning System
 
-Ad-hoc world model generation in PDDL, powered by LLM (Gemini Robotics-ER), which decomposes tasks into a set of primitives that are executed on the robot.
+## Overview
 
-## Capabilities
-- Prompt-driven perception (`ObjectTracker`/`ContinuousObjectTracker`) with affordances, interaction points, and optional PDDL predicates.
-- Orchestration with auto-save + perception pool snapshots (`color.png`, optional `depth.npz`, `intrinsics.json`, `detections.json`, `manifest.json`, optional `robot_state.json`).
-- Skill decomposition (`SkillDecomposer`) that uses the latest registry + snapshot to propose primitives, validated against `PRIMITIVE_LIBRARY`.
-- Primitive execution/translation (`PrimitiveExecutor`) that back-projects helper pixels to metric coordinates and optionally drives `CuRoboMotionPlanner`.
+This system implements an end-to-end **Task and Motion Planning (TAMP)** pipeline that translates natural language commands into executable robot actions. It combines vision-language models (VLMs), symbolic planning (PDDL), and motion planning to achieve autonomous task execution.
 
-## Setup (uv)
-1. Install [uv](https://docs.astral.sh/uv/).
-2. Sync dependencies: `uv sync`
-3. Set API key (required for Gemini calls):
-   ```bash
-   export GEMINI_API_KEY=...
-   # or: export GOOGLE_API_KEY=...
+**Key Innovation**: The system uses Gemini's vision and reasoning capabilities to bridge the gap between high-level task descriptions and low-level robot control, enabling robots to understand and execute complex manipulation tasks through natural language.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- Gemini API key
+- RealSense camera (for live perception)
+- Optional: xArm robot for physical execution
+
+### Installation
+
+```bash
+# Install dependencies
+uv sync
+
+# Set API key
+export GEMINI_API_KEY="your-api-key-here"
+```
+
+### Running the System
+
+#### Interactive Mode (Recommended for First Use)
+```bash
+python examples/tamp_demo.py
+```
+
+This launches an interactive terminal where you can:
+- Issue natural language commands
+- Monitor perception and planning
+- Execute tasks step-by-step
+
+#### Single Task Execution
+```bash
+# Dry run (validation only, no robot execution)
+python examples/tamp_demo.py --task "pick up the red block" --dry-run
+
+# Live execution (requires robot connection)
+python examples/tamp_demo.py --task "stack the blue block on the red block" --live
+```
+
+---
+
+## System Architecture
+
+The system operates as a pipeline with five main stages:
+
+```
+Natural Language Task
+    ↓
+Task Analysis (VLM)
+    ↓
+Environment Perception (Vision + VLM)
+    ↓
+Symbolic Planning (PDDL)
+    ↓
+Skill Decomposition (VLM)
+    ↓
+Primitive Execution (Motion Planning)
+    ↓
+Robot Action
+```
+
+---
+
+## Entry Point and Execution Flow
+
+**Main Entry Point**: [examples/tamp_demo.py](examples/tamp_demo.py)
+
+
+**Core TAMP Planner**: [TaskAndMotionPlanner](src/task_motion_planner.py)
+
+The main planner class that coordinates all components:
+- `initialize()` - Sets up orchestrator, decomposer, executor
+- `perceive_environment()` - Runs continuous object detection
+- `plan_task()` - Generates PDDL plan with refinement
+- `decompose_action()` - Converts symbolic actions to primitives
+- `execute_skill_plan()` - Executes primitives on robot
+- `plan_and_execute_task()` - Complete pipeline orchestration
+
+---
+
+## System Components
+
+### 1. Task Analysis
+
+**Purpose**: Understand what the user wants to accomplish
+
+**Implementation**:
+- **Main Class**: [TaskOrchestrator](src/planning/task_orchestrator.py)
+- **Key Method**: `process_task_request()` - Analyzes task using LLM
+- **Domain Maintainer**: [PDDLDomainMaintainer](src/planning/pddl_domain_maintainer.py) - Manages PDDL domain updates
+- **Configuration**: [llm_task_analyzer_prompts.yaml](config/llm_task_analyzer_prompts.yaml)
+
+**How it works**:
+- Takes natural language input (e.g., "pick up the red block")
+- Uses Gemini to extract:
+  - Goal objects (what objects are involved)
+  - Required predicates (spatial relationships like "on", "clear", "graspable")
+  - Necessary actions (pick, place, stack, etc.)
+  - Task complexity and estimated steps
+
+**Output**: A structured task analysis that guides the rest of the pipeline
+
+**Example**:
+```
+Input: "stack the red block on the blue block"
+Output:
+  - Goal objects: [red_block, blue_block]
+  - Predicates: [on, clear, graspable, holding, empty]
+  - Actions: [pick, place]
+  - Complexity: medium
+```
+
+---
+
+### 2. Environment Perception
+
+**Purpose**: Build a 3D understanding of the workspace
+
+**Implementation**:
+- **Main Orchestration**: [TaskAndMotionPlanner.perceive_environment()](src/task_motion_planner.py)
+- **Detection Manager**: [TaskOrchestrator.start_detection()](src/planning/task_orchestrator.py)
+- **Object Tracker**: [ContinuousObjectTracker](src/perception/continuous_object_tracker.py)
+- **Snapshot Management**: [TaskOrchestrator.save_snapshot()](src/planning/task_orchestrator.py)
+- **Camera Interface**: [RealSenseCamera](src/camera/realsense_camera.py)
+- **Utilities**: [snapshot_utils.py](src/planning/utils/snapshot_utils.py)
+
+**Components**:
+
+#### a. Continuous Object Tracker
+- Captures RGB-D images from RealSense camera
+- Runs Gemini Vision API to detect objects
+- Tracks objects across frames for temporal consistency
+
+#### b. Task-Grounded Detection
+- Uses task context to focus on relevant objects
+- Detects affordances (what actions can be performed on each object)
+- Identifies interaction points (specific locations for manipulation)
+
+**What gets detected**:
+- **Object type**: "block", "cup", "table", "gripper"
+- **Affordances**: ["graspable", "stackable", "containable"]
+- **Interaction points**:
+  - 2D pixel coordinates in image
+  - 3D positions in camera frame
+  - Alternative grasp locations
+- **Spatial properties**: position, bounding box, orientation
+
+**Snapshot System**:
+- Every detection cycle saves a snapshot containing:
+  - RGB image (`color.png`)
+  - Depth map (`depth.npz`)
+  - Camera intrinsics (`intrinsics.json`)
+  - Object detections (`detections.json`)
+  - Robot state at capture time (`robot_state.json`)
+- Snapshots enable reproducible execution and debugging
+
+---
+
+### 3. PDDL Symbolic Planning
+
+**Purpose**: Generate a high-level action sequence to achieve the task goal
+
+**Implementation**:
+- **Main Orchestration**: [TaskAndMotionPlanner.plan_task()](src/task_motion_planner.py)
+- **PDDL Generation**: [TaskOrchestrator.generate_pddl_files()](src/planning/task_orchestrator.py)
+- **Solver Interface**: [TaskOrchestrator.solve_and_plan()](src/planning/task_orchestrator.py)
+- **Domain Refinement**: [TaskOrchestrator.refine_domain_from_failure()](src/planning/task_orchestrator.py)
+- **PDDL Solver**: [PDDLSolver](src/planning/pddl_solver.py)
+- **Domain Manager**: [PDDLDomain](src/planning/pddl_domain.py)
+
+**Process**:
+
+#### a. Domain Generation
+The system automatically generates a PDDL domain from observations:
+
+```pddl
+(:types object block surface manipulator)
+
+(:predicates
+  (on ?obj - object ?surface - surface)
+  (clear ?obj - object)
+  (graspable ?obj - object)
+  (holding ?obj - object)
+  (empty ?gripper - manipulator)
+)
+
+(:action pick
+  :parameters (?gripper - manipulator ?obj - object)
+  :precondition (and (clear ?obj) (graspable ?obj) (empty ?gripper))
+  :effect (and (holding ?obj) (not (empty ?gripper)))
+)
+```
+
+#### b. Problem Definition
+Current state and goals are automatically populated:
+
+```pddl
+(:init
+  (on red_block table)
+  (on blue_block table)
+  (clear red_block)
+  (clear blue_block)
+  (empty gripper)
+)
+
+(:goal
+  (and (on red_block blue_block))
+)
+```
+
+#### c. Planning with Refinement
+- Uses Pyperplan or Fast Downward solver
+- If planning fails, uses LLM to refine the domain
+- Iterates until a valid plan is found or max attempts reached
+
+**Output**: Sequence of symbolic actions
+```
+1. (pick gripper red_block)
+2. (place gripper red_block blue_block)
+```
+
+---
+
+### 4. Skill Decomposition
+
+**Purpose**: Convert each symbolic action into executable robot primitives
+
+**Implementation**:
+- **Main Orchestration**: [TaskAndMotionPlanner.decompose_action()](src/task_motion_planner.py)
+- **Decomposer**: [SkillDecomposer](src/primitives/skill_decomposer.py)
+- **Key Methods**:
+  - `SkillDecomposer.plan()` - Main decomposition entry point
+  - `SkillDecomposer._build_prompt()` - Constructs LLM prompt with context
+  - `SkillDecomposer._call_llm()` - Executes Gemini API call
+  - `SkillDecomposer._parse_plan()` - Parses JSON response
+- **Data Types**: [SkillPlan, PrimitiveCall](src/primitives/skill_plan_types.py)
+- **Configuration**: [skill_decomposer_prompts.yaml](config/skill_decomposer_prompts.yaml)
+- **Primitive Catalog**: [primitive_descriptions.md](config/primitive_descriptions.md)
+
+**How it works**:
+
+For each symbolic action (e.g., `pick gripper red_block`):
+
+1. **Gather Context**:
+   - Load relevant snapshot with object detections
+   - Get interaction points for target object
+   - Retrieve robot state and camera pose
+
+2. **Build LLM Prompt** with:
+   - Primitive catalog (available low-level commands)
+   - Object information (position, affordances, interaction points)
+   - Scene image for visual grounding
+   - Current robot configuration
+
+3. **Generate Primitive Sequence**:
+   Gemini outputs a JSON plan like:
+   ```json
+   {
+     "primitives": [
+       {
+         "name": "move_to_pre_grasp",
+         "parameters": {
+           "target_pixel_yx": [0.52, 0.61],
+           "depth_offset_m": -0.05,
+           "approach_normal": [0.0, 0.0, 1.0]
+         },
+         "references": {
+           "object_id": "red_block",
+           "interaction_point": "grasp_top"
+         }
+       },
+       {
+         "name": "open_gripper",
+         "parameters": {"width_m": 0.08}
+       },
+       {
+         "name": "grasp",
+         "parameters": {
+           "target_pixel_yx": [0.52, 0.61],
+           "grasp_force": 20.0
+         }
+       }
+     ]
+   }
    ```
 
-## Running
-- **Orchestrator demo (interactive, representations only)**  
-  `uv run python examples/orchestrator_demo.py`  
-  Drives task analysis, continuous detection, snapshots, and PDDL generation via a Textual TUI; does not command the robot.
+4. **Validation**: Check all primitives exist and parameters are valid
 
-- **GenAI log viewer (browse request/response traces)**  
-  `uv run python examples/genai_viewer.py outputs/demos/<run>/genai_logs`  
-  Navigates per-call folders produced by the global GenAI logger, showing metadata, prompts, responses, and media file paths (arrow keys to cycle).
+**Why this works**: The VLM can reason about spatial relationships in the image and select appropriate interaction points based on visual information.
 
-- **Cached plan replay (from test artifacts)**  
-  After tests, a translated plan is available at `tests/artifacts/llm_pick/pick_plan_llm_translated.json` with its world assets in `tests/assets/continuous_pick_fixture`. Replay or execute:
-  ```bash
-  uv run python scripts/run_cached_plan.py \
-    --plan tests/artifacts/llm_pick/pick_plan_llm_translated.json \
-    --world tests/assets/continuous_pick_fixture \
-    --robot-ip 192.168.1.224
-  ```
-  Add `--dry-run` to translate/validate without touching hardware.
+---
 
-- **Replay a recorded demo (same task, cached snapshots)**  
-  `uv run python scripts/replay_cached_demo.py --source outputs/demos/<run>`  
-  Streams the saved frames instead of a live RealSense feed, replays the original task description, and writes fresh state + GenAI logs to a new timestamped folder under `outputs/demos/`.
+### 5. Primitive Execution
 
-- **Tests**  
-  `uv run -m pytest -q` (LLM-gated suites skip without an API key). Artifacts land under `tests/artifacts/`.
+**Purpose**: Execute robot primitives with metric translation
 
+**Implementation**:
+- **Main Orchestration**: [TaskAndMotionPlanner.execute_skill_plan()](src/task_motion_planner.py)
+- **Executor**: [PrimitiveExecutor](src/primitives/primitive_executor.py)
+- **Key Methods**:
+  - `PrimitiveExecutor.execute_plan()` - Main execution entry point
+  - `PrimitiveExecutor.prepare_plan()` - Translates and validates primitives
+  - `PrimitiveExecutor._translate_helper_parameters()` - Back-projects pixels to 3D
+  - `PrimitiveExecutor._back_project()` - Converts 2D pixel → 3D camera frame
+- **Coordinate Utilities**: [compute_3d_position()](src/perception/utils/coordinates.py)
+- **Snapshot Loading**: [load_snapshot_artifacts()](src/planning/utils/snapshot_utils.py)
 
-## Notes
-- World state is exported via `TaskOrchestrator.get_world_state_snapshot()` (registry v2.0 + perception pool index + `last_snapshot_id`). Downstream planners/executors rely on that structure—avoid manual edits.
-- Keep prompts/catalog files in sync with `src/perception/object_tracker.py`, `src/primitives/skill_decomposer.py`, and `PRIMITIVE_LIBRARY`.
-- Use `uv` for all maintenance (installs, tests, examples) to stay aligned with `uv.lock`.
+**Process**:
 
-## Directory Structure
+#### a. Coordinate Translation
+Primitives reference image coordinates, which must be converted to robot coordinates:
+
+1. **Back-projection**: Convert 2D pixel → 3D position in camera frame
+   - Use depth map to get distance
+   - Apply camera intrinsics to compute 3D point
+
+2. **Frame transformation**: Convert camera frame → robot base frame
+   - Get camera pose from robot joints at snapshot time
+   - Apply rotation and translation
+
+**Example**:
 ```
-├── config/                   # Orchestrator defaults, perception prompts, primitive catalog/prompt schema
-├── docs/                     # Product-facing docs (perception, orchestrator, planning/primitives, camera)
-├── agents/                   # Agent-facing design, ops, and journal instructions
-├── src/
-│   ├── perception/           # ObjectTracker, ContinuousObjectTracker, registry, coordinate utils
-│   ├── planning/             # PDDL maintainer, task monitor, orchestrator, snapshot utils
-│   ├── primitives/           # SkillDecomposer, PrimitiveExecutor, SkillPlan types
-│   ├── camera/               # RealSense/Webcam wrappers and 2D↔3D helpers
-│   ├── kinematics/           # CuRobo/XArm primitives
-│   └── utils/                # Shared utilities
-├── examples/                 # Demos (orchestrator TUI, PDDL samples)
-├── scripts/                  # Utilities (e.g., run_cached_plan.py, replay_cached_demo.py)
-└── tests/                    # Regression suites + cached translation/LLM artifacts
-    ├── assets/               # World fixtures used by cached plans
-    ├── artifacts/            # Test artifacts
-    └── conftest.py           # Test configuration
+LLM Output: target_pixel_yx=[0.52, 0.61] (normalized image coordinates)
+           ↓
+Back-projection: [0.15, -0.03, 0.42] meters (camera frame)
+           ↓
+Frame transform: [0.45, 0.12, 0.30] meters (robot base frame)
+           ↓
+Robot Command: move_to(target_position=[0.45, 0.12, 0.30])
 ```
+
+#### b. Motion Planning & Execution
+- Each primitive calls CuRobo motion planner
+- Generates collision-free trajectories
+- Executes on robot hardware (or validates in dry-run mode)
+
+**Available Primitives**:
+- `move_to_pre_grasp`: Position above target with approach direction
+- `open_gripper`: Open gripper to specified width
+- `grasp`: Close gripper with force control
+- `move_to`: Move end-effector to position
+- `twist`: Rotate about axis
+- `release`: Open gripper to drop object
+
+---
+
+## Output Structure
+
+Each execution creates a timestamped run directory:
+
+```
+outputs/tamp_demo/run_20250110_143022/
+├── run_20250110_143022.log              # Complete execution log
+├── run_20250110_143022_timing.log       # Performance timing data
+├── run_metadata.json                    # Run configuration
+│
+├── genai_logs/                          # LLM request/response logs
+│   ├── 001_task_analysis/
+│   │   ├── metadata.json
+│   │   ├── prompt.txt
+│   │   ├── response.json
+│   │   └── input_image.png
+│   ├── 002_perception_cycle/
+│   └── ...
+│
+├── pddl/                                # Generated PDDL files
+│   ├── task_execution_domain.pddl
+│   └── task_execution_problem.pddl
+│
+├── decomposed_plans/                    # Skill decomposition outputs
+│   ├── 01_pick_gripper_red_block.json
+│   ├── 02_place_gripper_red_block_blue_block.json
+│   └── all_skill_plans.json
+│
+├── perception_pool/                     # Perception snapshots
+│   ├── index.json                       # Snapshot catalog
+│   └── snapshots/
+│       └── 20250110_143045_123-abc456/
+│           ├── color.png                # RGB image
+│           ├── depth.npz                # Depth map
+│           ├── intrinsics.json          # Camera parameters
+│           ├── detections.json          # Object detections
+│           ├── robot_state.json         # Robot configuration
+│           └── manifest.json            # Snapshot metadata
+│
+├── task_001/                            # First task results
+│   ├── task_metadata.json               # Task info, success, timing
+│   ├── decompositions.json              # Skill plans per action
+│   ├── execution_results.json           # Execution outcomes
+│   └── pddl -> ../pddl                  # Symlink to PDDL files
+│
+└── task_002/                            # Second task results
+    └── ...
+```
+
+This structure enables:
+- **Debugging**: Full traces of LLM calls and intermediate results
+- **Reproducibility**: Snapshots capture exact world state
+- **Analysis**: Timing logs show performance bottlenecks
+- **Reuse**: Perception data can be loaded for multiple planning attempts
+
+---
+
+## Key Features
+
+### 1. Task-Grounded Perception
+Instead of detecting all objects in a scene, the system focuses on objects relevant to the task. This improves detection quality and reduces processing time.
+
+### 2. Automatic Domain Refinement
+If PDDL planning fails (e.g., due to incorrect predicates or missing actions), the system uses Gemini to analyze the error and fix the domain automatically. This eliminates manual PDDL engineering.
+
+### 3. Visual Grounding
+Primitives reference specific pixel locations in images rather than abstract 3D coordinates. This allows the VLM to use visual reasoning to select interaction points (e.g., "grasp the handle" vs "grasp the side").
+
+### 4. Snapshot-Based Execution
+All primitives are grounded to specific perception snapshots. This ensures:
+- Temporal consistency (robot moves to where object *was* in the snapshot)
+- Reproducibility (can replay with same world state)
+- Debugging capability (can inspect what the VLM saw)
+
+### 5. Dry-Run Validation
+The system can validate complete execution pipelines without touching robot hardware, enabling rapid development and testing.
+
+---
+
+## Configuration
+
+### Task Analyzer Prompts
+**File**: `config/llm_task_analyzer_prompts.yaml`
+
+Controls how tasks are analyzed:
+- Prompt templates for task decomposition
+- Predicate extraction guidelines
+- Action library definitions
+
+### Skill Decomposer Prompts
+**File**: `config/skill_decomposer_prompts.yaml`
+
+Defines how actions are decomposed:
+- Prompt template with placeholders
+- JSON response schema
+- Interaction point selection criteria
+
+### Primitive Catalog
+**File**: `config/primitive_descriptions.md`
+
+Documents available robot primitives:
+- Function signatures
+- Parameter descriptions
+- Usage examples
+
+### System Settings
+**File**: `config/orchestrator_config.py`
+
+Configure system behavior:
+- Perception settings (update interval, min observations)
+- Planning settings (solver, timeout, refinement attempts)
+- Camera parameters
+- Logging levels
+
+---
+
+## Advanced Usage
+
+### Custom Prompts
+
+Use custom task analyzer prompts for domain-specific tasks:
+
+```bash
+python examples/tamp_demo.py \
+    --task "make a sandwich" \
+    --task-analyzer-prompts config/kitchen_prompts.yaml
+```
+
+### Perception-Only Mode
+
+Run just the perception and snapshot system:
+
+```bash
+python examples/orchestrator_demo.py
+```
+
+This provides a TUI for:
+- Viewing live detection results
+- Manually triggering snapshots
+- Inspecting object registries
+
+### Plan Replay
+
+Execute a previously generated plan without re-planning:
+
+```bash
+python scripts/run_cached_plan.py \
+    --plan outputs/tamp_demo/run_XXX/decomposed_plans/all_skill_plans.json \
+    --world outputs/tamp_demo/run_XXX/perception_pool
+```
+
+### GenAI Log Inspection
+
+Browse all LLM request/response traces:
+
+```bash
+python examples/genai_viewer.py outputs/tamp_demo/run_XXX/genai_logs
+```
+
+Navigate with arrow keys to see:
+- Full prompts sent to Gemini
+- Complete responses
+- Input images
+- Metadata (tokens, latency, etc.)
+
+---
+
+## Troubleshooting
+
+### No Objects Detected
+
+**Symptoms**:
+```
+⚠ WARNING: Cannot generate PDDL files - no objects detected!
+```
+
+**Solutions**:
+1. Check camera connection: `rs-enumerate-devices`
+2. Verify lighting conditions (avoid glare/shadows)
+3. Increase perception duration: `perceive_environment(duration=20.0)`
+4. Lower observation threshold in config
+
+### Planning Fails
+
+**Symptoms**:
+```
+✗ Planning failed: no plan found
+```
+
+**Solutions**:
+1. Check PDDL files in `outputs/.../pddl/`
+2. Verify goal objects were detected
+3. Review task analysis output in logs
+4. Enable domain refinement (on by default)
+5. Manually inspect domain/problem for errors
+
+### Primitive Execution Fails
+
+**Symptoms**:
+```
+✗ Execution failed: back-projection returned None
+```
+
+**Solutions**:
+1. Check depth data quality in snapshot
+2. Verify camera intrinsics are correct
+3. Ensure robot is calibrated
+4. Review interaction points in `detections.json`
+5. Try different interaction point (e.g., side vs top grasp)
+
+### Snapshot Loading Issues
+
+**Symptoms**:
+```
+⚠ Could not load snapshot: detections file not found
+```
+
+**Solutions**:
+1. Verify snapshot path is correct
+2. Check `perception_pool/index.json` exists
+3. Ensure snapshot contains `detections.json`
+4. Run fresh perception instead of loading snapshot
+
+---
+
+## Performance Tuning
+
+### Speed Up Perception
+- **Reduce min_observations**: Fewer detection cycles (default: 3)
+- **Use snapshot loading**: Reuse data from previous runs
+- **Increase update_interval**: Less frequent API calls (default: 2.0s)
+
+### Improve Planning Speed
+- **Use LAMA-first**: Fastest algorithm (default)
+- **Reduce timeout**: Don't wait for optimal solutions (default: 60s)
+- **Use Pyperplan**: No container overhead (default)
+
+### Reduce LLM Costs
+- **Lower decomposition temperature**: More deterministic (default: 0.1)
+- **Reuse snapshots**: Avoid re-detecting objects
+- **Batch similar tasks**: Amortize perception cost
+
+---
+
+## System Requirements
+
+### Minimum
+- CPU: 4+ cores
+- RAM: 8GB
+- Storage: 10GB (for logs and snapshots)
+- Network: Stable internet for Gemini API
+
+### Recommended
+- CPU: 8+ cores
+- RAM: 16GB
+- GPU: For CuRobo motion planning acceleration
+- Storage: 50GB (for extensive logging)
+
+### Hardware Dependencies
+- **Camera**: Intel RealSense D435 or D455 (for depth perception)
+- **Robot** (optional): xArm series or any robot with CuRobo support
+
+---
+
+## Code Reference Summary
+
+### Core System Files
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **Entry Point** | [tamp_demo.py](examples/tamp_demo.py) | Main demo script with CLI interface |
+| **TAMP Planner** | [task_motion_planner.py](src/task_motion_planner.py) | Main orchestrator coordinating all components |
+| **Task Orchestrator** | [task_orchestrator.py](src/planning/task_orchestrator.py) | Manages perception, PDDL generation, planning |
+| **Skill Decomposer** | [skill_decomposer.py](src/primitives/skill_decomposer.py) | Translates symbolic actions to primitives using VLM |
+| **Primitive Executor** | [primitive_executor.py](src/primitives/primitive_executor.py) | Executes primitives with coordinate transformation |
+| **PDDL Solver** | [pddl_solver.py](src/planning/pddl_solver.py) | Unified interface to PDDL planners |
+| **Domain Manager** | [pddl_domain.py](src/planning/pddl_domain.py) | PDDL domain generation and management |
+| **Domain Maintainer** | [pddl_domain_maintainer.py](src/planning/pddl_domain_maintainer.py) | LLM-based domain refinement |
+| **Object Tracker** | [continuous_object_tracker.py](src/perception/continuous_object_tracker.py) | Continuous object detection with VLM |
+| **Camera** | [realsense_camera.py](src/camera/realsense_camera.py) | RealSense RGB-D camera interface |
+
+### Key Data Types
+
+| Type | File | Purpose |
+|------|------|---------|
+| **TAMPConfig** | [task_motion_planner.py](src/task_motion_planner.py) | Configuration for entire TAMP system |
+| **SkillPlan** | [skill_plan_types.py](src/primitives/skill_plan_types.py) | Sequence of primitives for an action |
+| **PrimitiveCall** | [skill_plan_types.py](src/primitives/skill_plan_types.py) | Individual primitive with parameters |
+| **SolverResult** | [pddl_solver.py](src/planning/pddl_solver.py) | PDDL planning result |
+| **PrimitiveExecutionResult** | [primitive_executor.py](src/primitives/primitive_executor.py) | Execution outcome with warnings/errors |
+
+### Utility Modules
+
+| Module | File | Purpose |
+|--------|------|---------|
+| **Snapshot Utils** | [snapshot_utils.py](src/planning/utils/snapshot_utils.py) | Load/save perception snapshots |
+| **Coordinate Utils** | [coordinates.py](src/perception/utils/coordinates.py) | Back-projection and coordinate transforms |
+| **GenAI Logging** | [genai_logging.py](src/utils/genai_logging.py) | Log all LLM requests/responses |
+
+---
+
+## Citation
+
+If you use this system in your research, please cite:
+
+```bibtex
+@software{vlm_tamp_2025,
+  title={VLM-Based Task and Motion Planning System},
+  author={[Author Names]},
+  year={2025},
+  url={https://github.com/yourusername/vlm-semantic-spatial-perception}
+}
+```
+
+---
+
+## License
+
+[Specify license]
+
+---
+
+## Acknowledgments
+
+This system builds on:
+- **Gemini Robotics-ER**: Vision and reasoning capabilities
+- **CuRobo**: GPU-accelerated motion planning
+- **Pyperplan/Fast Downward**: PDDL solvers
+- **RealSense**: RGB-D perception
+
+---
+
+## Support
+
+For questions or issues:
+- **GitHub Issues**: [Link to issues page]
+- **Documentation**: See `docs/` directory for detailed component guides
+- **Examples**: Check `examples/` for usage patterns
