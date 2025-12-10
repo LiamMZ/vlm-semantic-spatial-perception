@@ -121,6 +121,7 @@ def compute_3d_position(
         depth = depth_frame[pixel_y, pixel_x]
 
         if depth <= 0 or np.isnan(depth):
+            print(f"      Invalid depth at pixel ({pixel_y}, {pixel_x}): {depth}")
             return None
 
         # Get camera intrinsics (support both naming conventions)

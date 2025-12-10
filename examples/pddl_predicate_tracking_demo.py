@@ -152,8 +152,8 @@ class PDDLPredicateTrackingDemo:
                 print(f"      • {pred}")
             print()
 
-            print(f"  → Task complexity: {self.task_analysis.complexity}")
-            print(f"  → Estimated steps: {self.task_analysis.estimated_steps}")
+            print("  → Task complexity: n/a")
+            print("  → Estimated steps: n/a")
             print()
 
             if self.task_analysis.action_sequence:
@@ -164,8 +164,7 @@ class PDDLPredicateTrackingDemo:
 
             if self.task_analysis.goal_objects:
                 print(f"  → Goal objects: {', '.join(self.task_analysis.goal_objects)}")
-            if self.task_analysis.tool_objects:
-                print(f"  → Tool objects: {', '.join(self.task_analysis.tool_objects)}")
+            # Tool objects not emitted in current TaskAnalysis schema
 
             if self.task_analysis.required_actions:
                 print(f"  → LLM generated {len(self.task_analysis.required_actions)} custom actions")

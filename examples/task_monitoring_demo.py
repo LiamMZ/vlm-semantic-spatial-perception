@@ -85,7 +85,7 @@ async def main():
         print(f"      ... and {len(task_analysis.relevant_predicates) - 10} more")
 
     print(f"\n  → Goal objects: {', '.join(task_analysis.goal_objects)}")
-    print(f"  → Estimated steps: {task_analysis.estimated_steps}")
+    print("  → Estimated steps: n/a")
     print()
 
     # =========================================================================

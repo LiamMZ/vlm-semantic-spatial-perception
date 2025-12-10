@@ -62,8 +62,10 @@ from src.planning.pddl_solver import SolverResult
 from src.primitives.skill_decomposer import SkillDecomposer
 from src.primitives.primitive_executor import PrimitiveExecutor, PrimitiveExecutionResult
 from src.primitives.skill_plan_types import SkillPlan
+from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
 from src.utils.genai_logging import configure_genai_logging
 from src.camera.realsense_camera import RealSenseCamera
+from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
 # Import orchestrator config
 import sys
 config_path = Path(__file__).parent.parent / "config"
@@ -104,16 +106,16 @@ class TAMPConfig:
     update_interval: float = 2.0
     min_observations: int = 3
     auto_refine_on_failure: bool = True
-    max_refinement_attempts: int = 3
+    max_refinement_attempts: int = 5
 
     # Solver settings
     solver_backend: str = "auto"  # "auto", "pyperplan", "fast-downward-docker", etc.
     solver_algorithm: str = "lama-first"
-    solver_timeout: float = 30.0
+    solver_timeout: float = 60.0
 
     # Execution settings
     dry_run_default: bool = False  # Default dry-run mode for execution
-    primitives_interface: Optional[Any] = None  # Actual robot primitives interface
+    primitives_interface: Optional[Any] = CuRoboMotionPlanner(robot_ip="192.168.1.224")  # Actual robot primitives interface
 
     # Callbacks
     on_state_change: Optional[Callable[[TAMPState], None]] = None
@@ -216,6 +218,7 @@ class TaskAndMotionPlanner:
         self.primitive_executor = PrimitiveExecutor(
             primitives=config.primitives_interface,
             perception_pool_dir=perception_pool_dir,
+            logger=self.orchestrator.logger.getChild("PrimitiveExecutor"),
         )
 
         # Execution tracking
@@ -393,6 +396,12 @@ class TaskAndMotionPlanner:
                     current_problem_pddl=self.orchestrator.pddl.generate_problem_pddl()
                 )
 
+                # Update ObjectTracker with refined predicates and actions
+                print(f"  • Updating ObjectTracker with refined predicates/actions...")
+                await self.orchestrator.maintainer.update_object_tracker_from_domain(
+                    self.orchestrator.tracker
+                )
+
                 # Retry planning once after refinement
                 print(f"\n🔄 Retrying planning after refinement...")
                 result = await self.orchestrator.solve_and_plan()
@@ -463,17 +472,14 @@ class TaskAndMotionPlanner:
             dry_run: If True, validate but don't execute
 
         Returns:
-            Execution result with success status and any errors
+            Execution result with success status; exceptions propagate on failure.
         """
         print(f"\n  Executing: {action_name} ({'DRY RUN' if dry_run else 'LIVE'})")
 
-        # Get current world state from orchestrator
-        world_state = {
-            "registry": self.orchestrator.tracker.registry.to_dict() if self.orchestrator.tracker else {},
-            "snapshots": {}  # Executor will load from perception pool
-        }
+        # Get complete world state from orchestrator (matches run_cached_plan.py format)
+        # This includes: registry, last_snapshot_id, snapshot_index, robot_state
+        world_state = self.orchestrator.get_world_state_snapshot()
 
-        # Execute plan
         result = self.primitive_executor.execute_plan(
             plan=skill_plan,
             world_state=world_state,
@@ -483,11 +489,7 @@ class TaskAndMotionPlanner:
         if result.executed:
             print(f"    ✓ Executed {len(skill_plan.primitives)} primitives")
         else:
-            print(f"    ✗ Execution failed: {result.errors}")
-
-        if result.warnings:
-            for warning in result.warnings:
-                print(f"    ⚠ {warning}")
+            print(f"    ✓ Validated {len(skill_plan.primitives)} primitives (dry run)")
 
         if self.config.on_action_executed:
             self.config.on_action_executed(action_name, result)

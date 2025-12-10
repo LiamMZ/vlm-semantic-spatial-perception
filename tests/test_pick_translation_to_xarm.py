@@ -8,6 +8,7 @@ Asserts the translated primitives include target_position and expected method or
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Dict
@@ -121,13 +122,13 @@ def _mock_llm_response(world_state: dict) -> str:
         ({"object_id": "black_fabric_garment", "interaction": "graspable"}),
     ],
 )
-def test_pick_plan_translates_to_xarm_calls(action_parameters):
+def test_pick_plan_translates_to_xarm_calls(action_parameters, caplog):
     """
     Source data: fixture registry/snapshots in tests/assets/continuous_pick_fixture and a mocked LLM JSON.
     Methods covered: SkillDecomposer.plan (stubbed _call_llm) and PrimitiveExecutor.prepare_plan translation.
     Artifacts emitted: tests/artifacts/translation_pick/pick_plan_prepare_plan.json and pick_plan_calls.json.
     Assertions: translated move_to_pose_with_preparation has target_position; method order is move/close/retract;
-    all references point to the black cloth; no prepare_plan errors and warnings empty.
+    all references point to the black cloth; no prepare_plan warnings are emitted.
     """
     world_state = _load_world_state()
 
@@ -148,19 +149,18 @@ def test_pick_plan_translates_to_xarm_calls(action_parameters):
         perception_pool_dir=FIXTURE_DIR / "perception_pool",
     )
 
-    _, warnings, errors = executor.prepare_plan(plan, world_state)
+    with caplog.at_level(logging.WARNING):
+        executor.prepare_plan(plan, world_state)
     prepare_output_path = TRANSLATION_ARTIFACTS_DIR / "pick_plan_prepare_plan.json"
     prepare_output_path.write_text(
         json.dumps(
             {
                 "plan": plan.to_dict(),
-                "warnings": warnings,
-                "errors": errors,
             },
             indent=2,
         )
     )
-    assert errors == []
+    warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
 
     curobo_calls = [
         {

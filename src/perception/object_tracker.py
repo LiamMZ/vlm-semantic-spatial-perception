@@ -16,6 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass
 import io
 import json
+from urllib import response
 import yaml
 
 import numpy as np
@@ -66,9 +67,10 @@ class ObjectTracker:
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
-        fast_mode: bool = True,
+        fast_mode: bool = False,
         pddl_predicates: Optional[List[str]] = None,
         pddl_types: Optional[List[str]] = None,
+        pddl_actions: Optional[List[str]] = None,
         prompts_config_path: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         task_context: Optional[str] = None,
@@ -103,6 +105,7 @@ class ObjectTracker:
         # PDDL predicate tracking
         self.pddl_predicates: List[str] = pddl_predicates or []
         self.pddl_types: List[str] = pddl_types or []
+        self.pddl_actions: List[str] = pddl_actions or []
         # Task context for grounding
         self.task_context: Optional[str] = task_context
         self.available_actions: List[Dict[str, Any]] = available_actions or []
@@ -190,6 +193,38 @@ class ObjectTracker:
         if predicate in self.pddl_predicates:
             self.pddl_predicates.remove(predicate)
             self.logger.info("Removed PDDL predicate: %s", predicate)
+
+    def set_pddl_actions(self, actions: List[str]) -> None:
+        """
+        Set the list of PDDL actions to track for objects.
+
+        Args:
+            actions: List of predicate names (e.g., ["clean", "dirty", "opened", "filled"])
+        """
+        self.pddl_actions = actions
+        self.logger.info("PDDL actions updated: %s", actions)
+
+    def add_pddl_action(self, action: str) -> None:
+        """
+        Add a single PDDL action to track.
+
+        Args:
+            action: Action name to add
+        """
+        if action not in self.pddl_actions:
+            self.pddl_actions.append(action)
+            self.logger.info("Added PDDL action: %s", action)
+
+    def remove_pddl_action(self, action: str) -> None:
+        """
+        Remove a PDDL action from tracking.
+
+        Args:
+            action: Action name to remove
+        """
+        if action in self.pddl_actions:
+            self.pddl_actions.remove(action)
+            self.logger.info("Removed PDDL predicate: %s", action)
 
     def set_pddl_types(self, types: List[str]) -> None:
         """
@@ -336,7 +371,7 @@ class ObjectTracker:
             valid_goal_objects = [obj for obj in self.goal_objects if obj and obj != "None"]
             if valid_goal_objects:
                 goal_objects_str = ", ".join(valid_goal_objects)
-                task_context_str += f"\n\n    Goal Objects: {goal_objects_str}\n    Note: These objects are critical for completing the task."
+                task_context_str += f"\n\n    Goal Objects: {goal_objects_str}\n    Note: These objects are critical for completing the task. However, you are not allowed to use these placeholder names for the predicates (you can only use objects that have been detected)."
 
         return task_context_str
     
@@ -501,7 +536,8 @@ class ObjectTracker:
                 camera_intrinsics,
                 temperature,
                 bounding_box,
-                existing_object_id=object_name if object_name in existing_ids else None
+                existing_object_id=object_name if object_name in existing_ids else None,
+                other_objects=object_data_list
             )
             for object_name, bounding_box in object_data_list
         ]
@@ -628,7 +664,8 @@ class ObjectTracker:
         camera_intrinsics: Optional[Any],
         temperature: Optional[float],
         bounding_box: Optional[List[int]] = None,
-        existing_object_id: Optional[str] = None
+        existing_object_id: Optional[str] = None,
+        other_objects: Optional[List[Tuple[str, Optional[List[int]]]]] = None
     ) -> Optional[DetectedObject]:
         """
         Analyze a single object: affordances, properties, and interaction points.
@@ -692,15 +729,14 @@ class ObjectTracker:
             pddl_list = ", ".join(self.pddl_predicates)
 
             # Get list of other detected objects for relational predicates
-            other_objects = self.registry.get_all_objects()
             other_objects_list = ""
             if other_objects:
-                other_objects_list = "\n"
-                for obj in other_objects:
-                    # Skip the current object being analyzed
-                    if obj.object_id != existing_object_id and obj.object_id != object_name:
-                        other_objects_list += f"       - {obj.object_id} ({obj.object_type})\n"
-                if other_objects_list.strip() == "":
+                # other_objects is a list of tuples: (name, bbox)
+                names = [name for name, _ in other_objects
+                         if name != object_name and (existing_object_id is None or name != existing_object_id)]
+                if names:
+                    other_objects_list = "\n" + "".join(f"       - {name}\n" for name in names)
+                else:
                     other_objects_list = "\n       (No other objects detected yet)"
             else:
                 other_objects_list = "\n       (No other objects detected yet)"
@@ -716,6 +752,11 @@ class ObjectTracker:
 
         # Format task context for analysis
         task_context_section = self._format_task_context_for_analysis()
+        analysis_schema = json.dumps(
+            self.prompts["analysis"].get("response_schema", {}),
+            ensure_ascii=True,
+            indent=2
+        )
 
         if self.fast_mode:
             # Fast mode: only detect affordances and properties, no interaction points
@@ -724,7 +765,8 @@ class ObjectTracker:
                 crop_note=crop_note,
                 predicates_section=predicates_section,
                 predicates_example=predicates_example,
-                task_context_section=task_context_section
+                task_context_section=task_context_section,
+                analysis_schema=analysis_schema
             )
         elif cached_data:
             # Use cached affordances, only detect interaction points
@@ -732,7 +774,8 @@ class ObjectTracker:
                 object_name=object_name,
                 crop_note=crop_note,
                 cached_affordances=cached_data['affordances'],
-                object_type=cached_data['object_type']
+                object_type=cached_data['object_type'],
+                analysis_schema=analysis_schema
             )
         else:
             # Full analysis
@@ -741,14 +784,16 @@ class ObjectTracker:
                 crop_note=crop_note,
                 predicates_section=predicates_section,
                 predicates_example=predicates_example,
-                task_context_section=task_context_section
+                task_context_section=task_context_section,
+                analysis_schema=analysis_schema
             )
 
         try:
             response_text = await self._generate_content(
                 analysis_image,
                 prompt,
-                temperature
+                temperature,
+                response_schema=self.prompts["analysis"].get("response_schema")
             )
             data = self._parse_json_response(response_text)
 
@@ -760,28 +805,13 @@ class ObjectTracker:
                 self.logger.warning("Unexpected list response for %s, skipping", object_name)
                 return None
 
+            raw_affordances = data.get("affordances", []) or []
+
             # Extract affordances (use cached if available)
             if cached_data:
                 affordances = set(cached_data["affordances"])
             else:
-                raw_affordances = data.get("affordances", []) or []
                 affordances: set[str] = set()
-
-                def _coerce_affordance(item: Any) -> None:
-                    """Normalize affordance entries into strings to avoid unhashable dicts."""
-                    if isinstance(item, str):
-                        affordances.add(item)
-                    elif isinstance(item, dict):
-                        for key in item.keys():
-                            if isinstance(key, str):
-                                affordances.add(key)
-                    elif isinstance(item, (list, tuple)):
-                        for sub in item:
-                            if isinstance(sub, str):
-                                affordances.add(sub)
-
-                for aff in raw_affordances:
-                    _coerce_affordance(aff)
 
             # Helper function to back-project coordinates from crop to full image
             def backproject_to_full_image(crop_pos_2d: List[int]) -> List[int]:
@@ -810,12 +840,26 @@ class ObjectTracker:
 
                 return [full_norm_y, full_norm_x]
 
-            # Extract interaction points
-            interaction_points = {}
-            interaction_points_data = data.get("interaction_points", {})
-
-            for affordance, point_data in interaction_points_data.items():
-                pos_2d_crop = point_data.get("position", [500, 500])
+            # Extract affordances and interaction points from affordance entries
+            interaction_points_result: Dict[str, InteractionPoint] = {}
+            for entry in raw_affordances:
+                if isinstance(entry, str):
+                    affordances.add(entry)
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                affordance_name = entry.get("affordance") or entry.get("name")
+                if isinstance(affordance_name, str):
+                    affordances.add(affordance_name)
+                else:
+                    continue
+                point_data = entry.get("interaction_point") if isinstance(entry.get("interaction_point"), dict) else entry
+                if not isinstance(point_data, dict):
+                    continue
+                pos_value = point_data.get("position")
+                if not isinstance(pos_value, (list, tuple)) or len(pos_value) < 2:
+                    continue
+                pos_2d_crop = list(pos_value[:2])
                 # Back-project to full image coordinates
                 pos_2d = backproject_to_full_image(pos_2d_crop)
 
@@ -832,10 +876,10 @@ class ObjectTracker:
                         use_intrinsics
                     )
 
-                interaction_points[affordance] = InteractionPoint(
+                interaction_points_result[affordance_name] = InteractionPoint(
                     position_2d=pos_2d,
                     position_3d=pos_3d,
-                    alternative_points=point_data.get("alternative_points", [])
+                    alternative_points=[]
                 )
 
             # Extract center position
@@ -876,13 +920,13 @@ class ObjectTracker:
             # Add predicates to registry's global predicate set
             if validated_predicates:
                 self.registry.add_predicates(validated_predicates)
-
+            print(f"ℹ Object '{object_name}' predicates: {validated_predicates}, original predicates: {object_predicates}")
             # Create DetectedObject (without predicates field - they're only at registry level)
             detected_obj = DetectedObject(
                 object_type=object_type,
                 object_id=existing_object_id or object_id,
                 affordances=affordances,
-                interaction_points=interaction_points,
+                interaction_points=interaction_points_result,
                 position_2d=pos_2d,
                 position_3d=pos_3d,
                 bounding_box_2d=final_bbox
@@ -1238,6 +1282,9 @@ class ObjectTracker:
             existing_objects, prior_observations
         )
 
+        # Get task context sections for detection
+        task_context_section, task_priority_section = self._format_task_context_for_detection()
+
         streaming = self.prompts['detection']['streaming']
         if isinstance(streaming, dict):
             prior_template = streaming.get('prior') or ""
@@ -1248,11 +1295,13 @@ class ObjectTracker:
 
         prior_prompt = prior_template.format(
             existing_objects_section=existing_section,
-            prior_images_section=prior_section
+            prior_images_section=prior_section,
+            task_context_section=task_context_section
         ).strip()
         current_prompt = current_template.format(
             existing_objects_section=existing_section,
-            prior_images_section=prior_section
+            prior_images_section=prior_section,
+            task_priority_section=task_priority_section
         ).strip()
 
         # Ensure turn semantics are explicit even if templates are missing.
@@ -1379,6 +1428,7 @@ class ObjectTracker:
         image: Image.Image,
         prompt: str,
         temperature: Optional[float],
+        response_schema: Optional[Dict[str, Any]] = None,
         additional_image_parts: Optional[List[types.Part]] = None,
         content_parts: Optional[List[Any]] = None,
         contents: Optional[List[Any]] = None
@@ -1392,6 +1442,7 @@ class ObjectTracker:
             image,
             prompt,
             temperature,
+            response_schema=response_schema,
             additional_image_parts=additional_image_parts,
             content_parts=content_parts,
             contents=contents
@@ -1404,6 +1455,7 @@ class ObjectTracker:
         image: Image.Image,
         prompt: str,
         temperature: Optional[float],
+        response_schema: Optional[Dict[str, Any]] = None,
         additional_image_parts: Optional[List[types.Part]] = None,
         content_parts: Optional[List[Any]] = None,
         contents: Optional[List[Any]] = None
@@ -1429,12 +1481,17 @@ class ObjectTracker:
         payload = contents if contents is not None else content_parts
 
         temp = temperature if temperature is not None else self.default_temperature
-        config = types.GenerateContentConfig(
-            temperature=temp,
-            thinking_config=types.ThinkingConfig(
+        config_kwargs: Dict[str, Any] = {
+            "temperature": temp,
+            "thinking_config": types.ThinkingConfig(
                 thinking_budget=self.thinking_budget
             )
-        )
+        }
+        if response_schema:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_json_schema"] = response_schema
+
+        config = types.GenerateContentConfig(**config_kwargs)
 
         # Use async streaming via client.aio
         stream = await self.client.aio.models.generate_content_stream(
@@ -1460,9 +1517,11 @@ class ObjectTracker:
                 start = response_text.find("```") + 3
                 end = response_text.find("```", start)
                 response_text = response_text[start:end]
-
             return json.loads(response_text.strip())
         except json.JSONDecodeError as e:
+            import traceback
+            traceback.print_exc()
+            print(response_text)
             self.logger.warning("Failed to parse JSON: %s", e)
             self.logger.debug("Response snippet: %s", response_text[:500])
             return {}
@@ -1500,7 +1559,7 @@ class ContinuousObjectTracker(ObjectTracker):
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
-        fast_mode: bool = True,
+        fast_mode: bool = False,
         update_interval: float = 1.0,
         on_detection_complete: Optional[Callable[[int], None]] = None,
         logger: Optional[logging.Logger] = None,

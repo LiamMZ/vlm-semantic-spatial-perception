@@ -33,7 +33,7 @@ class OrchestratorConfig:
     # Detection Configuration
     update_interval: float = 2.0  # Seconds between detections
     min_observations: int = 3  # Minimum objects before planning
-    fast_mode: bool = True  # Skip interaction points for speed
+    fast_mode: bool = False  # Skip interaction points for speed
 
     # Persistence Configuration
     state_dir: Path = field(default_factory=lambda: Path("outputs/orchestrator_state"))
@@ -60,10 +60,10 @@ class OrchestratorConfig:
     # PDDL Solver Configuration
     solver_backend: Optional[str] = None  # "auto", "pyperplan", "fast-downward-docker", "fast-downward-apptainer"
     solver_algorithm: str = "lama-first"  # Search algorithm to use
-    solver_timeout: float = 30.0  # Timeout in seconds for solver
+    solver_timeout: float = 120.0  # Timeout in seconds for solver
     solver_verbose: bool = False  # Print solver output
     auto_solve_when_ready: bool = False  # Automatically solve when ready for planning
-    max_refinement_attempts: int = 3  # Max attempts to refine domain after planning failures
+    max_refinement_attempts: int = 5  # Max attempts to refine domain after planning failures
     auto_refine_on_failure: bool = True  # Automatically refine domain when planning fails
 
     # Prompt Configuration

@@ -80,6 +80,26 @@ class RealSenseCamera(BaseCamera):
         self.pipeline = rs.pipeline()
         self.config = rs.config()
 
+        # Setup filters
+        self.spatial = rs.spatial_filter()
+        self.spatial.set_option(rs.option.filter_magnitude, 2)
+        self.spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
+        self.spatial.set_option(rs.option.filter_smooth_delta, 20)
+        self.spatial.set_option(rs.option.holes_fill, 5)
+
+        self.threshold = rs.threshold_filter(min_dist=0.2, max_dist=2.0)
+
+        self.temporal = rs.temporal_filter()
+        self.temporal.set_option(rs.option.filter_smooth_alpha, 0.3)
+        self.temporal.set_option(rs.option.filter_smooth_delta, 30)
+        self.temporal.set_option(rs.option.holes_fill, 3)
+
+        self.depth_to_disparity = rs.disparity_transform(True)
+        self.disparity_to_depth = rs.disparity_transform(False)
+
+        self.hole_filling = rs.hole_filling_filter()
+        self.hole_filling.set_option(rs.option.holes_fill, 1)    
+
         # Configure streams
         self.logger.debug(f"Configuring color stream: RGB8 @ {self.width}x{self.height}")
         self.config.enable_stream(
@@ -248,6 +268,16 @@ class RealSenseCamera(BaseCamera):
 
             color_frame = frames.get_color_frame()
             depth_frame = frames.get_depth_frame()
+
+            # Apply RealSense filter chain
+            depth_frame = self.threshold.process(depth_frame)
+            # Work in disparity domain for better filtering
+            depth_frame = self.depth_to_disparity.process(depth_frame)
+            depth_frame = self.spatial.process(depth_frame)
+            depth_frame = self.temporal.process(depth_frame)
+            depth_frame = self.disparity_to_depth.process(depth_frame)
+            # Final cleanup
+            depth_frame = self.hole_filling.process(depth_frame)
 
             if not color_frame or not depth_frame:
                 self.logger.error("Failed to get aligned frames from pipeline")

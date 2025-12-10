@@ -338,8 +338,8 @@ class TaskOrchestrator:
         self.logger.info("✓ Task analyzed!")
         valid_goal_objects = [obj for obj in self.task_analysis.goal_objects if obj and obj != "None"]
         self.logger.info("  • Goal objects: %s", ", ".join(valid_goal_objects) if valid_goal_objects else "None")
-        self.logger.info("  • Estimated steps: %s", self.task_analysis.estimated_steps)
-        self.logger.info("  • Complexity: %s", self.task_analysis.complexity)
+        self.logger.info("  • Estimated steps: n/a")
+        self.logger.info("  • Complexity: n/a")
         self.logger.info("  • Required predicates: %s", len(self.task_analysis.relevant_predicates))
 
         # Seed perception with predicates and task context
@@ -1315,6 +1315,8 @@ class TaskOrchestrator:
                     print("Problem file exists!")
                     problem_content = problem_path.read_text()
                     print(problem_content)
+                    print("############################")
+                    print(domain_content)
                 else: 
                     print("  ⚠ Problem file not found for refinement context")
             else:
@@ -1333,10 +1335,20 @@ class TaskOrchestrator:
                 )
 
                 print("  ✓ Domain refinement complete")
+
+                # Update ObjectTracker with refined predicates and actions
+                print("  • Updating ObjectTracker with refined predicates/actions...")
+                await self.maintainer.update_object_tracker_from_domain(self.tracker)
                 print()
 
                 # Reset to ready for planning state to try again
                 self._set_state(OrchestratorState.READY_FOR_PLANNING)
+                domain_snapshot = await self.pddl.get_domain_snapshot()
+                self.tracker.set_task_context(
+                    task_description=self.current_task,
+                    available_actions=domain_snapshot.get("predefined_actions", []),
+                    goal_objects=self.task_analysis.goal_objects
+                )
                 return True
             else:
                 print("  ⚠ No maintainer available for refinement")
@@ -1406,7 +1418,7 @@ class TaskOrchestrator:
                 return result
 
             # Try to refine
-            print(f"\n🔧 Detected refinable planning error, attempting domain refinement...")
+            print(f"\n🔧 Detected refinable planning error, attempting domain refinement: {result.error_message}...")
 
             # Get PDDL file paths
             pddl_files = {
@@ -1578,8 +1590,6 @@ class TaskOrchestrator:
             "task_analysis": {
                 "goal_objects": self.task_analysis.goal_objects if self.task_analysis else [],
                 "relevant_predicates": self.task_analysis.relevant_predicates if self.task_analysis else [],
-                "estimated_steps": self.task_analysis.estimated_steps if self.task_analysis else 0,
-                "complexity": self.task_analysis.complexity if self.task_analysis else "unknown",
             } if self.task_analysis else None,
             "files": {
                 "registry": str(registry_path),

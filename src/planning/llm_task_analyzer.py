@@ -37,7 +37,7 @@ class LLMTaskAnalyzer:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-pro",
+        model_name: str = "gemini-robotics-er-1.5-preview",
         prompts_config_path: Optional[Union[str, Path]] = None
     ):
         """
@@ -62,7 +62,7 @@ class LLMTaskAnalyzer:
         self.prompt_templates = {
             key: value
             for key, value in config_data.items()
-            if key.endswith("_prompt")
+            if key.endswith("_prompt") and isinstance(value, str)
         }
         self.robot_description = config_data.get("robot_description")
 
@@ -112,55 +112,56 @@ class LLMTaskAnalyzer:
             pil_image = self._prepare_image(environment_image)
 
         # Build prompt (analysis template handles empty observations)
-        prompt = self._build_analysis_prompt(
-            task_description, observed_objects, observed_relationships
+        template = self._get_prompt_template("analysis_prompt")
+        prompt = render_prompt_template(
+            template,
+            {
+                "TASK": task_description,
+                "ROBOT_DESCRIPTION": self._format_robot_description(),
+                "OBJECTS_JSON": self._format_objects_json(observed_objects),
+                "RELATIONSHIPS_JSON": self._format_relationships_json(observed_relationships),
+            },
         )
 
         # Call LLM with timeout
         start_time = time.time()
-        try:
-            # Build content parts
-            content_parts = []
-            if pil_image:
-                # Encode image
-                img_byte_arr = io.BytesIO()
-                pil_image.save(img_byte_arr, format='PNG')
-                img_bytes = img_byte_arr.getvalue()
-                content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
-            content_parts.append(prompt)
 
-            # Generate content
-            config = types.GenerateContentConfig(
-                temperature=0.1,  # Low for consistency
-                top_p=0.9,
-                max_output_tokens=8192,
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=-1)
-            )
+        # Build content parts
+        content_parts = []
+        if pil_image:
+            # Encode image
+            img_byte_arr = io.BytesIO()
+            pil_image.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+            content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
+        content_parts.append(prompt)
 
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=content_parts,
-                config=config
-            )
-            response_text = response.text
-            print(f"************************************ {response_text}")
-            elapsed = time.time() - start_time
-            print(f"   → LLM analysis completed in {elapsed:.2f}s")
+        # Generate content
+        config = types.GenerateContentConfig(
+            temperature=0.1,  # Low for consistency
+            top_p=0.9,
+            max_output_tokens=8192,
+            response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_budget=0)
+        )
 
-            # Parse response
-            analysis = self._parse_response(response_text)
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=content_parts,
+            config=config
+        )
+        response_text = response.text
+        print(f"************************************ {response_text}")
+        elapsed = time.time() - start_time
+        print(f"   → LLM analysis completed in {elapsed:.2f}s")
 
-            # Cache result
-            self._cache[cache_key] = analysis
+        # Parse response
+        analysis = self._parse_response(response_text)
 
-            return analysis
+        # Cache result
+        self._cache[cache_key] = analysis
 
-        except Exception as e:
-            print(f"   ⚠ LLM analysis failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
+        return analysis
 
     def _build_initial_analysis_prompt(self, task: str) -> str:
         """
@@ -186,26 +187,33 @@ TASK: {task}
 Return JSON with:
 {{
   "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
-  "preconditions": ["predicate(obj)", ...],
-  "initial_predicates": ["expected_initial_states"],
-  "relevant_predicates": ["predicate_names"],
+  "goal_predicates": ["(predicate1 obj1 obj2)", ...],
+  "preconditions": ["(predicate obj)", ...],
+  "initial_predicates": ["(expected_initial_states)", ...],
+  "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
   "goal_objects": ["object_id1", ...],
   "global_predicates": ["global_predicate1", ...],
   "tool_objects": ["tool_id", ...],
   "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["current_predicate(obj)", ...],
-  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
+  "initial_predicates": ["(current_predicate obj)", ...],
   "relevant_types": ["type1", "type2", ...],
   "required_actions": [
     {{
       "name": "pick",
       "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "precondition": "(and (graspable ?obj))",
       "effect": "(and (holding ?obj) (not (empty-hand)))"
     }}
   ],
 }}
+
+IMPORTANT: Relevant Predicates Format
+- "relevant_predicates" MUST include parameters in PDDL format:
+  - "(graspable ?obj)" - NOT just "graspable"
+  - "(on ?obj ?surface)" - binary predicate
+  - "(empty-hand)" - zero-parameter predicate
+  - "(holding ?obj)" - NOT just "holding"
+- Parameter count MUST match usage in action preconditions/effects
 
 IMPORTANT: Global Predicates
 - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
@@ -227,7 +235,7 @@ IMPORTANT PDDL RULES:
 4. All predicates should be predicates applied to variables, not string constants
 5. GLOBAL Predicates should not be returned with parenthases
 
-Include 8-12 relevant_predicates (clean, dirty, on, holding, empty-hand, graspable, reachable, etc.) and 3-5 required_actions."""
+Include 8-12 relevant_predicates with proper PDDL format like "(graspable ?obj)", "(on ?x ?y)", "(empty-hand)", and 3-5 required_actions."""
 
     def _build_analysis_prompt(
         self,
@@ -265,28 +273,32 @@ OBSERVED RELATIONSHIPS:
 Provide a JSON response with:
 {{
   "action_sequence": ["action1", "action2", ...],
-  "goal_predicates": ["predicate1(obj1, obj2)", ...],
-  "preconditions": ["predicate(obj)", ...],
-  "initial_predicates": ["expected_initial_states"],
-  "relevant_predicates": ["predicate_names"],
+  "goal_predicates": ["(predicate1 obj1 obj2)", ...],
+  "preconditions": ["(predicate obj)", ...],
+  "initial_predicates": ["(expected_initial_states)", ...],
+  "relevant_predicates": ["(predicate1 ?obj)", "(predicate2 ?obj1 ?obj2)", ...],
   "goal_objects": ["object_id1", ...],
   "global_predicates": ["global_predicate1", ...],
   "tool_objects": ["tool_id", ...],
   "obstacle_objects": ["obstacle_id", ...],
-  "initial_predicates": ["current_predicate(obj)", ...],
-  "relevant_predicates": ["predicate_type1", "predicate_type2", ...],
+  "initial_predicates": ["(current_predicate obj)", ...],
   "relevant_types": ["type1", "type2", ...],
   "required_actions": [
     {{
       "name": "pick",
       "parameters": ["?obj - object"],
-      "precondition": "(and (graspable ?obj) (clear ?obj))",
+      "precondition": "(and (graspable ?obj))",
       "effect": "(and (holding ?obj) (not (empty-hand)))"
     }}
   ],
   "complexity": "simple|medium|complex",
   "estimated_steps": 3
 }}
+
+CRITICAL: Relevant Predicates Format
+- "relevant_predicates" MUST include parameters: ["(graspable ?obj)", "(on ?x ?y)", "(empty-hand)"]
+- NOT bare names: ["graspable", "on", "empty-hand"]
+- Parameter count must match action usage
 
 CRITICAL PDDL FORMATTING RULES:
 1. Parameters MUST use variables with ? prefix (e.g., ?obj, ?location, ?machine)
@@ -305,7 +317,7 @@ IMPORTANT: Global Predicates
     - "global_predicates" should list predicates that represent robot/environment state, NOT object-specific predicates
     - These are predicates that should be TRUE INITIALLY before task execution
     - Examples:
-    - hand_is_empty (or empty-hand): Robot gripper has no object
+    - empty-hand: Robot gripper has no object (Note: We assume that we will always have this predicate in initial_predicates!)
     - arm_at_home: Robot arm is at home position
     - gripper_open: Gripper is in open state
     - robot_ready: Robot system is initialized
@@ -333,19 +345,13 @@ Focus on:
             )
 
             return TaskAnalysis(
-                action_sequence=data.get("action_sequence", []),
                 goal_predicates=data.get("goal_predicates", []),
                 preconditions=data.get("preconditions", []),
                 goal_objects=data.get("goal_objects", []),
-                tool_objects=data.get("tool_objects", []),
-                obstacle_objects=data.get("obstacle_objects", []),
                 initial_predicates=data.get("initial_predicates", []),
                 global_predicates=data.get("global_predicates", []),
                 relevant_predicates=data.get("relevant_predicates", []),
-                relevant_types=data.get("relevant_types", []),
                 required_actions=actions,
-                complexity=data.get("complexity", "medium"),
-                estimated_steps=data.get("estimated_steps", 1)
             )
         except Exception as e:
             print(f"   ⚠ Failed to parse LLM response: {e}")
@@ -364,7 +370,7 @@ Focus on:
             obstacle_objects=[],
             initial_predicates=[],
             global_predicates=["hand_is_empty"],
-            relevant_predicates=["at", "holding", "clear"],
+            relevant_predicates=["at", "holding"],
             required_actions=[],
             complexity="medium",
             estimated_steps=2

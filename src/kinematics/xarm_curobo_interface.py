@@ -815,7 +815,65 @@ class CuRoboMotionPlanner:
                 pass
             
             return False
-    
+
+    def wipe(
+        self,
+        direction: str = "clockwise",
+        rotation_angle_deg: float = 90.0,
+        speed_factor: float = 1.0,
+        timeout: float = 15.0
+    ) -> bool:
+        """
+        Wipe/twist motion using wrist rotation - performs a complete wipe cycle.
+
+        This primitive rotates the wrist in the specified direction, then returns
+        to the original position, creating a wiping motion. Useful for:
+        - Wiping surfaces with held object (cloth, sponge, etc.)
+        - Screwing/unscrewing motions
+        - Wrist-based manipulation tasks
+
+        Args:
+            direction: Initial rotation direction - "clockwise" or "counterclockwise"
+            rotation_angle_deg: Angle to rotate in degrees (default: 90)
+            speed_factor: Speed multiplier for the motion (0.1 to 2.0, default: 1.0)
+            timeout: Maximum time to wait for completion in seconds (default: 15)
+
+        Returns:
+            bool: True if successful, False otherwise
+
+        Example:
+            # Wipe surface with 90 degrees clockwise
+            success = planner.wipe(direction="clockwise", rotation_angle_deg=90)
+        """
+        # Convert degrees to radians for execute_wrist_twist
+        rotation_angle_rad = np.deg2rad(rotation_angle_deg)
+
+        # Rotate in specified direction
+        success_forward = self.execute_wrist_twist(
+            direction=direction,
+            rotation_angle=rotation_angle_rad,
+            speed_factor=speed_factor,
+            timeout=timeout
+        )
+
+        if not success_forward:
+            self.logger.warning("Wipe forward motion failed")
+            return False
+
+        # Rotate back to original position (reverse direction)
+        reverse_direction = "counterclockwise" if direction == "clockwise" else "clockwise"
+        success_return = self.execute_wrist_twist(
+            direction=reverse_direction,
+            rotation_angle=rotation_angle_rad,
+            speed_factor=speed_factor,
+            timeout=timeout
+        )
+
+        if not success_return:
+            self.logger.warning("Wipe return motion failed - wrist may not be at original position")
+            return False
+
+        return True
 
     def execute_trajectory(self, trajectory, dt, speed_factor=1.0):
         """Execute a trajectory on the physical robot with improved error handling
@@ -1364,7 +1422,12 @@ class CuRoboMotionPlanner:
 
             if is_place:
                 target_position[2] += 0.1
-            
+                if target_position[2] > 0.4:
+                    target_position[2] = 0.4
+            else:
+                target_position[2] -= 0.02
+                if target_position[2] < 0.2:
+                    target_position[2] = 0.2
             # Convert to torch tensors for cuRobo
             target_position_tensor = self.tensor_args.to_device([target_position])
             target_orientation_tensor = self.tensor_args.to_device([target_orientation])
@@ -1492,7 +1555,7 @@ class CuRoboMotionPlanner:
                 print("Surface adjustment skipped - conditions not met")
             
             if is_place:
-                target_position[2] += 0.1
+                target_position[2] += 0.05
                 
             target_orientation = self._coerce_orientation_vector(target_orientation)
             target_orientation = [

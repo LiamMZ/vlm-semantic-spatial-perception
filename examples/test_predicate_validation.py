@@ -7,6 +7,7 @@ when actions reference predicates that aren't explicitly defined.
 
 import sys
 from pathlib import Path
+import pytest
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -14,6 +15,8 @@ sys.path.insert(0, str(project_root))
 
 import asyncio
 from src.planning.pddl_representation import PDDLRepresentation
+
+pytestmark = pytest.mark.asyncio
 
 
 async def test_predicate_validation():

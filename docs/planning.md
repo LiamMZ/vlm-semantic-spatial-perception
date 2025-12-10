@@ -8,12 +8,12 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 ## Components
 - `pddl_representation.py` – thread-safe domain/problem model and PDDL writers.
 - `pddl_domain_maintainer.py` – seeds/updates the domain from tasks and observations; LLM refinement instructions live in `config/pddl_domain_maintainer_prompts.yaml`.
-- `llm_task_analyzer.py` – builds prompts from `config/llm_task_analyzer_prompts.yaml`, injecting only the dynamic fields (task text, robot description, JSON summaries of observed objects/relationships) while keeping the rest of the instructions fixed to ensure consistent formatting. The config now exposes a single `analysis_prompt`; the "initial" analyzer pass just renders that template with placeholder text describing the lack of observations, so there is one authoritative prompt definition. Edit the YAML’s `robot_description` field (or set it to `null`) to control whether that section appears in prompts. **Predicates now must be emitted without type annotations** (e.g. `(on ?item ?surface)` instead of `(on ?item - object ?surface - object)`); the maintainer subsequently normalizes those strings and infers arity when constructing the domain. The analyzer accepts both `required_actions` and `relevant_actions` keys from Gemini responses so LLM-suggested action schemas always flow into the domain. Swap prompt sets via `OrchestratorConfig.task_analyzer_prompts_path` (or `LLMTaskAnalyzer(..., prompts_config_path=...)`); the typed LMH template lives in `config/llm_task_analyzer_prompts_lmh.yaml`.
+- `llm_task_analyzer.py` – builds prompts from `config/llm_task_analyzer_prompts.yaml`, injecting only the dynamic fields (task text, robot description, JSON summaries of observed objects/relationships) while keeping the rest of the instructions fixed to ensure consistent formatting. The config now exposes a single `analysis_prompt`; the "initial" analyzer pass just renders that template with placeholder text describing the lack of observations, so there is one authoritative prompt definition. Edit the YAML’s `robot_description` field (or set it to `null`) to control whether that section appears in prompts. The template now focuses on predicates, goal predicates, initial/global predicates, and required actions, and forbids type annotations anywhere (predicates, action parameters, quantifiers). The analyzer accepts both `required_actions` and `relevant_actions` keys from Gemini responses so LLM-suggested action schemas always flow into the domain. Swap prompt sets via `OrchestratorConfig.task_analyzer_prompts_path` (or `LLMTaskAnalyzer(..., prompts_config_path=...)`); the LMH template in `config/llm_task_analyzer_prompts_lmh.yaml` mirrors the default but asks for goal_predicates as literals over the detected `goal_objects` (no quantifiers).
 - `task_state_monitor.py` – gates exploration vs. plan readiness (`TaskState.PLAN_AND_EXECUTE`).
 - `task_orchestrator.py` – orchestrates perception, PDDL maintenance, snapshots, and world-state export.
 - `primitives/skill_decomposer.py` – LLM-backed decomposition of symbolic actions to primitives; attaches latest snapshot bytes and registry slices.
 - `primitives/skill_plan_types.py` – `PrimitiveCall`, `SkillPlan`, validators, and registry hashing for plan freshness tracking.
-- `primitives/primitive_executor.py` – translates helper fields (e.g., `target_pixel_yx`) into metric targets using depth/intrinsics from the perception pool and optionally drives `CuRoboMotionPlanner`.
+- `primitives/primitive_executor.py` – translates helper fields (e.g., `target_pixel_yx`) into metric targets using depth/intrinsics from the perception pool and optionally drives `CuRoboMotionPlanner`; when no helper pixels exist, primitives pass through unchanged, and base-frame transforms only run when the primitives driver exposes `camera_pose_from_joints`.
 - `planning/utils/snapshot_utils.py` – loads color/depth/intrinsics for a snapshot ID from `perception_pool/index.json`.
 
 ## Workflow (end-to-end)
@@ -22,7 +22,7 @@ The planning layer turns natural-language tasks into PDDL artifacts and, when re
 3. **Gating**: `TaskStateMonitor.determine_state()` sets `READY_FOR_PLANNING` once predicates/objects meet `min_observations`.
 4. **PDDL outputs**: `TaskOrchestrator.generate_pddl_files()` writes domain/problem under `state_dir/pddl/`.
 5. **Primitive planning** (optional): `SkillDecomposer.plan(action_name, parameters, orchestrator=...)` pulls the latest registry + snapshot, uses `config/primitive_descriptions.md` and `config/skill_decomposer_prompts.yaml`, and validates against `PRIMITIVE_LIBRARY`. The decomposer reads interaction points from the latest snapshot detections (`perception_pool/snapshots/<id>/detections.json`), merges them into the working registry view, and passes their pixel `[y, x]` coordinates into the prompt; the LLM is instructed to reuse those points (leaving `interaction_points` empty) and only emit new affordance+point entries when choosing a novel location.
-6. **Execution/translation**: `PrimitiveExecutor.execute_plan(...)` back-projects helper pixels to 3D using the perception pool and calls the motion planner (or dry-runs).
+6. **Execution/translation**: `PrimitiveExecutor.execute_plan(...)` back-projects helper pixels to 3D using the perception pool and calls the motion planner (or dry-runs). Primitives without helper pixels bypass translation, and base-frame transforms only run when the primitives driver provides `camera_pose_from_joints`. Translation/validation failures raise exceptions instead of being accumulated on the result payload.
 
 ## Skill Decomposition + Execution (code-backed)
 ```python
@@ -53,10 +53,10 @@ executor = PrimitiveExecutor(
     perception_pool_dir=Path("outputs/orchestrator_state/perception_pool"),
 )
 result = executor.execute_plan(plan, world_state, dry_run=True)
-print(result.warnings)
+print(result.executed)  # False when dry_run=True
 ```
 
-Helper fields expected from the LLM (`target_pixel_yx`, `pivot_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) are normalized `[y, x]` inputs (0–1000, Robotics-ER style) that the executor converts to metric parameters; when `metadata.resolved_interaction_point.position_3d` is present the executor prefers that 3D point over recomputing from depth. Leave metric-only fields unset unless already known in meters.
+Helper fields expected from the LLM (`target_pixel_yx`, `depth_offset_m`, `motion_normal`, `tcp_standoff_m`) are normalized `[y, x]` inputs (0–1000, Robotics-ER style) that the executor converts to metric parameters; when `metadata.resolved_interaction_point.position_3d` is present the executor prefers that 3D point over recomputing from depth. Primitives without helper pixels pass through unchanged, and base-frame transforms only run when the primitives driver exposes `camera_pose_from_joints`. Leave metric-only fields unset unless already known in meters.
 
 ## Cached Plans and Replay
 - Translation and LLM plans from the pick pipeline live under `tests/artifacts/translation_pick/` and `tests/artifacts/llm_pick/`.

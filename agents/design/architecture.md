@@ -67,7 +67,7 @@ async def main():
     )
     result = executor.execute_plan(plan, world, dry_run=True)
     await orch.shutdown()
-    return result.warnings
+    return result
 
 asyncio.run(main())
 ```

@@ -8,7 +8,7 @@ detection:
     prior: |-
       You are a robotic vision system.  CONTEXT TURN ONLY (do NOT run detection yet).
       Use this turn to memorize prior IDs and reference images for re-identification when the current frame arrives next.
-      Images in this turn are ONLY for context; the next turn will include the new frame for detection.
+      Images in this turn are ONLY for context; the next turn will include the new frame for detection.{task_context_section}
 
       Previously detected objects (reuse these EXACT ids if visible later; omit them if occluded/out of frame):
       {existing_objects_section}
@@ -25,49 +25,79 @@ detection:
       Wait for the next turn with the current frame before performing detection.
 
     current: |-
-      You are a robotic vision system. CURRENT FRAME TURN: perform detection ONLY on the newly attached image below.
-      Image order for this turn: the final attached image is the current frame for detection. Ignore any earlier turns and run detection ONLY on that last image.
+      Detect all objects in this image. Return JSON array only:
+      [{{"box_2d": [ymin, xmin, ymax, xmax], "label": "descriptive_name"}}]
 
-      Previously detected objects (reuse these EXACT ids if visible; omit them if occluded/out of frame):
-      {existing_objects_section}
+      Reuse these IDs if visible: {existing_objects_section}
+      Otherwise use descriptive names with underscores: blue_bottle, wooden_table, metal_spoon
 
-      Instructions:
-      - Return bounding boxes as a JSON array with labels. Never return masks or code fencing.
-      - Include all objects you can identify, focusing on new objects that are not in context turn.
-      - IMPORTANT: Detect BOTH manipulable objects AND surfaces/support structures:
-        * Manipulable objects: bottles, cups, tools, containers, etc.
-        * Surfaces: tables, counters, shelves, trays, workbenches, floors, etc.
-        * Surfaces are critical for spatial predicates like "on" and "in"
-      - If the current image is similar or identical to context image with no new objects, it is fine to not return new detections
-      - If an object from previous images is visible, re-use the exact id as the "label"; otherwise create a descriptive, unique label (colors, size, position, distinctive traits).
-      - IMPORTANT: Object labels must use underscores (_) to separate words, NOT hyphens (-). Examples: "blue_water_bottle" not "blue-water-bottle", "red_cup" not "red-cup", "wooden_table" not "wooden-table"
-      - Box format: [ymin, xmin, ymax, xmax] normalized to 0-1000. All values MUST be integers.
-      - Prefer tight boxes around each object instance. The bounding box may have moved compared to last capture, so make sure to update all bounding boxes and not just return the same bounding box for existing objects.
-      - Output ONLY the JSON array in this format (no prose):
-      [
-        {{"box_2d": [ymin, xmin, ymax, xmax], "label": "<object label>"}}
-      ]
+      Detect both objects AND surfaces (tables, counters, floors).{task_priority_section}
+      Box format: [ymin, xmin, ymax, xmax] as integers 0-1000.
 
 # Object Analysis Prompts
 analysis:
+  response_schema:
+    type: object
+    required: ["object_type", "position"]
+    properties:
+      object_type:
+        type: string
+        description: Canonical object type or label.
+      position:
+        type: array
+        description: Object center [y, x] normalized to 0-1000.
+        minItems: 2
+        maxItems: 2
+        items:
+          type: number
+      affordances:
+        type: array
+        description: List of affordances with optional interaction points.
+        items:
+          type: object
+          required: ["affordance"]
+          properties:
+            affordance:
+              type: string
+              description: Affordance name (e.g., graspable, pourable).
+            reasoning:
+              type: string
+              description: Brief rationale for the interaction point.
+            position:
+              type: array
+              description: Interaction point [y, x] normalized to 0-1000 (if applicable).
+              minItems: 2
+              maxItems: 2
+              items:
+                type: number
+      predicates:
+        type: array
+        description: PDDL predicate strings using detected object ids (e.g., \"on cup_1 table_1\").
+        items:
+          type: string
+
   # Fast mode: only affordances and properties, no interaction points
   fast_mode: |-
     You are a robotic manipulation system. Analyze the {object_name} in this image.{crop_note}{task_context_section}
 
     Provide:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates
-    2. Affordances: What robot actions are possible?
+    2. Affordances: What robot actions are possible (include interaction point y/x for each when relevant)?
        - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-    3. Properties: Color, size, material, state{predicates_section}
+       - **CRITICAL INTERACTION POINT RULES**:
+         * The gripper will CENTER on your specified point
+         * For "graspable": Choose a point where the gripper can WRAP AROUND the object
+           - Avoid edges, corners, or tips - these cause grasp failures
+           - Choose the CENTER of a graspable section (handle, body, stem)
+           - For bottles/cups: center of the body or handle
+           - For tools: center of the handle, not the head
+           - For flat objects: center of the long edge, not corners
+         * Points near object boundaries will fail - stay well inside graspable areas
+         * Consider gripper size: it needs space to close around the point
+    3. PDDL Predicates (if requested):{predicates_section}
 
-    Return JSON:
-    {{
-      "object_type": "cup",
-      "position": [450, 320],
-      "affordances": ["graspable", "pourable", "containable"],
-      "properties": {{"color": "red", "material": "ceramic", "size": "medium", "state": "upright"}}{predicates_example},
-      "confidence": 0.95
-    }}
+    Return JSON only. Follow this schema (also enforced via response_json_schema):
+    {analysis_schema}
 
     All positions in 0-1000 normalized coords relative to THIS image.
 
@@ -77,18 +107,8 @@ analysis:
     
     Known affordances: {cached_affordances}
     
-    For EACH affordance, identify the optimal interaction point:
-    
-    Return JSON:
-    {{
-      "object_type": "{object_type}",
-      "position": [450, 320],
-      "interaction_points": {{
-        "graspable": {{"position": [450, 340], "confidence": 0.95, "reasoning": "..."}},
-        "pourable": {{"position": [450, 320], "confidence": 0.90, "reasoning": "..."}}
-      }},
-      "confidence": 0.95
-    }}
+    For EACH affordance, identify the optimal interaction point and encode it inside the affordances list entries. Return JSON that follows this schema (also enforced via response_json_schema) but DO NOT add any new predicates:
+    {analysis_schema}
     
     All positions in 0-1000 normalized coords relative to THIS image.
 
@@ -99,36 +119,19 @@ analysis:
     Provide detailed information:
 
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
-    2. Affordances: What robot actions are possible with this object?
+    2. Affordances: What robot actions are possible with this object? Include interaction point y/x for each affordance.
        - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
-    3. Interaction points: For EACH affordance, identify the optimal interaction point (relative to this image)
-    4. Properties: Color, size, material, state, etc.{predicates_section}
 
-    Return in JSON format:
-    {{
-      "object_type": "cup",
-      "position": [450, 320],
-      "affordances": ["graspable", "pourable", "containable"],
-      "interaction_points": {{
-        "graspable": {{
-          "position": [450, 340],
-          "confidence": 0.95,
-          "reasoning": "Handle on the right side provides stable grasp point"
-        }},
-        "pourable": {{
-          "position": [450, 320],
-          "confidence": 0.90,
-          "reasoning": "Top rim center for tilting and pouring"
-        }}
-      }},
-      "properties": {{
-        "color": "red",
-        "material": "ceramic",
-        "size": "medium",
-        "state": "upright"
-      }}{predicates_example},
-      "confidence": 0.95
-    }}
+       **INTERACTION POINT RULES** (gripper centers on your point):
+       - Graspable: Choose center of graspable sections (handle middle, body center) NOT edges/corners/tips
+       - Stay well inside object boundaries - edge points cause failures
+       - place points should always be on the object and never overlapping with background objects
+       - Examples: bottle body center (not neck/rim), tool handle center (not head), box side center (not corners)
+    3. PDDL Predicates (if requested){predicates_section}
+
+    Return JSON only. Follow this schema (also enforced via response_json_schema):
+    {analysis_schema}
+    Include `predicates` only when requested: {predicates_example}
 
     Note: All positions are in 0-1000 normalized coordinates relative to THIS image.
     Analyze the {object_name} based on its visual appearance.
@@ -164,15 +167,28 @@ predicates:
        - Available predicates (from PDDL domain): {pddl_list}
        - ONLY use predicates from the list above
 
-       Other detected objects in the scene (for relational predicates):{other_objects_list}
+       Detected objects in the scene (ALL object names MUST come from this list):{other_objects_list}
 
-       For each applicable predicate from the list:
-       - Use format: "predicate_name {object_id}" for unary predicates
-       - Use format: "predicate_name {object_id} other_object" for binary predicates
-       - Use exact object_id provided above
-       - For relationships (on, in, near, etc.), the other_object MUST be from the detected objects list above
-       - CRITICAL: Do NOT invent object names - only use object IDs from the detected objects list
-       - If you need to reference a surface but it's not in the list, DO NOT add the predicate
+       **CRITICAL RULES FOR PREDICATES:**
+       - ONLY use predicates from the available predicates list above
+       - For unary predicates: "predicate_name {object_id}"
+       - For binary/relational predicates: "predicate_name {object_id} other_object_id"
+       - Use the EXACT {object_id} provided (not a variation or abbreviation)
+       - Use the EXACT other_object_id provided in the detected scene objects list (not a variation or abbreviation)
+
+       **CRITICAL: Object Name Validation**
+       - EVERY object name in predicates MUST be from the detected objects list above
+       - If analyzing a predicate like "on {object_id} counter", check that "counter" exists in detected objects
+       - If analyzing a predicate like "in clamp {object_id}", check that "clamp" exists in detected objects
+       - DO NOT use generic names like "table", "surface", "container" unless they appear in the detected objects list
+       - DO NOT invent, abbreviate, or modify object names
+       - If a relationship exists but the other object is not in the detected objects list, SKIP that predicate
+
+       **Examples:**
+       - ✓ CORRECT: "on blue_cup wooden_table" (if both blue_cup and wooden_table are in detected objects)
+       - ✗ WRONG: "on blue_cup table" (if only "wooden_table" is detected, not "table")
+       - ✗ WRONG: "in item container" (if "container" is not in detected objects list)
+       - ✓ CORRECT: Skip the predicate if the other object is not detected
 
        Return a list of predicate strings that apply to this object.
 
@@ -213,4 +229,3 @@ task_context:
     The robot needs to perform: {action_description}
 
     Consider the task requirements when identifying the optimal interaction point.
-

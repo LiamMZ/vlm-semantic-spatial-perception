@@ -60,7 +60,7 @@ def test_prepare_plan_translates_pixel_targets(tmp_path):
     )
 
     executor = PrimitiveExecutor(primitives=None, perception_pool_dir=snapshot["pool_dir"])
-    _, warnings, errors = executor.prepare_plan(
+    translated_plan = executor.prepare_plan(
         plan,
         {
             "last_snapshot_id": snapshot["snapshot_id"],
@@ -68,9 +68,7 @@ def test_prepare_plan_translates_pixel_targets(tmp_path):
         },
     )
 
-    assert warnings == []
-    assert errors == []
-    params = plan.primitives[0].parameters
+    params = translated_plan.primitives[0].parameters
     assert "target_pixel_yx" not in params
     assert params["target_position"] == [1.0, 1.0, 1.05]
 

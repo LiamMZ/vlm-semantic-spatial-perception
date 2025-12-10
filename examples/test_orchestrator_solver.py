@@ -9,6 +9,7 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -17,6 +18,8 @@ from dotenv import load_dotenv
 
 from src.planning import TaskOrchestrator
 from src.planning.pddl_solver import SolverResult
+
+pytestmark = pytest.mark.asyncio
 
 # Import config from config directory
 config_path = Path(__file__).parent.parent / "config"
@@ -76,7 +79,7 @@ async def test_solver_integration():
         analysis = await orchestrator.process_task_request(task)
         print(f"   ✓ Task analyzed")
         print(f"   • Goal objects: {', '.join(analysis.goal_objects)}")
-        print(f"   • Estimated steps: {analysis.estimated_steps}")
+        print("   • Estimated steps: n/a")
         print()
     except Exception as e:
         print(f"   ❌ Task analysis failed: {e}")

@@ -350,4 +350,15 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "timeout": _positive_number_validator("timeout"),
         },
     ),
+    "wipe": PrimitiveSchema(
+        name="wipe",
+        optional_params=("direction", "rotation_angle_deg", "speed_factor", "timeout"),
+        allowed_frames=("base", "camera"),
+        description="Wipe motion using wrist rotation - rotates in specified direction then returns to original position. Direction: 'clockwise' or 'counterclockwise'. Rotation angle in degrees (default 90). Useful for wiping surfaces with held cloth/sponge.",
+        param_validators={
+            "rotation_angle_deg": _positive_number_validator("rotation_angle_deg"),
+            "speed_factor": _positive_number_validator("speed_factor"),
+            "timeout": _positive_number_validator("timeout"),
+        },
+    ),
 }

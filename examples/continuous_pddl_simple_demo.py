@@ -180,7 +180,7 @@ class SimpleContinuousDemo:
 
             print(f"✓ Task analyzed:")
             print(f"  • Goal objects: {', '.join(analysis.goal_objects)}")
-            print(f"  • Estimated steps: {analysis.estimated_steps}")
+            print("  • Estimated steps: n/a")
             print(f"  • Predicates: {len(analysis.relevant_predicates)}")
             print(f"\n  Key predicates: {', '.join(analysis.relevant_predicates[:5])}")
             if len(analysis.relevant_predicates) > 5:
