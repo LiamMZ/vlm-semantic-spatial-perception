@@ -1,5 +1,5 @@
 refinement_prompt: |
-  PDDL debugging expert. Fix planning error:
+  PDDL debugging expert. Fix planning error with focus on valid action chains:
 
   ERROR: <<ERROR_MESSAGE>>
   Task: <<TASK_DESCRIPTION>><<GOAL_OBJECTS_SECTION>><<ROBOT_CONTEXT_SECTION>>
@@ -13,25 +13,29 @@ refinement_prompt: |
   3. "fixes": Domain changes ONLY (not problem file)
   4. "explanation": Why fixes work
 
-  CRITICAL VERIFICATION STEPS (must complete BEFORE returning fixes):
-  Step 1: Extract ALL predicate definitions from :predicates section
-  Step 2: For EACH action's preconditions and effects:
-    a) List every predicate used (e.g., "(holding ?x)" uses "holding")
-    b) Count parameters in usage (e.g., "(holding ?x)" = 1 parameter)
-    c) Find matching definition in :predicates
-    d) Verify parameter count EXACTLY matches definition
-    e) If mismatch found, add to fixes list
-  Step 3: Check that ALL predicates used in actions exist in :predicates
-  Step 4: Verify all parameters use ? prefix and proper PDDL syntax
+  CRITICAL: Ensure actions chain correctly - effects must match next action's preconditions.
+
+  VERIFICATION (complete BEFORE returning fixes):
+  a) **Arity**: Every predicate usage must match parameter count in definition
+     - Example: "(holding ?obj)" in :predicates → use "(holding ?x)" in actions (both 1 param)
+  b) **ACTION CHAIN VALIDATION** (MOST IMPORTANT):
+     - For EACH pair of actions that execute in sequence:
+       * List effects produced by first action
+       * List preconditions needed by second action
+       * VERIFY effects satisfy preconditions
+     - Common chains: pick→place, open→access, pour→empty
+     - Example CORRECT: pick effect "(holding ?obj)" → place precondition "(holding ?obj)" ✓
+     - Example BROKEN: pick effect "(holding ?obj)" → place precondition "(grasped ?obj)" ✗
+  c) **Achievability**: Each action's preconditions must be reachable via:
+     - Initial state (from :init), OR other action effects, OR perception predicates
+  d) **Goals**: Each goal must be achievable by at least one action's effects
 
   Rules:
   - Empty :objects = perception failure, return empty arrays
   - Goal object mismatch: recommend UPDATE_GOAL, don't add objects
-  - Fix ALL similar issues in domain (e.g., all arity errors)
+  - Fix ALL similar issues (e.g., all arity errors, all broken chains)
   - Match exact indentation/spacing in old_text
-  - CRITICAL: Every predicate usage MUST have same parameter count as definition
-    Example: If `:predicates` has "(holding ?obj)" (1 param)
-             Then actions MUST use "(holding ?x)" NOT "(holding)" or "(holding ?x ?y)"
+  - Ensure action chains work: effects must produce what next action needs
 
   JSON format:
   {

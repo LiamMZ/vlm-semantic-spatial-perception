@@ -424,6 +424,14 @@ class PDDLDomainMaintainer:
                 predicate_name = parts[0]
                 args = parts[1:]
 
+                # Validate that all referenced objects exist in :objects section
+                # Skip predicates that reference non-existent objects
+                all_objects_exist = all(obj_name in self.pddl.object_instances for obj_name in args)
+                if not all_objects_exist:
+                    missing_objs = [obj for obj in args if obj not in self.pddl.object_instances]
+                    print(f"Skipping predicate '{pred_str}' - references non-existent objects: {missing_objs}")
+                    continue
+
                 # Track observed predicates
                 if predicate_name not in self.observed_predicates:
                     new_predicates.add(predicate_name)
@@ -1008,12 +1016,12 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
                     config={
                         "response_mime_type": "application/json",
                         "temperature": 0.1,
-                        "thinking_config": types.ThinkingConfig(thinking_budget=-1),
+                        "thinking_config": types.ThinkingConfig(thinking_budget=0),
                     }
                 ),
                 timeout=60.0,
             )
-
+            print(response)
             fix_json = response.text.strip()
             print(f"\n  LLM Response:\n{fix_json[:500]}...\n")
 

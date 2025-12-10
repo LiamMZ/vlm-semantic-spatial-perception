@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+import time
 
 from src.perception.utils.coordinates import compute_3d_position
 from src.primitives.skill_plan_types import PRIMITIVE_LIBRARY, PrimitiveCall, SkillPlan
@@ -92,6 +93,7 @@ class PrimitiveExecutor:
             raw_result = method(**primitive.parameters)
             result = self._json_safe(raw_result)
             primitive_results.append(result)
+            time.sleep(0.5)  # Small delay to avoid overwhelming the primitives interface
 
         return PrimitiveExecutionResult(executed=True, primitive_results=primitive_results)
 

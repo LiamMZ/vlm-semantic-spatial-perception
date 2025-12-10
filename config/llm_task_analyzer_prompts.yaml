@@ -58,32 +58,28 @@ analysis_prompt: |
 
   Response guidelines:
 
-  1. **Purpose.**
-    Your goal is *not* to complete the task, but to propose a useful, general set of
-    symbolic primitives (predicates, actions, and goal conditions) that a downstream
-    planner can use to build a world model and operate on it.
+  1. **Purpose and Philosophy.**
+    Your goal is to define predicates and actions that form valid execution chains.
+    - **Chain validation is critical**: Actions must connect - effects must match next action's preconditions
+    - Every action in a sequence must produce what the next action needs
+    - Ensure preconditions are achievable through initial state, other actions, or perception
 
   2. **Relevant predicates.**
-  - `relevant_predicates` should be a detailed and exhaustive list of predicates that
-    might be useful for representing and solving the task.
+  - `relevant_predicates` should contain predicates needed to represent the task state and support action execution.
   - **IMPORTANT**: Provide predicates with their parameters in PDDL format, e.g.:
-      - `(clear ?obj)` - unary predicate
+      - `(holding ?obj)` - unary predicate
       - `(on ?item ?surface)` - binary predicate
-      - `(empty-hand)` - zero-parameter predicate
+      - `(hand-empty)` - zero-parameter predicate
       - `(is_cup ?obj)` - unary classification predicate
-  - Include both:
-      - **Relational predicates** (e.g. spatial, containment, support, reachability,
-        state—such as `(on ?x ?y)`, `(inside ?x ?y)`, `(open ?x)`, `(plugged_in ?x)`), and
-      - **Semantic / classification predicates** that label objects by their role or type
-        (e.g. `(is_cup ?x)`, `(is_table ?x)`, `(is_container ?x)`, `(is_button ?x)`), which
-        will later be evaluated from perception and object attributes.
-      Add all semantic predicates that are relevant to the task, world, or goal description
-      so that downstream planners can bind those categories during grounding.
+  - Include:
+      - **Relational predicates** for spatial relationships (e.g. `(on ?x ?y)`, `(in ?x ?y)`)
+      - **State predicates** for robot/object state (e.g. `(holding ?obj)`, `(hand-empty)`)
+      - **Semantic / classification predicates** when needed for action preconditions
+        (e.g. `(is_container ?x)` if an action checks this condition)
   - **CRITICAL**: The parameter count in predicate definitions MUST match how they're used in actions.
-      Example: If you define `(graspable ?obj)`, then use `(graspable ?x)` in actions, not `(graspable)`.
-  - Align predicates with observed affordances and task requirements; avoid generic placeholders.
+      Example: If you define `(holding ?obj)`, then use `(holding ?x)` in actions, not `(holding)`.
 
-  3. **Relevant actions.**
+  3. **Relevant actions (with action chaining validation).**
     - `relevant_actions` is a list of actions the robot is in principle capable of,
       given the robot description (e.g. `pick`, `place`, `move_to`, `open`, `close`,
       `press_button`, `pour`, `plug_in`, etc.).
@@ -93,6 +89,25 @@ analysis_prompt: |
       - `precondition` is a single PDDL formula string using only predicates from `relevant_predicates`.
       - `effect` is a single PDDL formula string  specifying the effects of the action
         from `relevant_predicates`.
+    - **CRITICAL: ACTION CHAINING VALIDATION** - Actions must form valid executable sequences:
+      - **The effects produced by one action must EXACTLY match the preconditions required by subsequent actions**
+      - Example CORRECT chain:
+        * `pick` has effect `(holding ?obj)`
+        * `place` has precondition `(holding ?obj)`
+        * ✓ These chain correctly - pick produces what place needs
+      - Example BROKEN chain:
+        * `pick` has effect `(holding ?obj)`
+        * `place` has precondition `(grasped ?obj)`
+        * ✗ Broken chain - pick produces `holding` but place needs `grasped`
+      - **Verify ALL common action sequences in your domain**:
+        * pick → place: Does pick's effect satisfy place's precondition?
+        * open → access_interior: Does open enable the access action?
+        * pour → empty: Do the predicates chain correctly?
+    - **ACHIEVABILITY CHECK**: For every predicate in an action's precondition, verify:
+      - Either it can be true in the initial state, OR
+      - Another action can make it true through its effects, OR
+      - It's a classification predicate that will be provided by perception
+      - If NONE of these are true, the action is UNREACHABLE and should be revised
     - **CRITICAL ARITY RULE**: Every predicate used in preconditions and effects MUST use
       the EXACT same number of parameters as defined in `relevant_predicates`. For example:
       - If you define `(holding ?obj)` in predicates (1 parameter)
@@ -124,48 +139,55 @@ analysis_prompt: |
       - RIGHT: `(water-reservoir-empty ?machine)` or `(reservoir-has-water ?machine)`
     - Use hyphens for multi-word predicates (e.g., `has-water`, `water-reservoir-empty`).
 
-  7. **Arity consistency example.**
-    Here is a CORRECT example showing consistent predicate arity:
+  7. **Example: Minimal predicate set with action chaining.**
+    CORRECT example showing minimal predicates and proper action chains:
 
     {
       "relevant_predicates": [
         "(holding ?obj)",
-        "(empty-hand)",
-        "(on ?obj ?surface)",
-        "(graspable ?obj)"
+        "(hand-empty)",
+        "(on ?obj ?surface)"
+      ],
+      "global_predicates": [
+        "hand-empty"
       ],
       "relevant_actions": [
         {
           "name": "pick",
           "parameters": ["?obj"],
-          "precondition": "(and (empty-hand) (graspable ?obj))",
-          "effect": "(and (holding ?obj) (not (empty-hand)))"
+          "precondition": "(and (hand-empty) (on ?obj ?surface))",
+          "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)))"
         },
         {
           "name": "place",
           "parameters": ["?obj", "?surface"],
           "precondition": "(holding ?obj)",
-          "effect": "(and (on ?obj ?surface) (empty-hand) (not (holding ?obj)))"
+          "effect": "(and (on ?obj ?surface) (hand-empty) (not (holding ?obj)))"
         }
       ]
     }
 
-    Notice how:
-    - `(holding ?obj)` is defined with 1 parameter
-    - `(holding ?obj)` is used with 1 parameter in precondition and effect
-    - `(empty-hand)` is defined with 0 parameters
-    - `(empty-hand)` is used with 0 parameters everywhere
-    - The parameter names can differ (?obj, ?x, ?item) but the COUNT must match
+    Notice:
+    - **CHAINING VERIFIED**: pick effect `(holding ?obj)` → place precondition `(holding ?obj)` ✓
+      * pick produces EXACTLY what place needs to execute
+      * No missing predicates between actions
+    - **ARITY CONSISTENT**: Each predicate has same parameter count throughout
+    - **ACHIEVABLE PRECONDITIONS**:
+      * pick needs `hand-empty` → provided by global_predicates (initial state)
+      * pick needs `on` → provided by perception
+      * place needs `holding` → provided by pick's effects
+    - **GLOBAL STATE**: `hand-empty` in global_predicates ensures robot starts ready
 
-  8. **VERIFICATION STEPS (complete these BEFORE returning your response).**
-    Step 1: List ALL predicates you defined in `relevant_predicates`
-    Step 2: For EACH action in `relevant_actions`:
-      a) Extract all predicates from precondition
-      b) Extract all predicates from effect
-      c) For each predicate usage, count its parameters
-      d) Find its definition in `relevant_predicates`
-      e) VERIFY the parameter count EXACTLY matches
-      f) If mismatch, FIX the action OR add missing predicate definition
-    Step 3: Ensure every predicate used exists in `relevant_predicates`
-    Step 4: Check all PDDL syntax is correct (parentheses, spaces, no commas)
-    Step 5: Confirm global_predicates follow the rules above (no object-specific entries, no parentheses)
+  8. **VERIFICATION (complete BEFORE responding).**
+    a) **Arity**: Every predicate usage must match parameter count in definition
+    b) **ACTION CHAIN VALIDATION** (CRITICAL):
+       - For EACH pair of actions that might execute in sequence:
+         * List the effects added by the first action
+         * List the preconditions needed by the second action
+         * VERIFY the effects can satisfy the preconditions
+       - Common chains to validate: pick→place, open→access, pour→empty, grasp→move
+       - If effects don't match preconditions, the actions CANNOT chain - FIX THIS
+    c) **Achievability**: Each action's preconditions must be reachable via:
+       - Initial state (from global_predicates or perception), OR
+       - Another action's effects
+    d) **Goals**: Each goal must be achievable by at least one action's effects

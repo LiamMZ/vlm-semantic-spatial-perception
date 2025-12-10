@@ -115,7 +115,7 @@ class TAMPDemo:
             update_interval=2.0,
             min_observations=3,
             auto_refine_on_failure=True,
-            max_refinement_attempts=3,
+            max_refinement_attempts=5,
             solver_backend="pyperplan",  # Use pure Python solver (no Docker needed)
             solver_algorithm="lama-first",
             solver_timeout=60.0,

@@ -63,7 +63,7 @@ class ObjectTracker:
         api_key: Optional[str] = None,
         model_name: str = "auto",
         default_temperature: float = 0.5,
-        thinking_budget: int = 0,
+        thinking_budget: int = -1,
         max_parallel_requests: int = 5,
         crop_target_size: int = 512,
         enable_affordance_caching: bool = True,
@@ -920,7 +920,7 @@ class ObjectTracker:
             # Add predicates to registry's global predicate set
             if validated_predicates:
                 self.registry.add_predicates(validated_predicates)
-
+            print(f"ℹ Object '{object_name}' predicates: {validated_predicates}, original predicates: {object_predicates}")
             # Create DetectedObject (without predicates field - they're only at registry level)
             detected_obj = DetectedObject(
                 object_type=object_type,
@@ -1282,6 +1282,9 @@ class ObjectTracker:
             existing_objects, prior_observations
         )
 
+        # Get task context sections for detection
+        task_context_section, task_priority_section = self._format_task_context_for_detection()
+
         streaming = self.prompts['detection']['streaming']
         if isinstance(streaming, dict):
             prior_template = streaming.get('prior') or ""
@@ -1292,11 +1295,13 @@ class ObjectTracker:
 
         prior_prompt = prior_template.format(
             existing_objects_section=existing_section,
-            prior_images_section=prior_section
+            prior_images_section=prior_section,
+            task_context_section=task_context_section
         ).strip()
         current_prompt = current_template.format(
             existing_objects_section=existing_section,
-            prior_images_section=prior_section
+            prior_images_section=prior_section,
+            task_priority_section=task_priority_section
         ).strip()
 
         # Ensure turn semantics are explicit even if templates are missing.
@@ -1512,7 +1517,6 @@ class ObjectTracker:
                 start = response_text.find("```") + 3
                 end = response_text.find("```", start)
                 response_text = response_text[start:end]
-            # print(response_text)
             return json.loads(response_text.strip())
         except json.JSONDecodeError as e:
             import traceback

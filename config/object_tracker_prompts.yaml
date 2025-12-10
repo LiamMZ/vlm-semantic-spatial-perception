@@ -8,7 +8,7 @@ detection:
     prior: |-
       You are a robotic vision system.  CONTEXT TURN ONLY (do NOT run detection yet).
       Use this turn to memorize prior IDs and reference images for re-identification when the current frame arrives next.
-      Images in this turn are ONLY for context; the next turn will include the new frame for detection.
+      Images in this turn are ONLY for context; the next turn will include the new frame for detection.{task_context_section}
 
       Previously detected objects (reuse these EXACT ids if visible later; omit them if occluded/out of frame):
       {existing_objects_section}
@@ -31,7 +31,7 @@ detection:
       Reuse these IDs if visible: {existing_objects_section}
       Otherwise use descriptive names with underscores: blue_bottle, wooden_table, metal_spoon
 
-      Detect both objects AND surfaces (tables, counters, floors).
+      Detect both objects AND surfaces (tables, counters, floors).{task_priority_section}
       Box format: [ymin, xmin, ymax, xmax] as integers 0-1000.
 
 # Object Analysis Prompts
@@ -84,6 +84,16 @@ analysis:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates
     2. Affordances: What robot actions are possible (include interaction point y/x for each when relevant)?
        - Common: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
+       - **CRITICAL INTERACTION POINT RULES**:
+         * The gripper will CENTER on your specified point
+         * For "graspable": Choose a point where the gripper can WRAP AROUND the object
+           - Avoid edges, corners, or tips - these cause grasp failures
+           - Choose the CENTER of a graspable section (handle, body, stem)
+           - For bottles/cups: center of the body or handle
+           - For tools: center of the handle, not the head
+           - For flat objects: center of the long edge, not corners
+         * Points near object boundaries will fail - stay well inside graspable areas
+         * Consider gripper size: it needs space to close around the point
     3. PDDL Predicates (if requested):{predicates_section}
 
     Return JSON only. Follow this schema (also enforced via response_json_schema):
@@ -111,6 +121,12 @@ analysis:
     1. Object position: Center point [y, x] in 0-1000 normalized coordinates (relative to this image)
     2. Affordances: What robot actions are possible with this object? Include interaction point y/x for each affordance.
        - Common affordances: graspable, pourable, containable, pushable, pullable, openable, closable, supportable, stackable
+
+       **INTERACTION POINT RULES** (gripper centers on your point):
+       - Graspable: Choose center of graspable sections (handle middle, body center) NOT edges/corners/tips
+       - Stay well inside object boundaries - edge points cause failures
+       - place points should always be on the object and never overlapping with background objects
+       - Examples: bottle body center (not neck/rim), tool handle center (not head), box side center (not corners)
     3. PDDL Predicates (if requested){predicates_section}
 
     Return JSON only. Follow this schema (also enforced via response_json_schema):

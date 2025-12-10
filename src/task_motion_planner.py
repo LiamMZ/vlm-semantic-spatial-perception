@@ -106,7 +106,7 @@ class TAMPConfig:
     update_interval: float = 2.0
     min_observations: int = 3
     auto_refine_on_failure: bool = True
-    max_refinement_attempts: int = 3
+    max_refinement_attempts: int = 5
 
     # Solver settings
     solver_backend: str = "auto"  # "auto", "pyperplan", "fast-downward-docker", etc.
@@ -399,7 +399,7 @@ class TaskAndMotionPlanner:
                 # Update ObjectTracker with refined predicates and actions
                 print(f"  • Updating ObjectTracker with refined predicates/actions...")
                 await self.orchestrator.maintainer.update_object_tracker_from_domain(
-                    self.orchestrator.tracker.tracker
+                    self.orchestrator.tracker
                 )
 
                 # Retry planning once after refinement
