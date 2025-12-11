@@ -699,7 +699,7 @@ Enyan built essential infrastructure and developer tools that make the system ma
 
 ### TJ Vitchutripop (tjvitchutripop) - 21 commits
 
-TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor and contributions to a Building Information Modeling (BIM) integration.
+TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor and prompt refinements.
 
 ---
 
