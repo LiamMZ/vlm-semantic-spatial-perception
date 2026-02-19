@@ -520,6 +520,38 @@ Navigate with arrow keys to see:
 - Input images
 - Metadata (tokens, latency, etc.)
 
+### Using the Observe Action
+
+The `observe` action allows you to pause execution, update the world state through object tracking, and then resume with newly decomposed actions that take into account state changes from previous actions.
+
+**Use Case**: When subsequent actions depend on state changes from previous actions (e.g., after placing a block, the scene changes and you need fresh observations before picking the next block).
+
+**Example**:
+```pddl
+1. pick(block1)
+2. place(block1, block2)
+3. observe
+4. pick(block3)
+5. place(block3, block2)
+```
+
+**How it works**:
+1. Actions 1-2 are decomposed and executed based on the initial world state
+2. When `observe` is encountered:
+   - The robot moves to home position
+   - Object tracking runs for ~5 seconds to capture updated scene
+   - World state is refreshed with new object positions and configurations
+3. Actions 4-5 are then decomposed using the updated world state
+4. Execution continues with the newly decomposed actions
+
+**When to use**:
+- Multi-step tasks where the environment changes significantly between actions
+- Tasks requiring accurate perception after object manipulation
+- Any scenario where initial observations become stale after manipulation
+
+**Configuration**:
+The observe action is handled automatically by the TAMP system - simply include it as a symbolic action in your PDDL domain. The system will detect it during execution and trigger the observation update workflow.
+
 ---
 
 ## Troubleshooting
@@ -689,18 +721,17 @@ This system builds on:
 
 ## Contributors
 
-### Liam Hoffmeister (liammz) - 35 commits
+### Liam Hoffmeister
 
 Liam created the foundational TAMP system architecture, implementing the core object detection and tracking pipeline, PDDL planning integration with automatic domain generation, and the TaskOrchestrator that coordinates the entire system. His work spans from initial repository setup through recent refinements in prompt engineering, performance optimizations, and the addition of new manipulation capabilities like the twist action.
 
-### Enyan Zhang - 47 commits (most active)
+### Enyan Zhang
 
 Enyan built essential infrastructure and developer tools that make the system maintainable and debuggable, including the comprehensive GenAI logging system with visual inspection utilities, the snapshot persistence architecture for reproducible execution, and a major refactor of the skill decomposition pipeline to use snapshot-grounded coordinate frames. His contributions include environment setup (UV package management), prompt externalization to YAML configs, CuRobo integration, numerous debugging utilities, and extensive documentation improvements.
 
-### TJ Vitchutripop (tjvitchutripop) - 21 commits
+### TJ Vitchutripop
 
-TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor and contributions to a Building Information Modeling (BIM) integration.
-
+TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor.
 ---
 
 ## Support

@@ -654,7 +654,14 @@ class ObjectTracker:
                 await callback(object_name, bounding_box)
 
         except Exception as e:
-            self.logger.exception("Streaming detection failed: %s", e)
+            self.logger.error("=" * 60)
+            self.logger.error("OBJECT DETECTION FAILED")
+            self.logger.error("=" * 60)
+            self.logger.error("Error type: %s", type(e).__name__)
+            self.logger.error("Error message: %s", str(e))
+            self.logger.exception("Full traceback:")
+            self.logger.error("=" * 60)
+            raise
 
     async def _analyze_single_object(
         self,
@@ -935,7 +942,11 @@ class ObjectTracker:
             return detected_obj
 
         except Exception as e:
-            self.logger.exception("Failed to analyze %s: %s", object_name, e)
+            self.logger.error("Failed to analyze object '%s'", object_name)
+            self.logger.error("  Error type: %s", type(e).__name__)
+            self.logger.error("  Error message: %s", str(e))
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.exception("  Full traceback:")
             return None
 
     def get_object(self, object_id: str) -> Optional[DetectedObject]:
@@ -1704,7 +1715,16 @@ class ContinuousObjectTracker(ObjectTracker):
                         self.on_detection_complete(len(detected_objects))
 
             except Exception as e:
-                self.logger.exception("Tracking loop error: %s", e)
+                self.logger.error("=" * 60)
+                self.logger.error("CONTINUOUS TRACKING ERROR")
+                self.logger.error("=" * 60)
+                self.logger.error("Error type: %s", type(e).__name__)
+                self.logger.error("Error message: %s", str(e))
+                self.logger.error("Frame: %d", self.stats.total_frames)
+                self.logger.exception("Full traceback:")
+                self.logger.error("=" * 60)
+                # Continue tracking despite error
+                await asyncio.sleep(self.update_interval)
 
             elapsed = time.time() - loop_start
             if elapsed < self.update_interval:
