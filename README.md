@@ -12,10 +12,10 @@ This system implements an end-to-end **Task and Motion Planning (TAMP)** pipelin
 
 ### Prerequisites
 
-- Python 3.8+
+- `uv` for package management
 - Gemini API key
-- RealSense camera (for live perception)
-- Optional: xArm robot for physical execution
+- RealSense camera for perception
+- xArm robot for physical execution
 
 ### Installation
 
@@ -31,7 +31,7 @@ export GEMINI_API_KEY="your-api-key-here"
 
 #### Interactive Mode (Recommended for First Use)
 ```bash
-python examples/tamp_demo.py
+uv run examples/tamp_demo.py
 ```
 
 This launches an interactive terminal where you can:
@@ -42,32 +42,49 @@ This launches an interactive terminal where you can:
 #### Single Task Execution
 ```bash
 # Dry run (validation only, no robot execution)
-python examples/tamp_demo.py --task "pick up the red block" --dry-run
+uv run examples/tamp_demo.py --task "pick up the red block" --dry-run
 
 # Live execution (requires robot connection)
-python examples/tamp_demo.py --task "stack the blue block on the red block" --live
+uv run examples/tamp_demo.py --task "stack the blue block on the red block" --live
 ```
 
 ---
 
 ## System Architecture
 
-The system operates as a pipeline with five main stages:
+Class-level flow in task-execution call order:
 
-```
-Natural Language Task
-    ↓
-Task Analysis (VLM)
-    ↓
-Environment Perception (Vision + VLM)
-    ↓
-Symbolic Planning (PDDL)
-    ↓
-Skill Decomposition (VLM)
-    ↓
-Primitive Execution (Motion Planning)
-    ↓
-Robot Action
+```text
++--------------------+    +-----------------------------------------------+
+| examples/tamp_demo | -> | TaskAndMotionPlanner                          |
++--------------------+    | (initialize -> perceive -> plan -> execute)   |
+                          +-------------------------+---------------------+
+                                                    |
+                                                    v
+                          +-------------------------+---------------------+
+                          | TaskOrchestrator                              |
+                          +----------------+----------------+-------------+
+                                           |                |
+                               perception  |                |  planning
+                                  loop     v                v   loop
+                          +----------------------+   +---------------------+
+                          | RealSenseCamera      |   | ContinuousObject-   |
+                          +----------+-----------+-->| Tracker             |
+                                     |  frames       +----------+----------+
+                                     |                           |
+                                     |                     detections
+                                     |                           v
+                          +--------------------------------------+-----------+
+                          | LLMTaskAnalyzer + PDDLDomainMaintainer           |
+                          | + PDDLRepresentation + PDDLSolver                |
+                          +------------------------------+-------------------+
+                                                         |
+                                              symbolic action sequence
+                                                         v
+                          +------------------------------+-------------------+
+                          | SkillDecomposer -> PrimitiveExecutor             |
+                          | -> CuRoboMotionPlanner                           |
+                          +--------------------------------------------------+
 ```
 
 ---
@@ -130,7 +147,7 @@ Output:
 **Implementation**:
 - **Main Orchestration**: [TaskAndMotionPlanner.perceive_environment()](src/task_motion_planner.py)
 - **Detection Manager**: [TaskOrchestrator.start_detection()](src/planning/task_orchestrator.py)
-- **Object Tracker**: [ContinuousObjectTracker](src/perception/continuous_object_tracker.py)
+- **Object Tracker**: [ContinuousObjectTracker](src/perception/object_tracker.py)
 - **Snapshot Management**: [TaskOrchestrator.save_snapshot()](src/planning/task_orchestrator.py)
 - **Camera Interface**: [RealSenseCamera](src/camera/realsense_camera.py)
 - **Utilities**: [snapshot_utils.py](src/planning/utils/snapshot_utils.py)
@@ -177,7 +194,7 @@ Output:
 - **Solver Interface**: [TaskOrchestrator.solve_and_plan()](src/planning/task_orchestrator.py)
 - **Domain Refinement**: [TaskOrchestrator.refine_domain_from_failure()](src/planning/task_orchestrator.py)
 - **PDDL Solver**: [PDDLSolver](src/planning/pddl_solver.py)
-- **Domain Manager**: [PDDLDomain](src/planning/pddl_domain.py)
+- **Domain Representation**: [PDDLRepresentation](src/planning/pddl_representation.py)
 
 **Process**:
 
@@ -552,104 +569,8 @@ The `observe` action allows you to pause execution, update the world state throu
 **Configuration**:
 The observe action is handled automatically by the TAMP system - simply include it as a symbolic action in your PDDL domain. The system will detect it during execution and trigger the observation update workflow.
 
----
+Execution note: [TaskAndMotionPlanner.plan_and_execute_task()](src/task_motion_planner.py) executes plans in segments split at `observe` actions, runs a perception refresh, then re-decomposes remaining actions against the updated world state.
 
-## Troubleshooting
-
-### No Objects Detected
-
-**Symptoms**:
-```
-⚠ WARNING: Cannot generate PDDL files - no objects detected!
-```
-
-**Solutions**:
-1. Check camera connection: `rs-enumerate-devices`
-2. Verify lighting conditions (avoid glare/shadows)
-3. Increase perception duration: `perceive_environment(duration=20.0)`
-4. Lower observation threshold in config
-
-### Planning Fails
-
-**Symptoms**:
-```
-✗ Planning failed: no plan found
-```
-
-**Solutions**:
-1. Check PDDL files in `outputs/.../pddl/`
-2. Verify goal objects were detected
-3. Review task analysis output in logs
-4. Enable domain refinement (on by default)
-5. Manually inspect domain/problem for errors
-
-### Primitive Execution Fails
-
-**Symptoms**:
-```
-✗ Execution failed: back-projection returned None
-```
-
-**Solutions**:
-1. Check depth data quality in snapshot
-2. Verify camera intrinsics are correct
-3. Ensure robot is calibrated
-4. Review interaction points in `detections.json`
-5. Try different interaction point (e.g., side vs top grasp)
-
-### Snapshot Loading Issues
-
-**Symptoms**:
-```
-⚠ Could not load snapshot: detections file not found
-```
-
-**Solutions**:
-1. Verify snapshot path is correct
-2. Check `perception_pool/index.json` exists
-3. Ensure snapshot contains `detections.json`
-4. Run fresh perception instead of loading snapshot
-
----
-
-## Performance Tuning
-
-### Speed Up Perception
-- **Reduce min_observations**: Fewer detection cycles (default: 3)
-- **Use snapshot loading**: Reuse data from previous runs
-- **Increase update_interval**: Less frequent API calls (default: 2.0s)
-
-### Improve Planning Speed
-- **Use LAMA-first**: Fastest algorithm (default)
-- **Reduce timeout**: Don't wait for optimal solutions (default: 60s)
-- **Use Pyperplan**: No container overhead (default)
-
-### Reduce LLM Costs
-- **Lower decomposition temperature**: More deterministic (default: 0.1)
-- **Reuse snapshots**: Avoid re-detecting objects
-- **Batch similar tasks**: Amortize perception cost
-
----
-
-## System Requirements
-
-### Minimum
-- CPU: 4+ cores
-- RAM: 8GB
-- Storage: 10GB (for logs and snapshots)
-- Network: Stable internet for Gemini API
-
-### Recommended
-- CPU: 8+ cores
-- RAM: 16GB
-- GPU: For CuRobo motion planning acceleration
-- Storage: 50GB (for extensive logging)
-
-### Hardware Dependencies
-- **Camera**: Intel RealSense D435 or D455 (for depth perception)
-- **Robot** (optional): xArm series or any robot with CuRobo support
-
----
 
 ## Code Reference Summary
 
@@ -663,9 +584,9 @@ The observe action is handled automatically by the TAMP system - simply include 
 | **Skill Decomposer** | [skill_decomposer.py](src/primitives/skill_decomposer.py) | Translates symbolic actions to primitives using VLM |
 | **Primitive Executor** | [primitive_executor.py](src/primitives/primitive_executor.py) | Executes primitives with coordinate transformation |
 | **PDDL Solver** | [pddl_solver.py](src/planning/pddl_solver.py) | Unified interface to PDDL planners |
-| **Domain Manager** | [pddl_domain.py](src/planning/pddl_domain.py) | PDDL domain generation and management |
+| **Domain Representation** | [pddl_representation.py](src/planning/pddl_representation.py) | In-memory/domain-problem PDDL representation and file generation |
 | **Domain Maintainer** | [pddl_domain_maintainer.py](src/planning/pddl_domain_maintainer.py) | LLM-based domain refinement |
-| **Object Tracker** | [continuous_object_tracker.py](src/perception/continuous_object_tracker.py) | Continuous object detection with VLM |
+| **Object Tracker** | [object_tracker.py](src/perception/object_tracker.py) | Object tracking and continuous detection with VLM |
 | **Camera** | [realsense_camera.py](src/camera/realsense_camera.py) | RealSense RGB-D camera interface |
 
 ### Key Data Types
@@ -686,38 +607,6 @@ The observe action is handled automatically by the TAMP system - simply include 
 | **Coordinate Utils** | [coordinates.py](src/perception/utils/coordinates.py) | Back-projection and coordinate transforms |
 | **GenAI Logging** | [genai_logging.py](src/utils/genai_logging.py) | Log all LLM requests/responses |
 
----
-
-## Citation
-
-If you use this system in your research, please cite:
-
-```bibtex
-@software{vlm_tamp_2025,
-  title={VLM-Based Task and Motion Planning System},
-  author={[Author Names]},
-  year={2025},
-  url={https://github.com/yourusername/vlm-semantic-spatial-perception}
-}
-```
-
----
-
-## License
-
-[Specify license]
-
----
-
-## Acknowledgments
-
-This system builds on:
-- **Gemini Robotics-ER**: Vision and reasoning capabilities
-- **CuRobo**: GPU-accelerated motion planning
-- **Pyperplan/Fast Downward**: PDDL solvers
-- **RealSense**: RGB-D perception
-
----
 
 ## Contributors
 
@@ -732,13 +621,3 @@ Enyan built essential infrastructure and developer tools that make the system ma
 ### TJ Vitchutripop (tjvitchutripop) - 21 commits
 
 TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor and prompt refinements.
-
-TJ focused on the primitive execution layer and robot-perception synchronization, designing the simplified primitive system that translates high-level actions into robot commands and solving critical bugs around robot state synchronization with perception snapshots and RealSense depth data handling. His recent work includes ongoing improvements to the primitive executor.
----
-
-## Support
-
-For questions or issues:
-- **GitHub Issues**: [Link to issues page]
-- **Documentation**: See `docs/` directory for detailed component guides
-- **Examples**: Check `examples/` for usage patterns
