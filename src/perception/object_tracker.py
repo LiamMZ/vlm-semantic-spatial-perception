@@ -1255,30 +1255,6 @@ class ObjectTracker:
 
         return [prior_observations[i] for i in sorted(selected_indices)]
 
-    def _format_detection_prompt(
-        self,
-        existing_objects: List[DetectedObject],
-        prior_observations: Optional[List[Dict[str, Any]]] = None
-    ) -> str:
-        """
-        Build a detection prompt that includes previously detected objects to encourage
-        re-identification instead of minting new IDs.
-        """
-        existing_section, prior_section = self._build_detection_context_sections(
-            existing_objects, prior_observations
-        )
-
-        streaming = self.prompts['detection']['streaming']
-        if isinstance(streaming, dict):
-            template = streaming.get('current') or streaming.get('prior') or ""
-        else:
-            template = streaming
-
-        return template.format(
-            existing_objects_section=existing_section,
-            prior_images_section=prior_section
-        )
-
     def _format_detection_prompt_sections(
         self,
         existing_objects: List[DetectedObject],
