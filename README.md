@@ -67,24 +67,24 @@ Class-level flow in task-execution call order:
                                            |                |
                                perception  |                |  planning
                                   loop     v                v   loop
-                          +----------------------+   +---------------------+
-                          | RealSenseCamera      |   | ContinuousObject-   |
-                          +----------+-----------+-->| Tracker             |
-                                     |  frames       +----------+----------+
+                          +----------------------+   +--------------------+
+                          | RealSenseCamera      |   | ContinuousObject-  |
+                          +----------+-----------+-->| Tracker            |
+                                     |  frames       +----------+---------+
                                      |                           |
                                      |                     detections
                                      |                           v
-                          +--------------------------------------+-----------+
-                          | LLMTaskAnalyzer + PDDLDomainMaintainer           |
-                          | + PDDLRepresentation + PDDLSolver                |
-                          +------------------------------+-------------------+
+                          +--------------------------------------+--------+
+                          | LLMTaskAnalyzer + PDDLDomainMaintainer        |
+                          | + PDDLRepresentation + PDDLSolver             |
+                          +------------------------------+----------------+
                                                          |
                                               symbolic action sequence
                                                          v
-                          +------------------------------+-------------------+
-                          | SkillDecomposer -> PrimitiveExecutor             |
-                          | -> CuRoboMotionPlanner                           |
-                          +--------------------------------------------------+
+                          +------------------------------+----------------+
+                          | SkillDecomposer -> PrimitiveExecutor          |
+                          | -> CuRoboMotionPlanner                        |
+                          +-----------------------------------------------+
 ```
 
 ---
