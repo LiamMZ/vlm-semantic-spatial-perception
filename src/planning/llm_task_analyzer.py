@@ -348,7 +348,9 @@ class LLMTaskAnalyzer:
         self.call_count += 1
         self.total_elapsed_seconds += elapsed
         _ = timeout
-        return response.text
+        if response.text:
+            return response.text
+        raise RuntimeError("Model returned an empty response body.")
 
     def _get_prompt_template(self, template_key: str) -> str:
         template = self.prompt_templates.get(template_key)

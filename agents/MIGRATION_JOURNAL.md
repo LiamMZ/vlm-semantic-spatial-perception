@@ -79,6 +79,34 @@ This journal tracks concrete behavior changes made while implementing
 - Result:
   - `10 passed, 1 skipped`
 
+### Live Cached-World Replays
+
+- Shell mode:
+  - login shell via `bash`
+- Successful replay:
+  - `uv run scripts/benchmark_saved_world.py --world-dir outputs/captured_worlds/vegetables --benchmark-output-root outputs/benchmarks/migration_post_login_retry2`
+  - Result:
+    - success
+    - plan length `4`
+    - refinements `0`
+    - summary at `outputs/benchmarks/migration_post_login_retry2/summary_20260306_153245.json`
+- Remaining failures:
+  - `blocks`
+    - goal layer still produces quantified / non-ground STRIPS-incompatible goals
+    - goal repair returned an empty model response on the observed run
+  - `markers`
+    - goal/constraint shaping still leaks an unsupported `broken` predicate into the symbolic representation
+    - targeted repair returned an empty model response on the observed run
+
+### Replay-Driven Fixes Made After First Live Run
+
+- Normalized stored action schemas into a solver-safe STRIPS subset by removing
+  negative preconditions before validation and serialization.
+- Added a pre-solve validation guard that skips early repair until the first
+  wait-for-objects pass has had a chance to ground the replay.
+- Hardened empty-response handling for repair calls so failures now report the
+  real issue instead of crashing with `json.loads(None)`.
+
 ## Incidental Fixes Discovered During Validation
 
 - `PrimitiveExecutor.prepare_plan()` now normalizes translated `target_position`

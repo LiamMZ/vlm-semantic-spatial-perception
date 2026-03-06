@@ -178,6 +178,7 @@ class PDDLDomainMaintainer:
             observed_relationships=self.observed_relationships,
             environment_image=image,
         )
+        action_schemas = self._normalize_action_schema_library(action_schemas)
 
         self.task_analysis = TaskAnalysis(
             abstract_goal=abstract_goal,
@@ -293,10 +294,10 @@ class PDDLDomainMaintainer:
         )
 
         if layer == "actions":
-            self.task_analysis.action_schemas = ActionSchemaLibrary(
+            self.task_analysis.action_schemas = self._normalize_action_schema_library(ActionSchemaLibrary(
                 actions=self._normalize_actions(payload.get("actions")),
                 planning_notes=self._as_string_list(payload.get("repair_notes")),
-            )
+            ))
         elif layer == "predicates":
             self.task_analysis.predicate_inventory = PredicateInventory(
                 predicates=self._as_string_list(payload.get("predicates")),
@@ -312,6 +313,9 @@ class PDDLDomainMaintainer:
                 predicate_inventory=self.task_analysis.predicate_inventory,
                 observed_objects=self.observed_objects,
                 observed_relationships=self.observed_relationships,
+            )
+            self.task_analysis.action_schemas = self._normalize_action_schema_library(
+                self.task_analysis.action_schemas
             )
         else:
             self.task_analysis.abstract_goal = AbstractGoal(
@@ -337,6 +341,9 @@ class PDDLDomainMaintainer:
                 predicate_inventory=self.task_analysis.predicate_inventory,
                 observed_objects=self.observed_objects,
                 observed_relationships=self.observed_relationships,
+            )
+            self.task_analysis.action_schemas = self._normalize_action_schema_library(
+                self.task_analysis.action_schemas
             )
 
         if self.observed_objects:
@@ -619,10 +626,12 @@ class PDDLDomainMaintainer:
             if not name:
                 continue
             parameters = self._normalize_action_parameters(action.get("parameters") or [])
+            precondition = sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
+            precondition = self._strip_negative_preconditions(precondition)
             self.pddl.add_llm_generated_action(
                 name=name,
                 parameters=parameters,
-                precondition=sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)"),
+                precondition=precondition,
                 effect=sanitize_pddl_formula(str(action.get("effect", "(and)")) or "(and)"),
                 description=str(action.get("description", "")).strip() or None,
             )
@@ -680,6 +689,14 @@ class PDDLDomainMaintainer:
         goal_predicate_names = set()
         goal_object_names = set()
         for formula in goal_formulas:
+            if any(token in formula for token in ["forall", "exists", "implies", "="]) or "?" in formula:
+                issues.append(
+                    {
+                        "layer": "goal",
+                        "message": f"Goal formula is not a grounded STRIPS literal: `{formula}`.",
+                    }
+                )
+                continue
             parsed = self._parse_literal_formula(formula)
             if parsed is not None:
                 predicate, arguments, _ = parsed
@@ -708,6 +725,13 @@ class PDDLDomainMaintainer:
 
         for action in self.task_analysis.action_schemas.actions:
             action_name = str(action.get("name", "unknown"))
+            if "(not " in str(action.get("precondition", "")):
+                issues.append(
+                    {
+                        "layer": "actions",
+                        "message": f"Action `{action_name}` uses negative preconditions unsupported by the STRIPS solver backend.",
+                    }
+                )
             try:
                 precondition_usages = self._extract_predicate_usages(action.get("precondition", ""))
                 effect_usages = self._extract_predicate_usages(action.get("effect", ""))
@@ -794,6 +818,8 @@ class PDDLDomainMaintainer:
             },
         )
         text = self.llm_analyzer._generate_content(content_parts=[prompt], timeout=30.0)
+        if not text:
+            raise RuntimeError(f"Repair prompt `{template_key}` returned an empty response.")
         payload = json.loads(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Expected JSON object from {template_key}")
@@ -992,6 +1018,63 @@ class PDDLDomainMaintainer:
                 continue
             updated = re.sub(rf"\b{re.escape(symbolic_name)}\b", object_ids[0], updated)
         return updated
+
+    @staticmethod
+    def _strip_negative_preconditions(formula: str) -> str:
+        """Remove negative preconditions for STRIPS-only solvers."""
+
+        if "(not " not in formula:
+            return formula
+
+        text = formula.strip()
+        if text.startswith("(and") and text.endswith(")"):
+            inner = text[4:-1].strip()
+            clauses: List[str] = []
+            depth = 0
+            start = None
+            for idx, char in enumerate(inner):
+                if char == "(":
+                    if depth == 0:
+                        start = idx
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        clauses.append(inner[start : idx + 1].strip())
+                        start = None
+            filtered = [clause for clause in clauses if not clause.startswith("(not ")]
+            if not filtered:
+                return "(and)"
+            if len(filtered) == 1:
+                return filtered[0]
+            return f"(and {' '.join(filtered)})"
+
+        if text.startswith("(not "):
+            return "(and)"
+        return text
+
+    def _normalize_action_schema_library(
+        self,
+        library: ActionSchemaLibrary,
+    ) -> ActionSchemaLibrary:
+        """Normalize actions into a solver-safe STRIPS subset."""
+
+        return ActionSchemaLibrary(
+            actions=[
+                {
+                    "name": action.get("name", ""),
+                    "parameters": self._as_string_list(action.get("parameters")),
+                    "precondition": self._strip_negative_preconditions(
+                        sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
+                    ),
+                    "effect": sanitize_pddl_formula(str(action.get("effect", "(and)")) or "(and)"),
+                    "description": str(action.get("description", "")).strip(),
+                }
+                for action in library.actions
+                if isinstance(action, dict)
+            ],
+            planning_notes=list(library.planning_notes),
+        )
 
     def _get_prompt_template(self, template_key: str) -> str:
         template = self.prompt_templates.get(template_key)

@@ -1382,6 +1382,43 @@ class TaskOrchestrator:
         self.last_planning_error = None
 
         while self.refinement_attempts <= self.config.max_refinement_attempts:
+            should_prevalidate = True
+            if (
+                wait_for_objects
+                and self.refinement_attempts == 0
+                and self.tracker
+                and hasattr(self.tracker, "registry")
+                and len(self.tracker.registry.get_all_objects()) == 0
+            ):
+                should_prevalidate = False
+
+            if self.maintainer and should_prevalidate:
+                domain_stats = await self.maintainer.get_domain_statistics()
+                validation = domain_stats.get("validation", {})
+                if validation and not validation.get("valid", True):
+                    print("\n🔧 Representation validation failed before solving; attempting targeted repair...")
+                    refined = await self.refine_domain_from_failure(
+                        error_message="Representation validation failed before solving",
+                        pddl_files={
+                            "domain_path": str(output_dir or (self.config.state_dir / "pddl"))
+                            + f"/{self.pddl.domain_name}_domain.pddl",
+                            "problem_path": str(output_dir or (self.config.state_dir / "pddl"))
+                            + f"/{self.pddl.domain_name}_problem.pddl",
+                        },
+                    )
+                    if not refined:
+                        result = SolverResult(
+                            success=False,
+                            plan=[],
+                            plan_length=0,
+                            plan_cost=None,
+                            search_time=None,
+                            nodes_expanded=None,
+                            error_message="Representation validation failed before solving",
+                        )
+                        return result
+                    continue
+
             # Try to solve (wait for objects only on first attempt)
             result = await self.solve_and_plan(
                 algorithm=algorithm,
