@@ -184,6 +184,12 @@ def _parse_args() -> argparse.Namespace:
 async def main() -> None:
     """CLI entrypoint with orchestration flow aligned to orchestrator demo."""
     args = _parse_args()
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Missing GEMINI_API_KEY/GOOGLE_API_KEY. Saved-world replay requires live staged analysis."
+        )
+
     benchmark_output_root = Path(args.benchmark_output_root).resolve()
     benchmark_output_root.mkdir(parents=True, exist_ok=True)
 
@@ -213,7 +219,7 @@ async def main() -> None:
 
         cfg = OrchestratorConfig(
             # Mirror orchestrator demo behavior for state updates and planning.
-            api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
+            api_key=api_key,
             state_dir=run_state_dir,
             update_interval=2.0,
             min_observations=2,
@@ -250,6 +256,11 @@ async def main() -> None:
                 result = await orchestrator.solve_and_plan(wait_for_objects=True)
             elapsed = time.time() - start
 
+            diagnostics = (orchestrator.task_analysis.diagnostics if orchestrator.task_analysis else {})
+            last_validation = diagnostics.get("last_validation", {})
+            grounding = orchestrator.task_analysis.grounding_summary if orchestrator.task_analysis else None
+            error_message = result.error_message or ""
+
             solver_success = bool(result.success) and result.plan_length > 0
             payload: Dict[str, Any] = {
                 "world_name": world_dir.name,
@@ -263,11 +274,21 @@ async def main() -> None:
                 "success": solver_success,
                 "plan": result.plan,
                 "plan_length": result.plan_length,
-                "error_message": result.error_message,
+                "error_message": error_message,
                 "refinement_attempts": orchestrator.refinement_attempts,
                 "solver_backend": orchestrator.solver.backend.value,
                 "search_time": result.search_time,
                 "elapsed_seconds": round(elapsed, 3),
+                "llm_call_count": diagnostics.get("llm_call_count"),
+                "llm_elapsed_seconds": diagnostics.get("llm_elapsed_seconds"),
+                "validation_valid": last_validation.get("valid"),
+                "validation_layers": last_validation.get("layer_validity", {}),
+                "validation_issues": last_validation.get("issues", []),
+                "grounding_missing_references": grounding.missing_references if grounding else [],
+                "grounded_goal_literals": grounding.grounded_goal_literals if grounding else [],
+                "undefined_symbol_error": any(
+                    token in error_message.lower() for token in ["undefined", "not defined", "unknown object"]
+                ),
                 "run_state_dir": str(run_state_dir.resolve()),
             }
         finally:
@@ -288,6 +309,11 @@ async def main() -> None:
     failures = sum(1 for r in results if not r.get("success"))
     avg_refine = (sum(r.get("refinement_attempts", 0) for r in results) / total) if total else 0.0
     avg_elapsed = (sum(r.get("elapsed_seconds", 0.0) for r in results) / total) if total else 0.0
+    avg_llm_calls = (sum(r.get("llm_call_count", 0) or 0 for r in results) / total) if total else 0.0
+    avg_grounding_missing = (
+        sum(len(r.get("grounding_missing_references", [])) for r in results) / total
+    ) if total else 0.0
+    undefined_symbol_errors = sum(1 for r in results if r.get("undefined_symbol_error"))
 
     summary = {
         "total_worlds": total,
@@ -300,6 +326,9 @@ async def main() -> None:
         "non_empty_plan_rate": round(non_empty / total, 3) if total else 0.0,
         "avg_refinement_attempts": round(avg_refine, 3),
         "avg_elapsed_seconds": round(avg_elapsed, 3),
+        "avg_llm_call_count": round(avg_llm_calls, 3),
+        "avg_grounding_missing_references": round(avg_grounding_missing, 3),
+        "undefined_symbol_error_count": undefined_symbol_errors,
         "results": results,
     }
 

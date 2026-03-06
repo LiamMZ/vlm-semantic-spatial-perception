@@ -4,9 +4,20 @@ This repository implements a VLM-based Task and Motion Planning (TAMP) system th
 
 ## Repository Layout
 
-*Update this when major changes are made and make sure it is up to date.*
+This repository studies VLM-driven task and motion planning, with a focus on
+turning open-ended language plus RGB-D perception into executable symbolic and
+geometric robot behavior. The current planning stack is organized around a
+staged representation builder so failures can be localized and repaired by
+layer instead of regenerating everything at once.
 
-This section should describe what the repository is about, the motivation for code/experiments, and the overall structure of the repository.
+Key paths:
+- `src/planning/`: staged task analysis, representation building, PDDL serialization, solver orchestration, and task-state monitoring.
+- `src/perception/`: continuous object tracking, predicate extraction, and registry/state management.
+- `src/primitives/` and `src/task_motion_planner.py`: symbolic-to-primitive decomposition and execution.
+- `scripts/`: capture, replay, and benchmarking entry points. `scripts/benchmark_saved_world.py` is the main no-robot integration replay.
+- `config/`: prompt templates and runtime configuration.
+- `tests/`: focused unit tests plus cached-world and perception fixtures.
+- `agents/`: task-specific implementation notes such as migration plans and behavior journals.
 
 ## Style Guidelines
 - Avoid unecessary scaffolding code and helpers. In general, only use more layers of abstraction if a block is reused and/or logically separated from the rest of the code.

@@ -385,21 +385,15 @@ class TaskAndMotionPlanner:
 
             # Treat empty plan as a failure for refinement purposes
             if use_refinement and self.config.auto_refine_on_failure:
-                print(f"\n🔧 Triggering domain refinement for empty plan...")
-                # Create synthetic error message for refinement
+                print(f"\n🔧 Triggering targeted representation repair for empty plan...")
                 error_msg = "Planning returned empty plan (0 actions). Goals may not be properly set or are already satisfied."
-
-                # Attempt refinement with both domain and problem context
-                await self.orchestrator.maintainer.refine_domain_from_error(
+                pddl_dir = self.orchestrator.config.state_dir / "pddl"
+                await self.orchestrator.refine_domain_from_failure(
                     error_message=error_msg,
-                    current_domain_pddl=self.orchestrator.pddl.get_domain_text(),
-                    current_problem_pddl=self.orchestrator.pddl.generate_problem_pddl()
-                )
-
-                # Update ObjectTracker with refined predicates and actions
-                print(f"  • Updating ObjectTracker with refined predicates/actions...")
-                await self.orchestrator.maintainer.update_object_tracker_from_domain(
-                    self.orchestrator.tracker
+                    pddl_files={
+                        "domain_path": str(pddl_dir / f"{self.orchestrator.pddl.domain_name}_domain.pddl"),
+                        "problem_path": str(pddl_dir / f"{self.orchestrator.pddl.domain_name}_problem.pddl"),
+                    },
                 )
 
                 # Retry planning once after refinement
