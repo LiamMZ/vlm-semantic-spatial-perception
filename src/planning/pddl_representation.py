@@ -734,7 +734,7 @@ class PDDLRepresentation:
         """
         issues = []
 
-        if not self.goal_literals:
+        if not self.goal_literals and not self.goal_formulas:
             issues.append("No goal literals defined")
 
         # Check if goal predicates exist in domain
@@ -765,6 +765,12 @@ class PDDLRepresentation:
 
         # Check if goal predicates can be produced by actions
         goal_predicates = {lit.predicate for lit in self.goal_literals}
+        for formula in self.goal_formulas:
+            for match in re.finditer(r"\(([^()]+)\)", formula):
+                tokens = match.group(1).strip().split()
+                if not tokens or tokens[0] in {"and", "or", "not", "forall", "exists", "when"}:
+                    continue
+                goal_predicates.add(tokens[0])
         action_effects = set()
 
         for action in list(self.predefined_actions.values()) + list(self.llm_generated_actions.values()):

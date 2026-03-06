@@ -190,7 +190,7 @@ class TaskStateMonitor:
             return decision
 
         # Check 5: Do we have goals?
-        num_goal_literals = len(problem_snapshot["goal_literals"])
+        num_goal_literals = len(problem_snapshot["goal_literals"]) + len(self.pddl.goal_formulas)
 
         if num_goal_literals == 0:
             # REFINE_DOMAIN state - no goals set
