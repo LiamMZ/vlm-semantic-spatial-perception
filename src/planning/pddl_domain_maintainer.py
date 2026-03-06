@@ -322,7 +322,6 @@ class PDDLDomainMaintainer:
                 summary=str(payload.get("summary", "")).strip(),
                 goal_literals=self._as_string_list(payload.get("goal_literals")),
                 goal_objects=self._as_string_list(payload.get("goal_objects")),
-                constraints=self._as_string_list(payload.get("constraints")),
                 success_checks=self._as_string_list(payload.get("success_checks")),
             )
             self.goal_object_types = set(self.task_analysis.goal_object_references())
@@ -831,7 +830,6 @@ class PDDLDomainMaintainer:
             "summary": self.task_analysis.abstract_goal.summary,
             "goal_literals": self.task_analysis.abstract_goal.goal_literals,
             "goal_objects": self.task_analysis.abstract_goal.goal_objects,
-            "constraints": self.task_analysis.abstract_goal.constraints,
             "success_checks": self.task_analysis.abstract_goal.success_checks,
         }
 
@@ -1003,11 +1001,6 @@ class PDDLDomainMaintainer:
                 self._apply_bindings_to_formula(formula, self.task_analysis.grounding_summary.object_bindings)
                 for formula in self.task_analysis.abstract_goal.goal_literals
             ]
-
-        formulas.extend(
-            self._apply_bindings_to_formula(formula, self.task_analysis.grounding_summary.object_bindings)
-            for formula in self.task_analysis.abstract_goal.constraints
-        )
         return [sanitize_pddl_formula(formula) for formula in formulas if formula]
 
     @staticmethod

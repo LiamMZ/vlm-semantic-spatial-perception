@@ -234,7 +234,7 @@ class TaskStateMonitor:
             else:
                 state = TaskState.GOAL_UNREACHABLE
                 reasoning = "Goal validation failed - may be unreachable"
-                recommendations.append("Review goal constraints")
+                recommendations.append("Review goal definition")
                 recommendations.append("Check if goal is achievable with available actions")
 
             decision = TaskStateDecision(

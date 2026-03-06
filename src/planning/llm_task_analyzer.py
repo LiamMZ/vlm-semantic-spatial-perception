@@ -97,7 +97,6 @@ class LLMTaskAnalyzer:
             summary=payload.get("summary", "").strip(),
             goal_literals=self._as_string_list(payload.get("goal_literals")),
             goal_objects=self._as_string_list(payload.get("goal_objects")),
-            constraints=self._as_string_list(payload.get("constraints")),
             success_checks=self._as_string_list(payload.get("success_checks")),
         )
 
@@ -400,7 +399,6 @@ class LLMTaskAnalyzer:
             "summary": abstract_goal.summary,
             "goal_literals": abstract_goal.goal_literals,
             "goal_objects": abstract_goal.goal_objects,
-            "constraints": abstract_goal.constraints,
             "success_checks": abstract_goal.success_checks,
         }
 

@@ -35,14 +35,12 @@ class FakeStagedAnalyzer:
                 summary="Place the vegetables into the box.",
                 goal_literals=["(in red_pepper box)", "(in carrot box)"],
                 goal_objects=["red_pepper", "carrot", "box"],
-                constraints=[],
                 success_checks=["Both vegetables are inside the box."],
             )
         return AbstractGoal(
             summary="Put the orange marker in the cup.",
             goal_literals=["(in orange_marker cup)"],
             goal_objects=["orange_marker", "cup"],
-            constraints=[],
             success_checks=["The orange marker is inside the cup."],
         )
 

@@ -106,7 +106,6 @@ repair_goal_prompt: |
     "summary": "updated intent summary",
     "goal_literals": ["(predicate symbolic_object)", "..."],
     "goal_objects": ["symbolic_object", "..."],
-    "constraints": ["(predicate symbolic_object)", "..."],
     "success_checks": ["short human-readable check", "..."]
   }
 

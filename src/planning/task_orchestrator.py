@@ -1617,7 +1617,6 @@ class TaskOrchestrator:
                     "summary": self.task_analysis.abstract_goal.summary,
                     "goal_literals": self.task_analysis.abstract_goal.goal_literals,
                     "goal_objects": self.task_analysis.abstract_goal.goal_objects,
-                    "constraints": self.task_analysis.abstract_goal.constraints,
                 } if self.task_analysis else {},
                 "predicate_inventory": self.task_analysis.predicate_inventory.predicates if self.task_analysis else [],
                 "grounding_summary": {

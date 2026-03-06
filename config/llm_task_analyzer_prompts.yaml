@@ -5,8 +5,7 @@ goal_prompt: |
 
   Produce an abstract goal that captures user intent without overcommitting to
   unnecessary symbolic structure. Prefer a small number of direct success
-  conditions, name only objects implied by the task, and surface safety or
-  preservation constraints explicitly.
+  conditions and name only objects implied by the task.
 
   Task:
   <<TASK>>
@@ -25,14 +24,12 @@ goal_prompt: |
     "summary": "short intent summary",
     "goal_literals": ["(predicate symbolic_object another_symbolic_object)", "..."],
     "goal_objects": ["symbolic_object", "..."],
-    "constraints": ["(predicate symbolic_object)", "..."],
     "success_checks": ["short human-readable check", "..."]
   }
 
   Rules:
   - Keep `goal_literals` minimal and sufficient.
   - Use symbolic object references from the task; use observed object IDs only if the task is already clearly grounded.
-  - Express invariants such as “without breaking anything” in `constraints`.
   - Avoid quantifiers unless they are clearly necessary.
   - Do not invent robot-internal goals unless they matter for task success.
 

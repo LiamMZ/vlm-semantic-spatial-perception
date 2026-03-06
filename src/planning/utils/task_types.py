@@ -17,7 +17,6 @@ class AbstractGoal:
         summary: Short natural-language summary of the intended outcome.
         goal_literals: Symbolic goal literals, typically using task-level object references.
         goal_objects: Object references mentioned in the task.
-        constraints: Safety or invariance constraints that must hold.
         success_checks: Optional human-readable checks for debugging.
 
     Example:
@@ -25,14 +24,12 @@ class AbstractGoal:
         ...     summary="Retrieve the jar while keeping fragile items intact.",
         ...     goal_literals=["(holding jar)", "(cabinet-open cabinet)"],
         ...     goal_objects=["jar", "cabinet"],
-        ...     constraints=["(intact vase)"],
         ... )
     """
 
     summary: str
     goal_literals: List[str] = field(default_factory=list)
     goal_objects: List[str] = field(default_factory=list)
-    constraints: List[str] = field(default_factory=list)
     success_checks: List[str] = field(default_factory=list)
 
 
