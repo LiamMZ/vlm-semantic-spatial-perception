@@ -164,7 +164,11 @@ class PrimitiveExecutor:
                 if depth_offset:
                     point = [point[0], point[1], point[2] + depth_offset]
 
-                primitive.parameters["target_position"] = point
+                primitive.parameters["target_position"] = [
+                    round(float(point[0]), 6),
+                    round(float(point[1]), 6),
+                    round(float(point[2]), 6),
+                ]
                 primitive.parameters.pop("depth_offset_m", None)
 
             # Transform coordinates to base frame

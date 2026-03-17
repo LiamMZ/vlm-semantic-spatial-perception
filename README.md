@@ -67,24 +67,24 @@ Class-level flow in task-execution call order:
                                            |                |
                                perception  |                |  planning
                                   loop     v                v   loop
-                          +----------------------+   +---------------------+
-                          | RealSenseCamera      |   | ContinuousObject-   |
-                          +----------+-----------+-->| Tracker             |
-                                     |  frames       +----------+----------+
+                          +----------------------+   +--------------------+
+                          | RealSenseCamera      |   | ContinuousObject-  |
+                          +----------+-----------+-->| Tracker            |
+                                     |  frames       +----------+---------+
                                      |                           |
                                      |                     detections
                                      |                           v
-                          +--------------------------------------+-----------+
-                          | LLMTaskAnalyzer + PDDLDomainMaintainer           |
-                          | + PDDLRepresentation + PDDLSolver                |
-                          +------------------------------+-------------------+
+                          +--------------------------------------+--------+
+                          | LLMTaskAnalyzer + PDDLDomainMaintainer        |
+                          | + PDDLRepresentation + PDDLSolver             |
+                          +------------------------------+----------------+
                                                          |
                                               symbolic action sequence
                                                          v
-                          +------------------------------+-------------------+
-                          | SkillDecomposer -> PrimitiveExecutor             |
-                          | -> CuRoboMotionPlanner                           |
-                          +--------------------------------------------------+
+                          +------------------------------+----------------+
+                          | SkillDecomposer -> PrimitiveExecutor          |
+                          | -> CuRoboMotionPlanner                        |
+                          +-----------------------------------------------+
 ```
 
 ---
@@ -110,13 +110,24 @@ The main planner class that coordinates all components:
 
 ### 1. Task Analysis
 
-**Purpose**: Understand what the user wants to accomplish
+**Purpose**: Build a staged symbolic representation that separates intent from grounding.
 
 **Implementation**:
 - **Main Class**: [TaskOrchestrator](src/planning/task_orchestrator.py)
-- **Key Method**: `process_task_request()` - Analyzes task using LLM
-- **Domain Maintainer**: [PDDLDomainMaintainer](src/planning/pddl_domain_maintainer.py) - Manages PDDL domain updates
+- **Key Method**: `process_task_request()` - Runs the staged representation builder
+- **Domain Maintainer**: [PDDLDomainMaintainer](src/planning/pddl_domain_maintainer.py) - Builds and validates the four planning layers
 - **Configuration**: [llm_task_analyzer_prompts.yaml](config/llm_task_analyzer_prompts.yaml)
+
+Staged build order:
+- task language -> abstract goal
+- abstract goal -> minimal predicate inventory
+- predicates + goal -> action schemas
+- predicates + actions + observed world -> grounding summary
+
+Failure handling works in reverse abstraction order:
+- repair actions first
+- repair predicates next
+- repair the goal last
 
 **How it works**:
 - Takes natural language input (e.g., "pick up the red block")

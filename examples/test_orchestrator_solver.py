@@ -78,8 +78,9 @@ async def test_solver_integration():
     try:
         analysis = await orchestrator.process_task_request(task)
         print(f"   ✓ Task analyzed")
-        print(f"   • Goal objects: {', '.join(analysis.goal_objects)}")
-        print("   • Estimated steps: n/a")
+        print(f"   • Goal summary: {analysis.abstract_goal.summary}")
+        print(f"   • Goal objects: {', '.join(analysis.goal_object_references())}")
+        print(f"   • Predicates: {len(analysis.predicate_signatures())}")
         print()
     except Exception as e:
         print(f"   ❌ Task analysis failed: {e}")
