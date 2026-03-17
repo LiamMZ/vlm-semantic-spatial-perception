@@ -125,6 +125,9 @@ class TaskOrchestrator:
         self.tracker: Optional[ContinuousObjectTracker] = None
         self.solver: Optional[PDDLSolver] = None
 
+        # Layered domain generator (optional gated/guardrailed pipeline)
+        self._layered_generator: Optional[Any] = None
+
         # Task state
         self.current_task: Optional[str] = None
         self.task_analysis: Optional[TaskAnalysis] = None
@@ -212,6 +215,25 @@ class TaskOrchestrator:
             exploration_timeout_seconds=self.config.exploration_timeout
         )
         self.logger.info("  • PDDL domain maintainer and monitor initialized")
+
+        # Initialize layered domain generator when enabled
+        if getattr(self.config, "use_layered_generation", False):
+            from .layered_domain_generator import LayeredDomainGenerator
+            dkb = None
+            dkb_dir = getattr(self.config, "dkb_dir", None)
+            if dkb_dir is not None:
+                try:
+                    from .domain_knowledge_base import DomainKnowledgeBase
+                    dkb = DomainKnowledgeBase(dkb_dir)
+                    dkb.load()
+                except Exception as e:
+                    self.logger.warning("  • DKB load failed (%s), proceeding without DKB", e)
+            self._layered_generator = LayeredDomainGenerator(
+                api_key=self.config.api_key,
+                model_name=self.config.model_name,
+                dkb=dkb,
+            )
+            self.logger.info("  • Layered domain generator initialized (use_layered_generation=True)")
 
         # Attach default robot provider if none supplied (xArm CuRobo interface)
         if getattr(self.config, "robot", None) is None:
@@ -330,10 +352,21 @@ class TaskOrchestrator:
 
         # Analyze task and initialize domain
         self.logger.info("  • Analyzing task with LLM...")
-        self.task_analysis = await self.maintainer.initialize_from_task(
-            task_description,
-            environment_image=environment_image
-        )
+        if self._layered_generator is not None:
+            # Gated/guardrailed pipeline: L1→L5 with validation gates
+            self.logger.info("  • Using layered domain generator (L1–L5 pipeline)...")
+            artifact = await self._layered_generator.generate_domain(
+                task_description,
+                observed_objects=[],
+                image=environment_image,
+            )
+            self.task_analysis = await self.maintainer.initialize_from_layered_artifact(artifact)
+        else:
+            # Legacy monolithic path
+            self.task_analysis = await self.maintainer.initialize_from_task(
+                task_description,
+                environment_image=environment_image
+            )
 
         self.logger.info("✓ Task analyzed!")
         valid_goal_objects = [obj for obj in self.task_analysis.goal_objects if obj and obj != "None"]

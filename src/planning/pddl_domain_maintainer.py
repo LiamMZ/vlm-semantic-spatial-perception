@@ -264,6 +264,26 @@ class PDDLDomainMaintainer:
 
         return self.task_analysis
 
+    async def initialize_from_layered_artifact(self, artifact: "LayeredDomainArtifact") -> "TaskAnalysis":
+        """
+        Initialize PDDL domain from a LayeredDomainArtifact produced by LayeredDomainGenerator.
+
+        Converts the artifact to a TaskAnalysis via the bridge method and then runs the
+        existing _initialize_domain_from_analysis() write path unchanged.
+
+        Args:
+            artifact: Output of LayeredDomainGenerator.generate_domain()
+
+        Returns:
+            TaskAnalysis (backward-compatible with callers expecting this type)
+        """
+        self.current_task = artifact.task_description
+        self.task_analysis = artifact.to_task_analysis()
+        self.goal_object_types = set(self.task_analysis.goal_objects)
+        await self._initialize_domain_from_analysis()
+        self.domain_version += 1
+        return self.task_analysis
+
     async def _initialize_domain_from_analysis(self) -> None:
         """Initialize PDDL domain based on task analysis."""
         if not self.task_analysis:

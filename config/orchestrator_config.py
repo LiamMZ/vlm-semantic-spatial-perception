@@ -70,6 +70,10 @@ class OrchestratorConfig:
     task_analyzer_prompts_path: Optional[Path] = None  # Override for LLMTaskAnalyzer prompt file
     genai_log_dir: Optional[Path] = None  # Optional GenAI request/response log directory
 
+    # Layered Domain Generation (gated/guardrailed pipeline)
+    use_layered_generation: bool = False  # Enable 5-layer validated domain generation
+    dkb_dir: Optional[Path] = None  # Domain Knowledge Base directory (default: outputs/dkb)
+
     # Callbacks
     on_state_change: Optional[Callable[["OrchestratorState", "OrchestratorState"], None]] = None
     on_detection_update: Optional[Callable[[int], None]] = None
