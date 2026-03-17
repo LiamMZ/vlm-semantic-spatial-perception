@@ -4,6 +4,7 @@ Task analysis and monitoring types.
 
 from __future__ import annotations
 
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List
@@ -142,6 +143,85 @@ class TaskAnalysis:
     def action_context(self) -> List[Dict[str, Any]]:
         """Return action schemas formatted for downstream components."""
         return list(self.action_schemas.actions)
+
+
+# ---------------------------------------------------------------------------
+# Layered Domain Generation Artifacts (L1–L5)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class L1GoalArtifact:
+    """Output of L1: Goal Specification layer."""
+    goal_predicates: List[str]    # grounded PDDL literals: ["(on red_block_1 blue_block_1)"]
+    goal_objects: List[str]       # observed object IDs referenced in goals
+    global_predicates: List[str]  # robot-state predicates: ["hand-empty"]
+    generation_attempts: int = 1
+    validation_errors: List[str] = field(default_factory=list)
+
+
+@dataclass
+class L2PredicateArtifact:
+    """Output of L2: Predicate Vocabulary layer."""
+    predicate_signatures: List[str]  # ["(on ?obj ?surface)", "(holding ?obj)"]
+    sensed_predicates: List[str]     # predicates tagged as sensed/external
+    checked_variants: List[str]      # auto-generated checked-X variants
+    generation_attempts: int = 1
+    validation_errors: List[str] = field(default_factory=list)
+
+
+@dataclass
+class L3ActionArtifact:
+    """Output of L3: Action Schema layer."""
+    actions: List[Dict]          # same schema as TaskAnalysis.required_actions
+    sensing_actions: List[Dict]  # auto-generated sensing/check actions
+    generation_attempts: int = 1
+    validation_errors: List[str] = field(default_factory=list)
+
+
+@dataclass
+class L4GroundingArtifact:
+    """Output of L4: Grounding pre-check (algorithmic)."""
+    object_bindings: Dict[str, str]  # action-param-type -> observed object_id example
+    warnings: List[str]              # non-blocking feasibility warnings
+
+
+@dataclass
+class L5InitialStateArtifact:
+    """Output of L5: Initial State Construction (algorithmic)."""
+    true_literals: List[Tuple[str, List[str]]]   # [(pred_name, [arg1, arg2])]
+    false_literals: List[Tuple[str, List[str]]]  # always-false (checked-X predicates)
+
+
+@dataclass
+class LayeredDomainArtifact:
+    """Complete output of the layered domain generation pipeline."""
+    l1: L1GoalArtifact
+    l2: L2PredicateArtifact
+    l3: L3ActionArtifact
+    l4: Optional[L4GroundingArtifact]
+    l5: Optional[L5InitialStateArtifact]
+    task_description: str
+    scene_objects: List[Dict]
+
+    def to_task_analysis(self) -> "TaskAnalysis":
+        """Bridge method: convert to legacy TaskAnalysis for backward compatibility."""
+        all_actions = self.l3.actions + self.l3.sensing_actions
+        initial_predicates: List[str] = []
+        if self.l5:
+            for pred_name, args in self.l5.true_literals:
+                if args:
+                    initial_predicates.append(f"({pred_name} {' '.join(args)})")
+                else:
+                    initial_predicates.append(f"({pred_name})")
+        return TaskAnalysis(
+            goal_predicates=self.l1.goal_predicates,
+            preconditions=[],
+            goal_objects=self.l1.goal_objects,
+            initial_predicates=initial_predicates,
+            global_predicates=self.l1.global_predicates,
+            relevant_predicates=self.l2.predicate_signatures,
+            required_actions=all_actions,
+        )
 
 
 class TaskState(Enum):
