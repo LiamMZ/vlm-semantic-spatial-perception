@@ -224,21 +224,6 @@ class PrimitiveExecutor:
         except Exception:
             pass
 
-        # cuRobo JointState
-        try:
-            from curobo.types.state import JointState  # type: ignore
-
-            if isinstance(value, JointState):
-                return {
-                    "position": self._json_safe(getattr(value, "position", None)),
-                    "velocity": self._json_safe(getattr(value, "velocity", None)),
-                    "acceleration": self._json_safe(getattr(value, "acceleration", None)),
-                    "jerk": self._json_safe(getattr(value, "jerk", None)),
-                    "joint_names": self._json_safe(getattr(value, "joint_names", None)),
-                }
-        except Exception:
-            pass
-
         # Generic dataclasses
         if is_dataclass(value):
             return {k: self._json_safe(v) for k, v in asdict(value).items()}

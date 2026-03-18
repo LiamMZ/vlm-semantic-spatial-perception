@@ -47,7 +47,7 @@ def test_wipe_method_exists():
     print("=" * 70)
 
     try:
-        from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
+        from src.kinematics.xarm_pybullet_interface import XArmPybulletInterface as CuRoboMotionPlanner
 
         # Check if method exists
         if hasattr(CuRoboMotionPlanner, "wipe"):
@@ -87,12 +87,12 @@ def test_wipe_execution():
     print("=" * 70)
 
     try:
-        from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
+        from src.kinematics.xarm_pybullet_interface import XArmPybulletInterface as CuRoboMotionPlanner
 
         print("  Initializing CuRobo motion planner (simulation mode)...")
 
         # Initialize planner without robot connection
-        planner = CuRoboMotionPlanner(robot_ip="192.168.1.224")
+        planner = CuRoboMotionPlanner()
 
         print("  ✓ CuRobo planner initialized successfully\n")
 
