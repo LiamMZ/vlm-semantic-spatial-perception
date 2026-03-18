@@ -16,7 +16,11 @@ Controls:
 
 import argparse
 import re
+import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cv2
 import numpy as np
@@ -24,7 +28,19 @@ import pyrealsense2 as rs
 import torch
 from PIL import Image
 
-from grounded_sam2_tracking_camera_with_continuous_id import IncrementalObjectTracker
+# ram was written against old transformers where these lived in modeling_utils;
+# they moved to pytorch_utils — patch them back before ram imports.
+import transformers.modeling_utils as _tmu
+from transformers.pytorch_utils import (
+    apply_chunking_to_forward,
+    find_pruneable_heads_and_indices,
+    prune_linear_layer,
+)
+_tmu.apply_chunking_to_forward = apply_chunking_to_forward
+_tmu.find_pruneable_heads_and_indices = find_pruneable_heads_and_indices
+_tmu.prune_linear_layer = prune_linear_layer
+
+from src.perception.gsam2 import IncrementalObjectTracker
 
 # ── GPU settings ──────────────────────────────────────────────────────────────
 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()

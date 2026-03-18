@@ -50,7 +50,7 @@ def test_action_methods_exist():
     print("=" * 70)
 
     try:
-        from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
+        from src.kinematics.xarm_pybullet_interface import XArmPybulletInterface as CuRoboMotionPlanner
 
         exploratory_actions = ["look_up", "look_down", "look_left", "look_right"]
 
@@ -89,16 +89,14 @@ def test_action_execution():
     print("=" * 70)
 
     try:
-        from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
+        from src.kinematics.xarm_pybullet_interface import XArmPybulletInterface as CuRoboMotionPlanner
         import numpy as np
 
         print("  Initializing CuRobo motion planner (no robot connection)...")
 
         # Initialize planner without robot connection
         # This will set up the IK solver and collision checking but won't connect to hardware
-        planner = CuRoboMotionPlanner(
-            robot_ip="192.168.1.224"
-        )
+        planner = CuRoboMotionPlanner()
 
         print("  ✓ CuRobo planner initialized successfully")
         print(f"  Robot in simulation mode (no hardware connection)\n")

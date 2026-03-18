@@ -4,21 +4,39 @@ Orchestrator Simulation Demo
 
 Full end-to-end demo of the TaskOrchestrator with:
   • PyBullet GUI — xArm7 robot + coloured scene objects
-  • Simulated wrist camera feeding the VLM perception loop
+  • Simulated wrist camera feeding the perception loop
   • Layered PDDL domain generation (L1–L5 gated pipeline)
   • Continuous object detection updating the PDDL domain
   • PDDL solver producing an executable plan
   • Terminal logging of every pipeline stage with timing
 
+Perception backends (set USE_GSAM2=1 to use RAM+ + GroundingDINO + SAM2):
+  • LLM (default) — Qwen3-VL or Google Gemini via GEMINI_API_KEY
+  • GSAM2          — RAM+ tagger → GroundingDINO → SAM2 segmentation (no LLM needed)
+
 Usage:
+    # LLM backend (default):
     export GEMINI_API_KEY="..."
     uv run python examples/run_orchestrator_sim_demo.py
+
+    # GSAM2 backend:
+    USE_GSAM2=1 SAM2_CKPT=/path/to/sam2.1_hiera_large.pt \\
+        RAM_CKPT=/path/to/ram_plus_swin_large_14m.pth \\
+        uv run python examples/run_orchestrator_sim_demo.py
 
 Optional flags (set as env vars):
     DEMO_TASK          Task description (default: "Put the red block on the blue block")
     DEMO_DETECT_CYCLES Max detection cycles before forcing solve (default: 3)
     DEMO_STEP_PAUSE    Seconds to pause at each milestone (default: 2)
     DEMO_OUTPUT_DIR    Output directory for PDDL files and state (default: outputs/sim_demo)
+
+GSAM2-specific env vars (only used when USE_GSAM2=1):
+    SAM2_CFG           SAM2 config file (default: configs/sam2.1/sam2.1_hiera_l.yaml)
+    SAM2_CKPT          SAM2 checkpoint path (required)
+    RAM_CKPT           RAM+ checkpoint path (required)
+    GROUNDING_MODEL    GroundingDINO model ID (default: IDEA-Research/grounding-dino-tiny)
+    GSAM2_DET_INTERVAL GroundingDINO re-detection interval in frames (default: 20)
+    GSAM2_TAG_INTERVAL RAM+ re-tagging interval in frames (default: 30)
 """
 
 from __future__ import annotations
@@ -119,6 +137,15 @@ TASK = os.getenv("DEMO_TASK", "Put the red block on the blue block")
 # Override via env var: HF_MODEL="microsoft/Phi-3.5-vision-instruct"
 HF_MODEL = os.getenv("HF_MODEL", "Qwen/Qwen3-VL-4B")
 
+# GSAM2 perception backend (set USE_GSAM2=1 to enable)
+USE_GSAM2 = os.getenv("USE_GSAM2", "").strip() in ("1", "true", "yes")
+GSAM2_SAM2_CFG        = os.getenv("SAM2_CFG", "configs/sam2.1/sam2.1_hiera_l.yaml")
+GSAM2_SAM2_CKPT       = os.getenv("SAM2_CKPT", "")
+GSAM2_RAM_CKPT        = os.getenv("RAM_CKPT", "")
+GSAM2_GROUNDING_MODEL = os.getenv("GROUNDING_MODEL", "IDEA-Research/grounding-dino-tiny")
+GSAM2_DET_INTERVAL    = int(os.getenv("GSAM2_DET_INTERVAL", "20"))
+GSAM2_TAG_INTERVAL    = int(os.getenv("GSAM2_TAG_INTERVAL", "30"))
+
 SCENE_OBJECTS = [
     {
         "object_id":   "red_block_1",
@@ -208,39 +235,47 @@ class DetectionTracker:
 
 async def run_demo() -> int:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    use_hf = bool(HF_MODEL)  # HF is default; set HF_MODEL="" to use GenAI
+    use_hf = bool(HF_MODEL) and not USE_GSAM2  # HF is default unless GSAM2 is selected
 
     _banner("Orchestrator Simulation Demo")
     _info("Task", TASK)
     _info("Scene", [o["object_id"] for o in SCENE_OBJECTS])
     _info("Output", OUTPUT_DIR)
-    _info("Backend", f"HuggingFace ({HF_MODEL})" if use_hf else f"Google GenAI (gemini-2.0-flash)")
+    if USE_GSAM2:
+        _info("Perception", f"GSAM2 (RAM+ + GroundingDINO + SAM2)")
+        _info("SAM2 ckpt", GSAM2_SAM2_CKPT or "(not set — will fail)")
+        _info("RAM+ ckpt", GSAM2_RAM_CKPT or "(not set — will fail)")
+    else:
+        _info("Perception", f"HuggingFace ({HF_MODEL})" if use_hf else "Google GenAI (gemini-2.0-flash)")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # 0. Build LLM client
+    # 0. Build LLM client (skipped for GSAM2 backend)
     # ------------------------------------------------------------------
-    from src.llm_interface import GoogleGenAIClient, Qwen3VLClient
+    llm_client = None
 
-    if use_hf:
-        _section("Loading Qwen3-VL model")
-        import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _info("Model", HF_MODEL)
-        _info("Device", device)
-        llm_client = Qwen3VLClient(
-            model=HF_MODEL,
-            device="auto" if device == "cuda" else device,
-            load_in_4bit=device == "cuda",
-            model_kwargs={"max_memory": {0: "6GiB", "cpu": "16GiB"}} if device == "cuda" else None,
-        )
-        _ok(f"Qwen3-VL model loaded on {device}")
-    else:
-        if not api_key:
-            log.error("GEMINI_API_KEY is not set. Set HF_MODEL to use a local model instead.")
-            return 1
-        llm_client = GoogleGenAIClient(model="gemini-2.0-flash", api_key=api_key)
-        _ok("Google GenAI client ready")
+    if not USE_GSAM2:
+        from src.llm_interface import GoogleGenAIClient, Qwen3VLClient
+
+        if use_hf:
+            _section("Loading Qwen3-VL model")
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _info("Model", HF_MODEL)
+            _info("Device", device)
+            llm_client = Qwen3VLClient(
+                model=HF_MODEL,
+                device="auto" if device == "cuda" else device,
+                load_in_4bit=device == "cuda",
+                model_kwargs={"max_memory": {0: "6GiB", "cpu": "16GiB"}} if device == "cuda" else None,
+            )
+            _ok(f"Qwen3-VL model loaded on {device}")
+        else:
+            if not api_key:
+                log.error("GEMINI_API_KEY is not set. Set HF_MODEL to use a local model or USE_GSAM2=1 for GSAM2.")
+                return 1
+            llm_client = GoogleGenAIClient(model="gemini-2.0-flash", api_key=api_key)
+            _ok("Google GenAI client ready")
 
     # ------------------------------------------------------------------
     # 1. Start PyBullet GUI environment
@@ -335,7 +370,8 @@ async def run_demo() -> int:
         ),
     )
 
-    _ok(f"Config built — use_layered_generation=True, backend={'HuggingFace' if use_hf else 'GenAI'}, solver=auto")
+    backend_label = "GSAM2" if USE_GSAM2 else ("HuggingFace" if use_hf else "GenAI")
+    _ok(f"Config built — use_layered_generation=True, backend={backend_label}, solver=auto")
     _info("state_dir", config.state_dir)
     _info("dkb_dir",   config.dkb_dir)
 
@@ -349,6 +385,35 @@ async def run_demo() -> int:
     orchestrator = TaskOrchestrator(config=config, camera=None)
     await orchestrator.initialize()
     _ok("Orchestrator initialised")
+
+    # ------------------------------------------------------------------
+    # 3a. Optionally swap to GSAM2 perception backend
+    # ------------------------------------------------------------------
+    if USE_GSAM2:
+        _section("Swapping to GSAM2 perception backend")
+        if not GSAM2_SAM2_CKPT:
+            log.error("SAM2_CKPT env var is required when USE_GSAM2=1")
+            return 1
+
+        import torch
+        from src.perception import GSAM2ContinuousObjectTracker
+
+        gsam2_device = "cuda" if torch.cuda.is_available() else "cpu"
+        gsam2_tracker = GSAM2ContinuousObjectTracker(
+            sam2_model_cfg=GSAM2_SAM2_CFG,
+            sam2_ckpt_path=GSAM2_SAM2_CKPT,
+            grounding_model_id=GSAM2_GROUNDING_MODEL,
+            ram_ckpt_path=GSAM2_RAM_CKPT or None,
+            detection_interval=GSAM2_DET_INTERVAL,
+            device=gsam2_device,
+            tag_interval=GSAM2_TAG_INTERVAL,
+            update_interval=config.update_interval,
+            on_detection_complete=detect_tracker.on_detection,
+            logger=log.getChild("GSAM2Tracker"),
+        )
+        # Replace the LLM-based tracker with the GSAM2 tracker
+        orchestrator.tracker = gsam2_tracker
+        _ok(f"GSAM2 tracker active (SAM2 + {'RAM+' if GSAM2_RAM_CKPT else 'no tagger'}) on {gsam2_device}")
 
     # Override frame provider with our sim camera
     orchestrator.tracker.set_frame_provider(frame_provider)
