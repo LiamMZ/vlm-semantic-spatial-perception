@@ -173,7 +173,7 @@ class TaskOrchestrator:
         self.logger.info("Initializing Task Orchestrator...")
 
         # Initialize camera if not provided
-        if self._camera is None:
+        if self._camera is None and not getattr(self.config, "use_sim_camera", False):
             self.logger.info(
                 "  • Initializing RealSense camera (%sx%s @ %s FPS)...",
                 self.config.camera_width,
@@ -189,8 +189,10 @@ class TaskOrchestrator:
                 logger=self.logger.getChild("RealSenseCamera"),
             )
             self.logger.info("    ✓ Camera initialized")
-        else:
+        elif self._camera is not None:
             self.logger.info("  • Using provided camera")
+        else:
+            self.logger.info("  • Sim camera mode — frame provider will be injected")
 
         # Initialize PDDL representation if not provided
         if self.pddl is None:
@@ -201,11 +203,13 @@ class TaskOrchestrator:
             self.logger.info("  • PDDL representation created")
 
         # Initialize PDDL components
+        _llm_client = getattr(self.config, "llm_client", None)
         self.maintainer = PDDLDomainMaintainer(
             self.pddl,
             api_key=self.config.api_key,
             model_name=self.config.model_name,
             task_analyzer_prompts_path=self.config.task_analyzer_prompts_path,
+            llm_client=_llm_client,
         )
 
         self.monitor = TaskStateMonitor(
@@ -232,17 +236,18 @@ class TaskOrchestrator:
                 api_key=self.config.api_key,
                 model_name=self.config.model_name,
                 dkb=dkb,
+                llm_client=_llm_client,
             )
             self.logger.info("  • Layered domain generator initialized (use_layered_generation=True)")
 
-        # Attach default robot provider if none supplied (xArm CuRobo interface)
+        # Attach default robot provider if none supplied — use PyBullet sim interface
         if getattr(self.config, "robot", None) is None:
             try:
-                from ..kinematics.xarm_curobo_interface import CuRoboMotionPlanner
-                self.config.robot = CuRoboMotionPlanner()
-                self.logger.info("  • Default robot provider attached: CuRoboMotionPlanner")
+                from ..kinematics.xarm_pybullet_interface import XArmPybulletInterface
+                self.config.robot = XArmPybulletInterface()
+                self.logger.info("  • Default robot provider attached: XArmPybulletInterface (sim)")
             except Exception as e:
-                self.logger.warning("  • No robot provider attached (default xArm initialization failed: %s)", e)
+                self.logger.warning("  • No robot provider attached (sim initialization failed: %s)", e)
 
         # Initialize continuous tracker
         self.tracker = ContinuousObjectTracker(
@@ -252,7 +257,8 @@ class TaskOrchestrator:
             update_interval=self.config.update_interval,
             on_detection_complete=self._on_detection_callback,
             logger=self.logger.getChild("ObjectTracker"),
-            robot=self.config.robot
+            robot=self.config.robot,
+            llm_client=_llm_client,
         )
 
         # Set frame provider
@@ -355,9 +361,20 @@ class TaskOrchestrator:
         if self._layered_generator is not None:
             # Gated/guardrailed pipeline: L1→L5 with validation gates
             self.logger.info("  • Using layered domain generator (L1–L5 pipeline)...")
+            # Use any objects already detected by the tracker
+            detected = self.get_detected_objects()
+            observed_objects = [
+                {
+                    "object_id": obj.object_id,
+                    "object_type": obj.object_type,
+                    "affordances": list(obj.affordances),
+                    "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None,
+                }
+                for obj in detected
+            ]
             artifact = await self._layered_generator.generate_domain(
                 task_description,
-                observed_objects=[],
+                observed_objects=observed_objects,
                 image=environment_image,
             )
             self.task_analysis = await self.maintainer.initialize_from_layered_artifact(artifact)
@@ -506,6 +523,8 @@ class TaskOrchestrator:
 
     def _get_camera_frames(self):
         """Frame provider for continuous tracker."""
+        if self._camera is None:
+            return None, None, None, None
         try:
             color, depth = self._camera.get_aligned_frames()
             intrinsics = self._camera.get_camera_intrinsics()

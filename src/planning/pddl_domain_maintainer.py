@@ -2,8 +2,10 @@
 PDDL representation builder with staged validation and repair.
 """
 
-from __future__ import annotations
-
+import asyncio
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from pathlib import Path
 import json
 import re
 from pathlib import Path
@@ -96,7 +98,19 @@ class PDDLDomainMaintainer:
         model_name: str = "gemini-robotics-er-1.5-preview",
         prompts_config_path: Optional[Union[str, Path]] = None,
         task_analyzer_prompts_path: Optional[Union[str, Path]] = None,
-    ) -> None:
+        llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
+    ):
+        """
+        Initialize domain maintainer.
+
+        Args:
+            pddl_representation: PDDL representation to maintain
+            api_key: Gemini API key for LLM analysis
+            model_name: LLM model to use
+            prompts_config_path: Override path to prompts config YAML (defaults to config/pddl_domain_maintainer_prompts.yaml)
+            task_analyzer_prompts_path: Override path to prompts config for LLMTaskAnalyzer (defaults to config/llm_task_analyzer_prompts.yaml)
+            llm_client: Optional LLMClient instance; when provided, api_key/model_name are ignored
+        """
         if prompts_config_path is None:
             prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
 
@@ -105,6 +119,7 @@ class PDDLDomainMaintainer:
             api_key=api_key,
             model_name=model_name,
             prompts_config_path=task_analyzer_prompts_path,
+            llm_client=llm_client,
         )
         self.robot_description = self.llm_analyzer.robot_description
         self.prompts_config_path = Path(prompts_config_path)
