@@ -12,7 +12,7 @@ import io
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import yaml
@@ -38,7 +38,8 @@ class LLMTaskAnalyzer:
         self,
         api_key: Optional[str] = None,
         model_name: str = "gemini-robotics-er-1.5-preview",
-        prompts_config_path: Optional[Union[str, Path]] = None
+        prompts_config_path: Optional[Union[str, Path]] = None,
+        llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
     ):
         """
         Initialize LLM task analyzer.
@@ -47,6 +48,7 @@ class LLMTaskAnalyzer:
             api_key: Gemini API key (None to use environment variable)
             model_name: Model to use (flash for speed, pro for quality)
             prompts_config_path: Override path to prompts config YAML (defaults to config/llm_task_analyzer_prompts.yaml)
+            llm_client: Optional LLMClient instance; when provided, api_key/model_name are ignored
         """
         if prompts_config_path is None:
             prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
@@ -54,7 +56,9 @@ class LLMTaskAnalyzer:
         self.api_key = api_key
         self.model_name = model_name
         self.prompts_config_path = Path(prompts_config_path)
-        self.client = genai.Client(api_key=api_key)
+        self._llm_client = llm_client
+        if llm_client is None:
+            self.client = genai.Client(api_key=api_key)
 
         with open(self.prompts_config_path, "r", encoding="utf-8") as f:
             config_data = yaml.safe_load(f) or {}
@@ -66,7 +70,10 @@ class LLMTaskAnalyzer:
         }
         self.robot_description = config_data.get("robot_description")
 
-        print(f"ℹ LLMTaskAnalyzer using GenAI SDK with model: {model_name}")
+        if llm_client is not None:
+            print(f"ℹ LLMTaskAnalyzer using injected LLMClient: {type(llm_client).__name__}")
+        else:
+            print(f"ℹ LLMTaskAnalyzer using GenAI SDK with model: {model_name}")
         if self.robot_description:
             print(f"  • Robot description configured ({len(self.robot_description)} chars)")
 
@@ -127,30 +134,43 @@ class LLMTaskAnalyzer:
         start_time = time.time()
 
         # Build content parts
-        content_parts = []
-        if pil_image:
-            # Encode image
-            img_byte_arr = io.BytesIO()
-            pil_image.save(img_byte_arr, format='PNG')
-            img_bytes = img_byte_arr.getvalue()
-            content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
-        content_parts.append(prompt)
+        if self._llm_client is not None:
+            from src.llm_interface.base import GenerateConfig, ImagePart
+            llm_parts = []
+            if pil_image:
+                img_byte_arr = io.BytesIO()
+                pil_image.save(img_byte_arr, format='PNG')
+                llm_parts.append(ImagePart(data=img_byte_arr.getvalue()))
+            llm_parts.append(prompt)
+            cfg = GenerateConfig(
+                temperature=0.1,
+                top_p=0.9,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+            )
+            response_text = self._llm_client.generate(llm_parts, config=cfg).text
+        else:
+            content_parts = []
+            if pil_image:
+                img_byte_arr = io.BytesIO()
+                pil_image.save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
+                content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
+            content_parts.append(prompt)
 
-        # Generate content
-        config = types.GenerateContentConfig(
-            temperature=0.1,  # Low for consistency
-            top_p=0.9,
-            max_output_tokens=8192,
-            response_mime_type="application/json",
-            thinking_config=types.ThinkingConfig(thinking_budget=0)
-        )
-
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=content_parts,
-            config=config
-        )
-        response_text = response.text
+            config = types.GenerateContentConfig(
+                temperature=0.1,
+                top_p=0.9,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0)
+            )
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=content_parts,
+                config=config
+            )
+            response_text = response.text
         print(f"************************************ {response_text}")
         elapsed = time.time() - start_time
         print(f"   → LLM analysis completed in {elapsed:.2f}s")

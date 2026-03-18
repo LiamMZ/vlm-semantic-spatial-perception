@@ -7,7 +7,7 @@ Maintains a consistent domain representation that evolves as more information is
 
 import asyncio
 import re
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from pathlib import Path
 import json
 
@@ -169,6 +169,7 @@ class PDDLDomainMaintainer:
         model_name: str = "gemini-robotics-er-1.5-preview",
         prompts_config_path: Optional[Union[str, Path]] = None,
         task_analyzer_prompts_path: Optional[Union[str, Path]] = None,
+        llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
     ):
         """
         Initialize domain maintainer.
@@ -179,6 +180,7 @@ class PDDLDomainMaintainer:
             model_name: LLM model to use
             prompts_config_path: Override path to prompts config YAML (defaults to config/pddl_domain_maintainer_prompts.yaml)
             task_analyzer_prompts_path: Override path to prompts config for LLMTaskAnalyzer (defaults to config/llm_task_analyzer_prompts.yaml)
+            llm_client: Optional LLMClient instance; when provided, api_key/model_name are ignored
         """
         if prompts_config_path is None:
             prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
@@ -188,6 +190,7 @@ class PDDLDomainMaintainer:
             api_key=api_key,
             model_name=model_name,
             prompts_config_path=task_analyzer_prompts_path,
+            llm_client=llm_client,
         )
         self.robot_description = self.llm_analyzer.robot_description
         self.prompts_config_path = Path(prompts_config_path)
@@ -1025,24 +1028,36 @@ Note: Actions and predicates should be consistent with the robot's capabilities.
 
         try:
             # Get LLM's analysis and fix
-            # Use fast Flash model for quick PDDL debugging
-            # Increased timeout to 60s for complex domains
-            refinement_model = "gemini-robotics-er-1.5-preview"
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.llm_analyzer.client.models.generate_content,
-                    model=refinement_model,
-                    contents=refinement_prompt,
-                    config={
-                        "response_mime_type": "application/json",
-                        "temperature": 0.1,
-                        "thinking_config": types.ThinkingConfig(thinking_budget=0),
-                    }
-                ),
-                timeout=60.0,
-            )
-            print(response)
-            fix_json = response.text.strip()
+            if self.llm_analyzer._llm_client is not None:
+                from src.llm_interface.base import GenerateConfig
+                cfg = GenerateConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                )
+                llm_response = await asyncio.wait_for(
+                    self.llm_analyzer._llm_client.generate_async(
+                        refinement_prompt, config=cfg
+                    ),
+                    timeout=60.0,
+                )
+                fix_json = llm_response.text.strip()
+            else:
+                refinement_model = "gemini-robotics-er-1.5-preview"
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.llm_analyzer.client.models.generate_content,
+                        model=refinement_model,
+                        contents=refinement_prompt,
+                        config={
+                            "response_mime_type": "application/json",
+                            "temperature": 0.1,
+                            "thinking_config": types.ThinkingConfig(thinking_budget=0),
+                        }
+                    ),
+                    timeout=60.0,
+                )
+                print(response)
+                fix_json = response.text.strip()
             print(f"\n  LLM Response:\n{fix_json[:500]}...\n")
 
             # Parse the JSON response

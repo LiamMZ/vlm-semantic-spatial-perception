@@ -48,6 +48,56 @@ from .utils.task_types import (
 )
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _extract_json(text: str) -> Any:
+    """
+    Parse JSON from raw LLM output, tolerating markdown code fences and
+    prose before/after the JSON block.
+    """
+    # 1. Try bare parse first (clean output)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 2. Extract from ```json ... ``` or ``` ... ``` fences
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # 3. Find the first {...} or [...] block in the text
+    for pattern in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
+        m = re.search(pattern, text)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+    raise json.JSONDecodeError("No valid JSON found in model output", text, 0)
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Recognised PDDL object/parameter types. Callers may extend this set.
+VALID_PDDL_TYPES: Set[str] = {
+    "object", "block", "surface", "robot", "location", "gripper",
+    "item", "container", "tool", "agent",
+}
+
+# Valid type_classification values for L2 predicate entries
+VALID_TYPE_CLASSIFICATIONS: Set[str] = {
+    "sensed", "checked", "derived", "action", "robot_state", "object_state", "external",
+}
+
+# Pattern for lowercase-hyphenated PDDL names
+_PDDL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+
+# ---------------------------------------------------------------------------
 # Module-level helpers (pure functions, reusable in tests)
 # ---------------------------------------------------------------------------
 
@@ -143,8 +193,11 @@ class LayeredDomainGenerator:
         max_layer_retries: int = 2,
         dkb: Optional[Any] = None,
         robot_description: Optional[str] = None,
+        llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
     ) -> None:
-        self.client = genai.Client(api_key=api_key)
+        self._llm_client = llm_client
+        if llm_client is None:
+            self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
         self.max_layer_retries = max_layer_retries
         self.dkb = dkb
@@ -210,6 +263,9 @@ class LayeredDomainGenerator:
             repair_fn=lambda art: self._repair_l3_auto(art, l2),
         )
         print(f"  [L3] Actions: {[a.get('name') for a in l3.actions]}")
+
+        # L2-V5 (deferred): remove predicates unused by any action or goal
+        l2 = self._prune_unused_predicates(l2, l3, l1)
 
         # L4 — Grounding Pre-check (algorithmic)
         l4 = self._run_l4_precheck(l1, l3, scene_objects)
@@ -303,7 +359,7 @@ class LayeredDomainGenerator:
             "VALIDATION_ERRORS": self._format_errors(validation_errors),
         })
         text = await self._call_llm(prompt)
-        data = json.loads(text)
+        data = _extract_json(text)
         return L1GoalArtifact(
             goal_predicates=data.get("goal_predicates", []),
             goal_objects=data.get("goal_objects", []),
@@ -316,29 +372,89 @@ class LayeredDomainGenerator:
         errors: List[str] = []
         known_ids: Set[str] = {o.get("object_id", "") for o in scene_objects}
 
+        # L1-V1: non-empty goal set
         if not artifact.goal_predicates:
-            errors.append("goal_predicates is empty — must have at least one goal")
+            errors.append(
+                "goal_predicates is empty. Re-examine the task description and "
+                "extract at least one desired end-state condition."
+            )
             return errors
 
-        for gp in artifact.goal_predicates:
+        # Track (predicate_name, first_arg) pairs for contradiction detection (L1-V3)
+        # Maps predicate_name -> set of (first_arg, full_literal) to catch duplicates
+        # where the same predicate places the same object in two different locations.
+        pred_first_arg_values: Dict[str, Dict[str, str]] = {}
+
+        for i, gp in enumerate(artifact.goal_predicates):
             gp = gp.strip()
-            # Must be a grounded PDDL literal (no ?-variables)
+
+            # L1-V2a: must start/end with parentheses
+            if not (gp.startswith("(") and gp.endswith(")")):
+                errors.append(
+                    f"Goal {i}: predicate '{gp}' is not a valid PDDL literal (missing parentheses)"
+                )
+                continue
+
+            # L1-V2b: no ?-variables — goals must be grounded
             if "?" in gp:
                 errors.append(
-                    f"Goal predicate contains a variable (must be grounded): {gp}"
+                    f"Goal {i}: predicate contains a variable — goals must be grounded: {gp}"
                 )
-            # Must start/end with parentheses
-            if not (gp.startswith("(") and gp.endswith(")")):
-                errors.append(f"Goal predicate not a valid PDDL literal (missing parens): {gp}")
                 continue
-            # Check arguments are known object_ids (only when scene is non-empty)
-            if known_ids:
-                tokens = re.findall(r"[^\s()]+", gp)
-                for tok in tokens[1:]:  # skip predicate name
-                    if tok not in known_ids:
+
+            tokens = re.findall(r"[^\s()]+", gp)
+            if not tokens:
+                errors.append(f"Goal {i}: empty literal")
+                continue
+
+            pred_name = tokens[0]
+            args = tokens[1:]
+
+            # L1-V2c: predicate name must match PDDL naming pattern
+            if not _PDDL_NAME_RE.match(pred_name):
+                errors.append(
+                    f"Goal {i}: predicate name '{pred_name}' does not match "
+                    f"PDDL naming pattern (lowercase-hyphenated)"
+                )
+
+            # L1-V2d: must have at least one argument
+            if not args:
+                errors.append(
+                    f"Goal {i}: predicate '{pred_name}' has no arguments — "
+                    f"grounded goal predicates must reference at least one object"
+                )
+                continue
+
+            # L1-V2e: no empty-string arguments
+            for j, arg in enumerate(args):
+                if not arg:
+                    errors.append(f"Goal {i}, argument {j}: empty argument in '{gp}'")
+
+            # L1-V3: contradiction detection
+            # If the same predicate asserts the same subject (first arg) goes to
+            # two different second args, that's a contradiction (e.g., on(A, B) + on(A, C))
+            if len(args) >= 2:
+                subject = args[0]
+                location = args[1]
+                key = f"{pred_name}:{subject}"
+                if key in pred_first_arg_values:
+                    prev = pred_first_arg_values[key]
+                    if prev != location:
                         errors.append(
-                            f"Goal predicate argument '{tok}' not in observed objects. "
-                            f"Known: {sorted(known_ids)}"
+                            f"Contradiction: predicate '{pred_name}' asserts '{subject}' "
+                            f"maps to both '{prev}' and '{location}'. "
+                            f"An entity can only satisfy one value per uniqueness-constrained argument."
+                        )
+                else:
+                    pred_first_arg_values[key] = location
+
+            # L1-V4: all arguments reference known scene entities (error when scene non-empty)
+            if known_ids:
+                for arg in args:
+                    if arg and arg not in known_ids:
+                        errors.append(
+                            f"Goal {i}: argument '{arg}' not found in observed scene. "
+                            f"Known objects: {sorted(known_ids)}"
                         )
 
         return errors
@@ -364,7 +480,7 @@ class LayeredDomainGenerator:
             "VALIDATION_ERRORS": self._format_errors(validation_errors),
         })
         text = await self._call_llm(prompt)
-        data = json.loads(text)
+        data = _extract_json(text)
         return L2PredicateArtifact(
             predicate_signatures=data.get("predicate_signatures", []),
             sensed_predicates=data.get("sensed_predicates", []),
@@ -375,26 +491,78 @@ class LayeredDomainGenerator:
         self, artifact: L2PredicateArtifact, l1: L1GoalArtifact
     ) -> List[str]:
         errors: List[str] = []
-        defined_names = {
-            extract_predicate_name_from_literal(sig) or sig.split()[0].lstrip("(")
-            for sig in artifact.predicate_signatures
-        }
 
-        # All goal predicate names must be defined
+        # Build name → parameter list mapping from signatures
+        sig_params: Dict[str, List[str]] = {}
+        for sig in artifact.predicate_signatures:
+            name = extract_predicate_name_from_literal(sig)
+            if name:
+                params = re.findall(r"\?[a-zA-Z][a-zA-Z0-9_-]*(?:\s+-\s+[a-zA-Z][a-zA-Z0-9_-]*)?", sig)
+                sig_params[name] = params
+
+        defined_names: Set[str] = set(sig_params.keys())
+
+        # L2-V1: all goal predicate names must be defined in P
         for gp in l1.goal_predicates:
             name = extract_predicate_name_from_literal(gp)
             if name and name not in defined_names:
                 errors.append(
-                    f"Goal predicate '{name}' from L1 is not defined in predicate vocabulary"
+                    f"Goal predicate '{name}' from L1 is not defined in predicate vocabulary. "
+                    f"Add a definition for it."
                 )
 
-        # Naming compliance
-        name_pattern = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+        # L2-V2: predicate names AND type names must match lowercase-hyphen pattern
+        # Use the raw name from the signature (before lowercasing) to catch uppercase letters
         for sig in artifact.predicate_signatures:
-            name = extract_predicate_name_from_literal(sig)
-            if name and not name_pattern.match(name):
+            raw_name_match = re.match(r"^\(\s*([^\s()]+)", sig.strip())
+            raw_name = raw_name_match.group(1) if raw_name_match else None
+            name = extract_predicate_name_from_literal(sig)  # lowercased version
+            if raw_name and not _PDDL_NAME_RE.match(raw_name):
                 errors.append(
-                    f"Predicate name '{name}' does not follow lowercase-hyphen convention"
+                    f"Predicate name '{raw_name}' does not match PDDL naming pattern (lowercase-hyphenated)"
+                )
+            # Extract inline type annotations (?var - type_name) and validate type names
+            for type_name in re.findall(r"\?\S+\s+-\s+([a-zA-Z][a-zA-Z0-9_-]*)", sig):
+                if not _PDDL_NAME_RE.match(type_name):
+                    errors.append(
+                        f"Predicate '{name}': type name '{type_name}' does not match "
+                        f"PDDL naming pattern (lowercase-hyphenated)"
+                    )
+
+        # L2-V3 (type mismatch part): if checked-X exists, its params must match X's params
+        for sensed_name in artifact.sensed_predicates:
+            checked_name = f"checked-{sensed_name}"
+            if checked_name in defined_names and sensed_name in defined_names:
+                sensed_params = sig_params.get(sensed_name, [])
+                checked_params = sig_params.get(checked_name, [])
+                # Compare arity (type structure comparison is approximate — we only have names)
+                if len(sensed_params) != len(checked_params):
+                    errors.append(
+                        f"Checked variant '{checked_name}' has {len(checked_params)} parameters "
+                        f"but '{sensed_name}' has {len(sensed_params)} — they must match."
+                    )
+
+        # L2-V4: no conflicting type assignments for the same argument variable name
+        # Collect all (var_name, type_name) pairs across all predicates
+        var_types: Dict[str, Set[str]] = {}
+        for sig in artifact.predicate_signatures:
+            for var, type_name in re.findall(r"(\?\S+)\s+-\s+([a-zA-Z][a-zA-Z0-9_-]*)", sig):
+                var_types.setdefault(var, set()).add(type_name.lower())
+        for var, types_seen in var_types.items():
+            if len(types_seen) > 1:
+                errors.append(
+                    f"Argument variable '{var}' has conflicting type assignments across predicates: "
+                    f"{sorted(types_seen)}. Each argument name should map to exactly one type."
+                )
+
+        # L2-V6: every predicate entry must have a valid type_classification (if provided)
+        # type_classifications is an optional dict in the artifact; skip if absent
+        classifications = getattr(artifact, "type_classifications", {}) or {}
+        for pred_name, classification in classifications.items():
+            if classification not in VALID_TYPE_CLASSIFICATIONS:
+                errors.append(
+                    f"Predicate '{pred_name}' has invalid type_classification '{classification}'. "
+                    f"Valid options: {sorted(VALID_TYPE_CLASSIFICATIONS)}"
                 )
 
         return errors
@@ -455,7 +623,7 @@ class LayeredDomainGenerator:
             "VALIDATION_ERRORS": self._format_errors(validation_errors),
         })
         text = await self._call_llm(prompt)
-        data = json.loads(text)
+        data = _extract_json(text)
         return L3ActionArtifact(
             actions=data.get("actions", []),
             sensing_actions=data.get("sensing_actions", []),
@@ -478,31 +646,58 @@ class LayeredDomainGenerator:
                 vocab.add(name)
 
         for action in all_actions:
-            name = action.get("name", "<unnamed>")
-            params = action.get("parameters", [])
+            aname = action.get("name", "<unnamed>")
+            raw_params = action.get("parameters", [])
             pre = action.get("precondition", "")
             eff = action.get("effect", "")
-            declared_vars: Set[str] = set(params)
 
-            # Symbolic closure: all predicates in pre/eff must be in vocabulary
+            # Declared variable names — strip PDDL type annotations (?var - type → ?var)
+            declared_vars: Set[str] = set()
+            for p in raw_params:
+                p = str(p)
+                var = p.split("-")[0].strip() if "-" in p else p.strip()
+                if var.startswith("?"):
+                    declared_vars.add(var)
+
+            # L3-V1: symbolic closure — all predicates in pre/eff must be in vocabulary
             for formula_name, formula in [("precondition", pre), ("effect", eff)]:
                 used = extract_predicates_from_formula(formula)
                 undefined = used - vocab
                 if undefined:
                     errors.append(
-                        f"Action '{name}' {formula_name} uses undefined predicates: {undefined}"
+                        f"Action '{aname}' {formula_name} uses undefined predicates: "
+                        f"{sorted(undefined)}. Available predicates: {sorted(vocab)}"
                     )
 
-            # Parameter consistency: all ?vars must be declared
+            # L3-V2: parameter consistency — all ?vars in pre/eff must be declared
             for formula_name, formula in [("precondition", pre), ("effect", eff)]:
                 used_vars = extract_variables_from_formula(formula)
                 undeclared = used_vars - declared_vars
                 if undeclared:
                     errors.append(
-                        f"Action '{name}' {formula_name} uses undeclared variables: {undeclared}"
+                        f"Action '{aname}' {formula_name} uses undeclared variables: "
+                        f"{sorted(undeclared)}"
                     )
 
-        # Goal achievability: BFS from global predicates
+        # L3-V3: sensing coverage — every checked-* in any precondition must have a producer
+        produced: Set[str] = set()
+        for action in all_actions:
+            produced |= extract_predicates_from_formula(action.get("effect", ""))
+
+        uncovered_checked: Set[str] = set()
+        for action in all_actions:
+            for pred in extract_predicates_from_formula(action.get("precondition", "")):
+                if pred.startswith("checked-") and pred not in produced:
+                    uncovered_checked.add(pred)
+
+        if uncovered_checked:
+            errors.append(
+                f"No action produces the following checked predicates that appear in "
+                f"preconditions: {sorted(uncovered_checked)}. "
+                f"Sensing actions must be added to produce these."
+            )
+
+        # L3-V4: goal achievability — BFS reachability from initial predicates
         global_preds: Set[str] = {
             p.strip("()").split()[0] for p in l1.global_predicates
         } | {
@@ -512,12 +707,24 @@ class LayeredDomainGenerator:
         }
         reachable = bfs_reachable_predicates(all_actions, global_preds | vocab)
 
+        unreachable_goals: List[str] = []
+        no_producer: List[str] = []
         for gp in l1.goal_predicates:
             name = extract_predicate_name_from_literal(gp)
             if name and name not in reachable:
-                errors.append(
-                    f"Goal predicate '{name}' is not reachable via any action's effects"
-                )
+                unreachable_goals.append(name)
+                if not any(
+                    name in extract_predicates_from_formula(a.get("effect", ""))
+                    for a in all_actions
+                ):
+                    no_producer.append(name)
+
+        if unreachable_goals:
+            errors.append(
+                f"Goal predicates unreachable: {sorted(unreachable_goals)}. "
+                f"Predicates with no producing action at all: {sorted(no_producer)}. "
+                f"Add actions that produce these predicates or revise the goal specification."
+            )
 
         return errors
 
@@ -562,6 +769,42 @@ class LayeredDomainGenerator:
                         produced.add(pred)
         return artifact
 
+    def _prune_unused_predicates(
+        self,
+        l2: L2PredicateArtifact,
+        l3: L3ActionArtifact,
+        l1: L1GoalArtifact,
+    ) -> L2PredicateArtifact:
+        """
+        L2-V5 (deferred): remove predicates from L2 that are not referenced by
+        any action formula or goal predicate. Runs after L3 is valid.
+        """
+        used: Set[str] = set()
+
+        # Predicates referenced in goals
+        for gp in l1.goal_predicates:
+            name = extract_predicate_name_from_literal(gp)
+            if name:
+                used.add(name)
+
+        # Predicates referenced in action pre/effects
+        for action in l3.actions + l3.sensing_actions:
+            used |= extract_predicates_from_formula(action.get("precondition", ""))
+            used |= extract_predicates_from_formula(action.get("effect", ""))
+
+        unused = [
+            sig for sig in l2.predicate_signatures
+            if (extract_predicate_name_from_literal(sig) or "") not in used
+        ]
+        if unused:
+            unused_names = [extract_predicate_name_from_literal(s) for s in unused]
+            print(f"  [L2-V5] Removed {len(unused)} unused predicates: {sorted(unused_names)}")
+            l2.predicate_signatures = [
+                sig for sig in l2.predicate_signatures if sig not in unused
+            ]
+
+        return l2
+
     # ------------------------------------------------------------------
     # L4: Grounding Pre-check (algorithmic, no LLM)
     # ------------------------------------------------------------------
@@ -573,38 +816,69 @@ class LayeredDomainGenerator:
         scene_objects: List[Dict],
     ) -> L4GroundingArtifact:
         """
-        Check that actions have at least one candidate object in the scene.
-        Warns (non-blocking) when parameterized actions have no matching objects.
+        Algorithmic feasibility checks (non-blocking — produces warnings, not errors).
+
+        L4-V1: every PDDL type referenced in action parameters has at least one matching
+               object in the scene (by affordance mapping).
+        L4-V2: the scene contains at least one element for each type required by the domain.
+        L4-V3: every entity in goal_objects exists in the scene.
         """
         warnings: List[str] = []
         bindings: Dict[str, str] = {}
 
         all_actions = l3.actions + l3.sensing_actions
         obj_ids = [o.get("object_id", "") for o in scene_objects]
-        graspable_ids = [
-            o.get("object_id", "")
-            for o in scene_objects
-            if "graspable" in o.get("affordances", [])
-        ]
+        affordance_index: Dict[str, List[str]] = {}
+        for obj in scene_objects:
+            for aff in obj.get("affordances", []):
+                affordance_index.setdefault(aff, []).append(obj.get("object_id", ""))
 
+        graspable_ids = affordance_index.get("graspable", [])
+
+        # Collect all PDDL types used in action parameters (from ?var - type annotations)
+        domain_types: Set[str] = set()
         for action in all_actions:
-            name = action.get("name", "")
+            for param in action.get("parameters", []):
+                if isinstance(param, str) and "-" in param:
+                    type_part = param.split("-", 1)[1].strip()
+                    domain_types.add(type_part.lower())
+
+        # L4-V1: every domain type must have at least one scene object
+        # We use a broad match: object type, affordances, or any substring
+        for dtype in domain_types:
+            has_match = any(
+                dtype in o.get("object_type", "").lower() or
+                dtype in [a.lower() for a in o.get("affordances", [])] or
+                dtype == "object"  # "object" is universal
+                for o in scene_objects
+            )
+            if not has_match and obj_ids:
+                warnings.append(
+                    f"L4-V1: No grounding rule / scene element found for PDDL type '{dtype}'. "
+                    f"Available object types: {sorted({o.get('object_type','') for o in scene_objects})}"
+                )
+
+        # L4-V2: parameterized actions need at least one candidate object
+        for action in all_actions:
+            aname = action.get("name", "")
             params = action.get("parameters", [])
             if not params:
                 continue
             if not obj_ids:
                 warnings.append(
-                    f"Action '{name}' has parameters but no objects in scene"
+                    f"L4-V2: Action '{aname}' has parameters but scene has no objects. "
+                    f"Trigger perception update and retry."
                 )
             else:
                 candidates = graspable_ids or obj_ids
-                bindings[name] = candidates[0]
+                bindings[aname] = candidates[0]
 
-        # Check goal objects exist in scene
+        # L4-V3: every goal entity must exist in scene (exploration flag, non-blocking)
         for goal_obj in l1.goal_objects:
             if goal_obj not in obj_ids and obj_ids:
                 warnings.append(
-                    f"Goal object '{goal_obj}' not found in scene objects {obj_ids}"
+                    f"L4-V3: Goal references entity '{goal_obj}' not in scene. "
+                    f"Exploration may be required to locate this object."
                 )
 
         return L4GroundingArtifact(object_bindings=bindings, warnings=warnings)
@@ -697,7 +971,7 @@ class LayeredDomainGenerator:
         # (For blocksworld, objects stacked on other objects)
         if "on" in pred_arities and pred_arities["on"] == 2:
             non_surfaces = [o for o in scene_objects if "support_surface" not in o.get("affordances", [])]
-            already_on = {(a, b) for (p, (a, *_)) in [(lit[0], lit[1]) for lit in true_lits if lit[0] == "on"] for b in lit[1][1:]}
+            already_on = {(lit[1][0], lit[1][1]) for lit in true_lits if lit[0] == "on" and len(lit[1]) >= 2}
             for i, obj1 in enumerate(non_surfaces):
                 for obj2 in non_surfaces:
                     if obj1 is obj2:
@@ -709,6 +983,63 @@ class LayeredDomainGenerator:
                     dy = abs(pos1[1] - pos2[1]) if len(pos1) > 1 else 0
                     if 0 < dz <= 0.15 and dx < 0.08 and dy < 0.08:
                         true_lits.append(("on", [obj1.get("object_id", ""), obj2.get("object_id", "")]))
+
+        # L5-V2 (AUTO-REPAIR): initialise all sensed/external predicates as FALSE
+        # (checked-* already covered above; this handles sensed predicates not yet checked)
+        sensed_names: Set[str] = set()
+        for sig in l2.predicate_signatures:
+            name = extract_predicate_name_from_literal(sig)
+            if name and name in (getattr(l2, "sensed_predicates", None) or []):
+                sensed_names.add(name)
+        # Also treat any predicate whose name is in sensed_predicates list
+        for sname in (l2.sensed_predicates or []):
+            sensed_names.add(sname)
+
+        already_in_false = {lit[0] for lit in false_lits}
+        for sname in sensed_names:
+            if sname in already_in_false or sname in checked_names:
+                continue  # already handled
+            arity = pred_arities.get(sname, 1)
+            if arity == 0:
+                false_lits.append((sname, []))
+            else:
+                for obj in scene_objects:
+                    oid = obj.get("object_id", "")
+                    if arity == 1:
+                        false_lits.append((sname, [oid]))
+
+        # L5-V3 (REJECT): entity args in facts must reference known scene entities
+        all_lits = true_lits + false_lits
+        for pred_name, args in all_lits:
+            for arg in args:
+                if arg and arg not in obj_ids:
+                    print(
+                        f"  [L5-V3] WARNING: fact ({pred_name} {args}) references unknown "
+                        f"entity '{arg}' — not in scene objects {obj_ids}"
+                    )
+                    # Remove the offending literal rather than crash
+                    if (pred_name, args) in true_lits:
+                        true_lits.remove((pred_name, args))
+                    elif (pred_name, args) in false_lits:
+                        false_lits.remove((pred_name, args))
+                    break
+
+        # L5-V5 (WARN): check if initial state already satisfies all goals
+        true_facts: Set[str] = {
+            f"({name} {' '.join(args)})".strip() if args else f"({name})"
+            for name, args in true_lits
+        }
+        goal_already_satisfied = all(
+            gp.strip() in true_facts
+            for gp in l1.goal_predicates
+            if gp.strip()
+        )
+        if goal_already_satisfied and l1.goal_predicates:
+            print(
+                "  [L5-V5] WARNING: Initial state already satisfies all goals. "
+                "The task may be trivially complete. "
+                "Verify goal specification and perception accuracy."
+            )
 
         return L5InitialStateArtifact(true_literals=true_lits, false_literals=false_lits)
 
@@ -722,6 +1053,17 @@ class LayeredDomainGenerator:
         temperature: float = 0.1,
         response_mime_type: str = "application/json",
     ) -> str:
+        if self._llm_client is not None:
+            from src.llm_interface.base import GenerateConfig
+            cfg = GenerateConfig(
+                temperature=temperature,
+                top_p=0.9,
+                max_output_tokens=1024,
+                response_mime_type=response_mime_type,
+            )
+            response = await self._llm_client.generate_async(prompt, config=cfg)
+            return response.text
+
         config = types.GenerateContentConfig(
             temperature=temperature,
             top_p=0.9,

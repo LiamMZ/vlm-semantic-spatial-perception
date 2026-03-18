@@ -75,7 +75,8 @@ class ObjectTracker:
         logger: Optional[logging.Logger] = None,
         task_context: Optional[str] = None,
         available_actions: Optional[List[Dict[str, Any]]] = None,
-        robot: Optional[Any] = None
+        robot: Optional[Any] = None,
+        llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
     ):
         """
         Initialize object tracker.
@@ -127,9 +128,14 @@ class ObjectTracker:
         else:
             self.model_name = model_name
 
-        # Initialize GenAI SDK
-        self.client = genai.Client(api_key=api_key)
-        self.logger.info("ObjectTracker initialized with GenAI SDK")
+        # Initialize LLM client (abstract or genai fallback)
+        self._llm_client = llm_client
+        if llm_client is None:
+            self.client = genai.Client(api_key=api_key)
+            self.logger.info("ObjectTracker initialized with GenAI SDK")
+        else:
+            self.client = None
+            self.logger.info("ObjectTracker initialized with injected LLMClient: %s", type(llm_client).__name__)
 
         self.default_temperature = default_temperature
         self.thinking_budget = thinking_budget
@@ -1475,7 +1481,7 @@ class ObjectTracker:
         Generate content with async streaming support using client.aio.
         Yields text chunks as they arrive.
         """
-        # Check if we can use cached encoded image
+        # Encode image (reuse cache when possible)
         if (self._encoded_image_cache is not None and
             self._cache_image_id == id(image)):
             img_bytes = self._encoded_image_cache
@@ -1484,6 +1490,30 @@ class ObjectTracker:
             image.save(img_byte_arr, format='PNG')
             img_bytes = img_byte_arr.getvalue()
 
+        temp = temperature if temperature is not None else self.default_temperature
+
+        # --- Abstract LLM client path ---
+        if self._llm_client is not None:
+            from src.llm_interface.base import GenerateConfig, ImagePart
+            llm_parts = [ImagePart(data=img_bytes)]
+            if additional_image_parts:
+                # additional_image_parts are genai types — encode to bytes if needed
+                for ap in additional_image_parts:
+                    raw = getattr(ap, "inline_data", None)
+                    if raw is not None:
+                        llm_parts.append(ImagePart(data=raw.data, mime_type=raw.mime_type))
+            llm_parts.append(prompt)
+            cfg = GenerateConfig(
+                temperature=temp,
+                response_mime_type="application/json" if response_schema else None,
+                response_json_schema=response_schema,
+                thinking_budget=self.thinking_budget,
+            )
+            async for chunk in self._llm_client.generate_stream(llm_parts, config=cfg):
+                yield chunk
+            return
+
+        # --- genai client path (original) ---
         if contents is None and content_parts is None:
             content_parts = [types.Part.from_bytes(data=img_bytes, mime_type='image/png')]
             if additional_image_parts:
@@ -1491,7 +1521,6 @@ class ObjectTracker:
             content_parts.append(prompt)
         payload = contents if contents is not None else content_parts
 
-        temp = temperature if temperature is not None else self.default_temperature
         config_kwargs: Dict[str, Any] = {
             "temperature": temp,
             "thinking_config": types.ThinkingConfig(
@@ -1504,7 +1533,6 @@ class ObjectTracker:
 
         config = types.GenerateContentConfig(**config_kwargs)
 
-        # Use async streaming via client.aio
         stream = await self.client.aio.models.generate_content_stream(
             model=self.model_name,
             contents=payload,
@@ -1515,27 +1543,40 @@ class ObjectTracker:
                 yield chunk.text
 
     def _parse_json_response(self, response_text: str) -> Dict[str, Any]:
-        """Parse JSON response from LLM."""
+        """Parse JSON response from LLM, tolerating thinking tokens and markdown fences."""
         import json
+        import re
 
+        text = response_text
+
+        # Strip <think>...</think> blocks (Qwen3 thinking models)
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+
+        # Try bare parse
         try:
-            # Handle markdown code blocks
-            if "```json" in response_text:
-                start = response_text.find("```json") + 7
-                end = response_text.find("```", start)
-                response_text = response_text[start:end]
-            elif "```" in response_text:
-                start = response_text.find("```") + 3
-                end = response_text.find("```", start)
-                response_text = response_text[start:end]
-            return json.loads(response_text.strip())
-        except json.JSONDecodeError as e:
-            import traceback
-            traceback.print_exc()
-            print(response_text)
-            self.logger.warning("Failed to parse JSON: %s", e)
-            self.logger.debug("Response snippet: %s", response_text[:500])
-            return {}
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Extract from ```json ... ``` or ``` ... ``` fences
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if fenced:
+            try:
+                return json.loads(fenced.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+
+        # Find first { } or [ ] block
+        for pattern in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
+            m = re.search(pattern, text)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    pass
+
+        self.logger.warning("Failed to parse JSON from response: %s", text[:200])
+        return {}
 
     async def aclose(self):
         """Close async client resources."""
@@ -1574,7 +1615,8 @@ class ContinuousObjectTracker(ObjectTracker):
         update_interval: float = 1.0,
         on_detection_complete: Optional[Callable[[int], None]] = None,
         logger: Optional[logging.Logger] = None,
-        robot: Optional[Any] = None
+        robot: Optional[Any] = None,
+        llm_client: Optional[Any] = None,
     ):
         super().__init__(
             api_key=api_key,
@@ -1584,7 +1626,8 @@ class ContinuousObjectTracker(ObjectTracker):
             enable_affordance_caching=enable_affordance_caching,
             fast_mode=fast_mode,
             logger=logger,
-            robot=robot
+            robot=robot,
+            llm_client=llm_client,
         )
         self.update_interval = update_interval
         self.on_detection_complete = on_detection_complete
