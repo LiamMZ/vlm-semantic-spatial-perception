@@ -141,35 +141,48 @@ class PrimitiveExecutor:
         # Translate each primitive
         for idx, primitive in enumerate(plan.primitives):
             self.logger.debug(
-                "[prepare_plan] [%d/%d] %s parameters: %s",
+                "[prepare_plan] [%d/%d] %s parameters: %s references: %s",
                 idx + 1,
                 len(plan.primitives),
                 primitive.name,
                 primitive.parameters,
+                primitive.references,
             )
 
             pixel = primitive.parameters.pop("target_pixel_yx", None)
             if pixel is not None:
                 if artifacts.depth is None or artifacts.intrinsics is None:
-                    raise RuntimeError(
-                        f"{primitive.name}: unable to back-project normalized {pixel} (missing depth/intrinsics)"
+                    self.logger.warning(
+                        "%s: cannot back-project pixel %s (missing depth/intrinsics) — "
+                        "falling back to registry position via references.object_id",
+                        primitive.name, pixel,
                     )
+                else:
+                    coords = [float(pixel[0]), float(pixel[1])]
+                    point = compute_3d_position(coords, artifacts.depth, artifacts.intrinsics)
+                    if point is None:
+                        self.logger.warning(
+                            "%s: back-projection returned no point for %s — "
+                            "falling back to registry position via references.object_id",
+                            primitive.name, pixel,
+                        )
+                    else:
+                        depth_offset = float(primitive.parameters.get("depth_offset_m", 0.0) or 0.0)
+                        if depth_offset:
+                            point = [point[0], point[1], point[2] + depth_offset]
+                        primitive.parameters["target_position"] = point
+                        primitive.parameters.pop("depth_offset_m", None)
 
-                coords = [float(pixel[0]), float(pixel[1])]
-                point = compute_3d_position(coords, artifacts.depth, artifacts.intrinsics)
-                if point is None:
-                    raise RuntimeError(f"{primitive.name}: back-projection returned no point for {pixel}")
-
-                depth_offset = float(primitive.parameters.get("depth_offset_m", 0.0) or 0.0)
-                if depth_offset:
-                    point = [point[0], point[1], point[2] + depth_offset]
-
-                primitive.parameters["target_position"] = [
-                    round(float(point[0]), 6),
-                    round(float(point[1]), 6),
-                    round(float(point[2]), 6),
-                ]
-                primitive.parameters.pop("depth_offset_m", None)
+            # If no target_position yet, inject point_label from references so the
+            # primitives implementation can resolve the position from the registry.
+            if "target_position" not in primitive.parameters:
+                obj_id = primitive.references.get("object_id")
+                if obj_id and "point_label" not in primitive.parameters:
+                    primitive.parameters["point_label"] = obj_id
+                    self.logger.debug(
+                        "%s: injected point_label=%r from references.object_id",
+                        primitive.name, obj_id,
+                    )
 
             # Transform coordinates to base frame
             if cam_pose:

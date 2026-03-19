@@ -28,7 +28,9 @@ Optional flags (set as env vars):
     DEMO_TASK          Task description (default: "Put the red block on the blue block")
     DEMO_DETECT_CYCLES Max detection cycles before forcing solve (default: 3)
     DEMO_STEP_PAUSE    Seconds to pause at each milestone (default: 2)
-    DEMO_OUTPUT_DIR    Output directory for PDDL files and state (default: outputs/sim_demo)
+    DEMO_OUTPUT_DIR    Base output directory (default: outputs/sim_demo).
+                       Each run is saved under <base>/runs/<YYYYMMDD_HHMMSS>/.
+                       A symlink <base>/runs/latest always points to the most recent run.
 
 GSAM2-specific env vars (only used when USE_GSAM2=1):
     SAM2_CFG           SAM2 config file (default: configs/sam2.1/sam2.1_hiera_l.yaml)
@@ -42,6 +44,7 @@ GSAM2-specific env vars (only used when USE_GSAM2=1):
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 import sys
@@ -94,7 +97,7 @@ def _setup_logging() -> logging.Logger:
     root.addHandler(h)
     root.setLevel(logging.INFO)
     # Silence noisy sub-loggers
-    for noisy in ("urllib3", "httpx", "httpcore", "google", "PIL"):
+    for noisy in ("urllib3", "httpx", "httpcore", "google", "PIL", "models"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     return logging.getLogger("sim_demo")
 
@@ -151,13 +154,13 @@ SCENE_OBJECTS = [
         "object_id":   "red_block_1",
         "object_type": "block",
         "affordances": ["graspable", "stackable"],
-        "position_3d": [0.3, 0.0, 0.12],
+        "position_3d": [0.3, 0.0, 0.04],
     },
     {
         "object_id":   "blue_block_1",
         "object_type": "block",
         "affordances": ["graspable", "stackable"],
-        "position_3d": [0.5, 0.0, 0.12],
+        "position_3d": [0.5, 0.0, 0.04],
     },
     {
         "object_id":   "table_1",
@@ -169,7 +172,10 @@ SCENE_OBJECTS = [
 
 MAX_DETECT_CYCLES  = int(os.getenv("DEMO_DETECT_CYCLES", "3"))
 STEP_PAUSE         = float(os.getenv("DEMO_STEP_PAUSE", "2"))
-OUTPUT_DIR         = Path(os.getenv("DEMO_OUTPUT_DIR", "outputs/sim_demo"))
+
+_RUN_ID = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+_BASE_OUTPUT_DIR   = Path(os.getenv("DEMO_OUTPUT_DIR", "outputs/sim_demo"))
+OUTPUT_DIR         = _BASE_OUTPUT_DIR / "runs" / _RUN_ID
 
 
 # ---------------------------------------------------------------------------
@@ -235,26 +241,48 @@ class DetectionTracker:
 
 async def run_demo() -> int:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    use_hf = bool(HF_MODEL) and not USE_GSAM2  # HF is default unless GSAM2 is selected
+    use_hf = bool(HF_MODEL)  # HF_MODEL controls planning LLM; independent of perception backend
+
+    # -- Timing bookkeeping --------------------------------------------------
+    _timings: Dict[str, float] = {}
+    _t_total = time.monotonic()
+
+    def _tick(label: str) -> float:
+        """Start a timer; returns t0 for use with _tock."""
+        return time.monotonic()
+
+    def _tock(label: str, t0: float) -> float:
+        """Record elapsed time for a stage."""
+        elapsed = time.monotonic() - t0
+        _timings[label] = elapsed
+        return elapsed
 
     _banner("Orchestrator Simulation Demo")
     _info("Task", TASK)
     _info("Scene", [o["object_id"] for o in SCENE_OBJECTS])
     _info("Output", OUTPUT_DIR)
     if USE_GSAM2:
-        _info("Perception", f"GSAM2 (RAM+ + GroundingDINO + SAM2)")
+        _info("Perception", "GSAM2 (RAM+ + GroundingDINO + SAM2)")
         _info("SAM2 ckpt", GSAM2_SAM2_CKPT or "(not set — will fail)")
         _info("RAM+ ckpt", GSAM2_RAM_CKPT or "(not set — will fail)")
     else:
         _info("Perception", f"HuggingFace ({HF_MODEL})" if use_hf else "Google GenAI (gemini-2.0-flash)")
+    _info("Planning LLM", f"HuggingFace ({HF_MODEL})" if use_hf else "Google GenAI (gemini-2.0-flash)")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Keep a "latest" symlink pointing to this run
+    _latest = _BASE_OUTPUT_DIR / "runs" / "latest"
+    if _latest.is_symlink() or _latest.exists():
+        _latest.unlink()
+    _latest.symlink_to(OUTPUT_DIR.resolve())
+    _info("Run ID", _RUN_ID)
+
     # ------------------------------------------------------------------
-    # 0. Build LLM client (skipped for GSAM2 backend)
+    # 0. Build LLM client for planning (always, independent of perception backend)
     # ------------------------------------------------------------------
     llm_client = None
 
-    if not USE_GSAM2:
+    if True:
         from src.llm_interface import GoogleGenAIClient, Qwen3VLClient
 
         if use_hf:
@@ -263,12 +291,14 @@ async def run_demo() -> int:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             _info("Model", HF_MODEL)
             _info("Device", device)
+            _t0 = _tick("model_load")
             llm_client = Qwen3VLClient(
                 model=HF_MODEL,
                 device="auto" if device == "cuda" else device,
                 load_in_4bit=device == "cuda",
                 model_kwargs={"max_memory": {0: "6GiB", "cpu": "16GiB"}} if device == "cuda" else None,
             )
+            _tock("model_load", _t0)
             _ok(f"Qwen3-VL model loaded on {device}")
         else:
             if not api_key:
@@ -370,8 +400,9 @@ async def run_demo() -> int:
         ),
     )
 
-    backend_label = "GSAM2" if USE_GSAM2 else ("HuggingFace" if use_hf else "GenAI")
-    _ok(f"Config built — use_layered_generation=True, backend={backend_label}, solver=auto")
+    perception_label = "GSAM2" if USE_GSAM2 else ("HuggingFace" if use_hf else "GenAI")
+    planning_label   = "HuggingFace" if use_hf else "GenAI"
+    _ok(f"Config built — use_layered_generation=True, perception={perception_label}, planning={planning_label}, solver=auto")
     _info("state_dir", config.state_dir)
     _info("dkb_dir",   config.dkb_dir)
 
@@ -399,6 +430,12 @@ async def run_demo() -> int:
         from src.perception import GSAM2ContinuousObjectTracker
 
         gsam2_device = "cuda" if torch.cuda.is_available() else "cpu"
+        _info("Device", gsam2_device)
+        _info("Loading", "GroundingDINO + SAM2 (this may take 30-60s)…")
+        log.info("Loading GSAM2 models — SAM2 ckpt: %s", GSAM2_SAM2_CKPT)
+        if GSAM2_RAM_CKPT:
+            log.info("RAM+ ckpt: %s", GSAM2_RAM_CKPT)
+        _t0_gsam2 = _tick("gsam2_model_load")
         gsam2_tracker = GSAM2ContinuousObjectTracker(
             sam2_model_cfg=GSAM2_SAM2_CFG,
             sam2_ckpt_path=GSAM2_SAM2_CKPT,
@@ -411,9 +448,11 @@ async def run_demo() -> int:
             on_detection_complete=detect_tracker.on_detection,
             logger=log.getChild("GSAM2Tracker"),
         )
+        _tock("gsam2_model_load", _t0_gsam2)
         # Replace the LLM-based tracker with the GSAM2 tracker
         orchestrator.tracker = gsam2_tracker
-        _ok(f"GSAM2 tracker active (SAM2 + {'RAM+' if GSAM2_RAM_CKPT else 'no tagger'}) on {gsam2_device}")
+        _ok(f"GSAM2 tracker active (SAM2 + {'RAM+' if GSAM2_RAM_CKPT else 'no tagger'}) on {gsam2_device} "
+            f"({_timings['gsam2_model_load']:.1f}s)")
 
     # Override frame provider with our sim camera
     orchestrator.tracker.set_frame_provider(frame_provider)
@@ -427,9 +466,24 @@ async def run_demo() -> int:
     _section("Initial perception pass")
     env.set_status("Detecting scene objects…", color=[0.8, 0.6, 0.2])
     orchestrator.current_task = TASK  # needed by tracker before domain generation
+    orchestrator.tracker.set_task_context(task_description=TASK)  # inject task hints before detection
+
+    # Seed registry with known sim objects so L5 can compute on() facts via position proximity
+    from src.perception.object_registry import DetectedObject
+    for sim_obj in SCENE_OBJECTS:
+        seed = DetectedObject(
+            object_id=sim_obj["object_id"],
+            object_type=sim_obj["object_type"],
+            affordances=set(sim_obj.get("affordances", [])),
+            position_3d=np.array(sim_obj["position_3d"]) if sim_obj.get("position_3d") else None,
+        )
+        orchestrator.tracker.registry.add_object(seed)
+
+    _t0 = _tick("perception_prepass")
     await orchestrator.start_detection()
     ready = await detect_tracker.wait_until_ready(timeout=60.0)
     await orchestrator.stop_detection()
+    _tock("perception_prepass", _t0)
     pre_detected = orchestrator.get_detected_objects()
     if pre_detected:
         _ok(f"Pre-detected {len(pre_detected)} object(s): {[o.object_id for o in pre_detected]}")
@@ -443,15 +497,15 @@ async def run_demo() -> int:
     env.set_status("L1–L5 domain generation…", color=[0.3, 0.8, 1.0])
     log.info("Task: %s", TASK)
 
-    t0 = time.monotonic()
+    _t0 = _tick("domain_generation")
     # Pass the initial sim camera frame as environment context
     task_analysis = await orchestrator.process_task_request(
         TASK,
         environment_image=color,
     )
-    dt = time.monotonic() - t0
+    _tock("domain_generation", _t0)
 
-    _ok(f"Domain generated in {dt:.1f}s")
+    _ok(f"Domain generated in {_timings['domain_generation']:.1f}s")
     _info("goal_predicates",    task_analysis.goal_predicates)
     _info("goal_objects",       task_analysis.goal_objects)
     _info("required_actions",   [a.get("name") for a in task_analysis.required_actions])
@@ -467,6 +521,7 @@ async def run_demo() -> int:
     # ------------------------------------------------------------------
     _section("Starting continuous VLM detection")
     env.set_status("Detecting objects…", color=[0.3, 0.8, 1.0])
+    _t0 = _tick("continuous_detection")
     await orchestrator.start_detection()
     _ok(f"Detection started — waiting for {MAX_DETECT_CYCLES} cycles")
 
@@ -475,6 +530,7 @@ async def run_demo() -> int:
         _warn("Detection timeout — proceeding with whatever was observed")
 
     await orchestrator.stop_detection()
+    _tock("continuous_detection", _t0)
 
     detected = orchestrator.get_detected_objects()
     _ok(f"Detection complete — {len(detected)} objects in registry")
@@ -503,10 +559,12 @@ async def run_demo() -> int:
     _section("Generating PDDL domain & problem files")
     env.set_status("Generating PDDL…", color=[0.9, 0.7, 0.2])
 
+    _t0 = _tick("pddl_generation")
     pddl_paths = await orchestrator.generate_pddl_files(
         output_dir=OUTPUT_DIR / "pddl",
         set_goals=True,
     )
+    _tock("pddl_generation", _t0)
     domain_path  = pddl_paths.get("domain_path")
     problem_path = pddl_paths.get("problem_path")
     _ok(f"Domain  → {domain_path}")
@@ -527,24 +585,94 @@ async def run_demo() -> int:
     _section("Solving PDDL plan (with refinement)")
     env.set_status("Solving…", color=[0.9, 0.7, 0.2])
 
-    t0 = time.monotonic()
+    _t0 = _tick("pddl_solving")
     result = await orchestrator.solve_and_plan_with_refinement(
         output_dir=OUTPUT_DIR / "pddl",
         wait_for_objects=False,   # objects already detected above
     )
-    dt = time.monotonic() - t0
+    _tock("pddl_solving", _t0)
 
     _section("Solver Result")
     _info("success",      result.success)
     _info("plan_length",  result.plan_length)
     _info("search_time",  f"{result.search_time:.2f}s" if result.search_time else "n/a")
-    _info("solve_total",  f"{dt:.2f}s")
+    _info("solve_total",  f"{_timings['pddl_solving']:.2f}s")
 
     if result.success:
         _ok("Plan found!")
         for i, step in enumerate(result.plan, 1):
             _info(f"  step {i}", step)
         env.set_status(f"✓ Plan: {result.plan_length} steps", color=[0.2, 0.9, 0.2])
+
+        # ------------------------------------------------------------------
+        # 8b. Skill decomposition + PyBullet execution
+        # ------------------------------------------------------------------
+        _section("Skill decomposition & execution")
+
+        from src.primitives.skill_decomposer import SkillDecomposer
+        from src.primitives.primitive_executor import PrimitiveExecutor
+        from src.kinematics.sim.pybullet_primitives import PyBulletPrimitives
+
+        pybullet_primitives = PyBulletPrimitives(
+            env=env,
+            registry=orchestrator.tracker.registry,
+        )
+        executor = PrimitiveExecutor(
+            primitives=pybullet_primitives,
+            perception_pool_dir=OUTPUT_DIR / "perception_pool",
+        )
+        decomposer = SkillDecomposer(
+            api_key=api_key or os.getenv("GOOGLE_API_KEY", ""),
+            orchestrator=orchestrator,
+        )
+
+        _step_decompose_times: List[float] = []
+        _step_execute_times:   List[float] = []
+
+        _t0_exec_total = _tick("execution_total")
+        for i, step in enumerate(result.plan, 1):
+            parts = step.strip("()").split()
+            if not parts:
+                continue
+            action_name = parts[0]
+            # Build parameter dict: PDDL params are positional — use generic keys
+            param_keys = [f"param{j+1}" for j in range(len(parts) - 1)]
+            parameters = dict(zip(param_keys, parts[1:]))
+            # Also expose the raw object ids for the decomposer's world-state lookup
+            if parts[1:]:
+                parameters["object_ids"] = parts[1:]
+
+            env.set_status(f"Step {i}/{result.plan_length}: {step}", color=[0.3, 0.8, 1.0])
+            _info(f"step {i}", step)
+            _info("  decomposing", action_name)
+
+            try:
+                _t0_dec = time.monotonic()
+                skill_plan = decomposer.plan(action_name, parameters)
+                _dt_dec = time.monotonic() - _t0_dec
+                _step_decompose_times.append(_dt_dec)
+                _ok(f"  → {len(skill_plan.primitives)} primitive(s): "
+                    f"{[pc.name for pc in skill_plan.primitives]} ({_dt_dec:.2f}s)")
+
+                world_state = orchestrator.get_world_state_snapshot() if hasattr(orchestrator, "get_world_state_snapshot") else {}
+                _t0_run = time.monotonic()
+                exec_result = executor.execute_plan(skill_plan, world_state=world_state)
+                _dt_run = time.monotonic() - _t0_run
+                _step_execute_times.append(_dt_run)
+                _ok(f"  executed={exec_result.executed} ({_dt_run:.2f}s)")
+
+            except Exception as exc:
+                _warn(f"  Skill decomposition/execution failed: {exc}")
+
+            env.step(STEP_PAUSE)
+
+        _tock("execution_total", _t0_exec_total)
+        _timings["skill_decomposition"] = sum(_step_decompose_times)
+        _timings["primitive_execution"]  = sum(_step_execute_times)
+
+        env.set_status("✓ Execution complete", color=[0.2, 0.9, 0.2])
+        env.step(STEP_PAUSE)
+
     else:
         _warn(f"No plan found: {result.error_message}")
         env.set_status("✗ No plan found", color=[1.0, 0.3, 0.3])
@@ -567,15 +695,58 @@ async def run_demo() -> int:
     env.stop()
 
     # ------------------------------------------------------------------
-    # Summary
+    # Summary + Timing report
     # ------------------------------------------------------------------
+    _t_total_elapsed = time.monotonic() - _t_total
+
     _banner("Demo Complete")
     _info("Task",         TASK)
+    _info("Run ID",       _RUN_ID)
     _info("Plan success", result.success)
     if result.success:
         _info("Plan length", result.plan_length)
         _info("Plan",        result.plan)
     _info("Output dir",  OUTPUT_DIR)
+
+    # Timing breakdown
+    _TIMING_LABELS = [
+        ("model_load",           "Model load (HF)"),
+        ("gsam2_model_load",     "Model load (GSAM2)"),
+        ("perception_prepass",   "Perception pre-pass"),
+        ("domain_generation",    "Domain generation (L1–L5)"),
+        ("continuous_detection", "Continuous detection"),
+        ("pddl_generation",      "PDDL file generation"),
+        ("pddl_solving",         "PDDL solving (+ refinement)"),
+        ("skill_decomposition",  "Skill decomposition (total)"),
+        ("primitive_execution",  "Primitive execution (total)"),
+        ("execution_total",      "Execution phase (total)"),
+    ]
+
+    print()
+    print(_BOLD + _BLUE + "── Timing Report " + "─" * 55 + _RESET)
+    col_w = 34
+    for key, label in _TIMING_LABELS:
+        if key in _timings:
+            t = _timings[key]
+            pct = 100.0 * t / _t_total_elapsed if _t_total_elapsed > 0 else 0.0
+            print(f"  {_YELLOW}{label:<{col_w}}{_RESET} {t:6.2f}s  ({pct:4.1f}%)")
+
+    # Derived totals
+    planning_keys = {"domain_generation", "pddl_generation", "pddl_solving"}
+    perception_keys = {"perception_prepass", "continuous_detection"}
+    t_planning   = sum(_timings.get(k, 0.0) for k in planning_keys)
+    t_perception = sum(_timings.get(k, 0.0) for k in perception_keys)
+    t_execution  = _timings.get("execution_total", 0.0)
+
+    print(_BOLD + _BLUE + "  " + "─" * 55 + _RESET)
+    for label, t in [
+        ("Total perception time",  t_perception),
+        ("Total planning time",    t_planning),
+        ("Total execution time",   t_execution),
+        ("Total task time",        _t_total_elapsed),
+    ]:
+        pct = 100.0 * t / _t_total_elapsed if _t_total_elapsed > 0 else 0.0
+        print(f"  {_BOLD}{label:<{col_w}}{_RESET} {t:6.2f}s  ({pct:4.1f}%)")
 
     return 0 if result.success else 1
 

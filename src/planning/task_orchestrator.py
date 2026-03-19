@@ -1143,11 +1143,16 @@ class TaskOrchestrator:
             for obj in all_objects:
                 # Add object instance if not already present
                 if obj.object_id not in self.pddl.object_instances:
+                    obj_type = obj.object_type
+                    # Auto-register unknown types as children of 'object'
+                    if obj_type not in self.pddl.object_types:
+                        await self.pddl.add_object_type_async(obj_type, parent="object")
+                        self.logger.debug(f"      Auto-registered type '{obj_type}' (parent: object)")
                     await self.pddl.add_object_instance_async(
                         obj.object_id,
-                        "object"
+                        obj_type
                     )
-                    self.logger.info(f"      Added: {obj.object_id} (object)")
+                    self.logger.info(f"      Added: {obj.object_id} ({obj_type})")
 
             # Add global predicates to initial state
             if self.maintainer:
@@ -1161,6 +1166,40 @@ class TaskOrchestrator:
                             self.logger.info(f"      Added global predicate: {pred_name}")
                         except ValueError as e:
                             self.logger.warning(f"      Failed to add global predicate '{pred_name}': {e}")
+
+                # Apply L5 initial state literals first (handles on, above, etc.)
+                # These use position_3d proximity from the scene at generation time.
+                added_initial: set = set()
+                l5 = getattr(self.maintainer, "_l5_artifact", None)
+                if l5 and l5.true_literals:
+                    for pred_name, args in l5.true_literals:
+                        if args and not all(a in self.pddl.object_instances for a in args):
+                            continue
+                        key = (pred_name, tuple(args))
+                        if key not in added_initial:
+                            try:
+                                await self.pddl.add_initial_literal_async(pred_name, args, negated=False)
+                                added_initial.add(key)
+                            except ValueError:
+                                pass
+
+                # Re-derive unary affordance predicates from live detected objects.
+                # This catches cases where L5 was built before perception ran (empty scene)
+                # or where domain refinement re-added predicates that L2-V5 had pruned.
+                domain_predicates = set(self.pddl.predicates.keys())
+                for obj in all_objects:
+                    for affordance in (obj.affordances or set()):
+                        pred_name = affordance.replace(" ", "-").replace("_", "-")
+                        if pred_name in domain_predicates:
+                            key = (pred_name, (obj.object_id,))
+                            if key not in added_initial:
+                                try:
+                                    await self.pddl.add_initial_literal_async(pred_name, [obj.object_id], negated=False)
+                                    added_initial.add(key)
+                                except ValueError:
+                                    pass
+                if added_initial:
+                    self.logger.info(f"  • Added {len(added_initial)} initial literals from L5 + affordances")
 
         # Set goals if requested
         if set_goals:

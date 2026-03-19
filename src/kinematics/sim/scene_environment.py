@@ -47,7 +47,7 @@ _SIM_DIR = Path(__file__).parent
 _DEFAULT_URDF = _SIM_DIR / "xarm7.urdf"
 
 # Camera aimed at the work surface in front of the robot
-CAMERA_AIM_JOINTS = [0.100085, -1.407677, -0.098652, 1.314592, 0.0, 1.856536, -0.112296]
+CAMERA_AIM_JOINTS = [0.100085, -1.407677, -0.098652, 1.314592, 0.0, 2.0, -0.112296]
 
 # Default colours per object_id; fallback is grey
 OBJECT_COLORS: Dict[str, List[float]] = {
@@ -94,7 +94,9 @@ class SceneEnvironment:
         self._robot_id: Optional[int] = None
         self._obj_ids: Dict[str, int] = {}
         self._text_ids: List[int] = []
-        self._movable_joints: List[int] = []
+        self._movable_joints: List[int] = []   # all revolute/prismatic joints
+        self._arm_joints: List[int] = []        # arm-only (first 7 revolute)
+        self._gripper_joints: List[int] = []    # gripper finger joints (rest)
         self._link_name_to_index: Dict[str, int] = {}
         self._object_colors: Dict[str, List[float]] = {}
 
@@ -150,11 +152,12 @@ class SceneEnvironment:
     # ------------------------------------------------------------------
 
     def set_robot_joints(self, joint_positions: List[float]) -> None:
-        """Set the robot to the given joint configuration (radians)."""
+        """Set the arm joint configuration (radians). Gripper joints are unchanged."""
         if not PYBULLET_AVAILABLE or self._robot_id is None:
             return
         c = self._client
-        for i, joint_idx in enumerate(self._movable_joints):
+        joints = self._arm_joints if self._arm_joints else self._movable_joints
+        for i, joint_idx in enumerate(joints):
             if i < len(joint_positions):
                 p.resetJointState(self._robot_id, joint_idx, float(joint_positions[i]),
                                   physicsClientId=c)
@@ -198,6 +201,26 @@ class SceneEnvironment:
             )
 
         logger.info("Added %d scene objects (client=%d)", len(scene_objects), c)
+
+    def move_object(self, object_id: str, position: List[float]) -> bool:
+        """Teleport a scene object to a new position. Returns True if found."""
+        if not PYBULLET_AVAILABLE or self._client is None:
+            return False
+        body = self._obj_ids.get(object_id)
+        if body is None:
+            return False
+        p.resetBasePositionAndOrientation(body, position, [0, 0, 0, 1], physicsClientId=self._client)
+        return True
+
+    def get_object_position(self, object_id: str) -> Optional[List[float]]:
+        """Return current [x, y, z] position of a scene object, or None if not found."""
+        if not PYBULLET_AVAILABLE or self._client is None:
+            return None
+        body = self._obj_ids.get(object_id)
+        if body is None:
+            return None
+        pos, _ = p.getBasePositionAndOrientation(body, physicsClientId=self._client)
+        return list(pos)
 
     def highlight_objects(self, object_ids: List[str], duration: float = 0.3) -> None:
         """Briefly flash objects yellow then restore their original colour."""
@@ -339,12 +362,13 @@ class SceneEnvironment:
     # ------------------------------------------------------------------
 
     def get_robot_joint_state(self) -> Optional[np.ndarray]:
-        """Return current simulated joint positions (radians)."""
+        """Return current arm joint positions (radians). Gripper joints excluded."""
         if not PYBULLET_AVAILABLE or self._robot_id is None:
             return None
         c = self._client
+        joints = self._arm_joints if self._arm_joints else self._movable_joints
         angles = []
-        for joint_idx in self._movable_joints:
+        for joint_idx in joints:
             state = p.getJointState(self._robot_id, joint_idx, physicsClientId=c)
             angles.append(state[0])
         return np.array(angles, dtype=float)
@@ -406,6 +430,7 @@ class SceneEnvironment:
     def _build_joint_map(self) -> None:
         c = self._client
         num = p.getNumJoints(self._robot_id, physicsClientId=c)
+        _ARM_JOINT_COUNT = 7   # xArm7 has 7 arm joints; remaining are gripper
         for i in range(num):
             info = p.getJointInfo(self._robot_id, i, physicsClientId=c)
             link_name  = info[12].decode("utf-8")
@@ -413,3 +438,7 @@ class SceneEnvironment:
             self._link_name_to_index[link_name] = i
             if joint_type in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
                 self._movable_joints.append(i)
+                if len(self._arm_joints) < _ARM_JOINT_COUNT:
+                    self._arm_joints.append(i)
+                else:
+                    self._gripper_joints.append(i)
