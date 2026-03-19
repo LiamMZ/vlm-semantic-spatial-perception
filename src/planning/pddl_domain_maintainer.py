@@ -283,6 +283,7 @@ class PDDLDomainMaintainer:
         self.current_task = artifact.task_description
         self.task_analysis = artifact.to_task_analysis()
         self.goal_object_types = set(self.task_analysis.goal_objects)
+        self._l5_artifact = artifact.l5  # stash for use in generate_pddl_files
         await self._initialize_domain_from_analysis()
         self.domain_version += 1
         return self.task_analysis

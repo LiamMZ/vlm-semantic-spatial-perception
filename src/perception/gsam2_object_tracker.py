@@ -19,6 +19,69 @@ from .object_tracker import ContinuousObjectTracker, ObjectTracker, TrackingStat
 from .utils.coordinates import compute_3d_position, pixel_to_normalized
 from ..utils.logging_utils import get_structured_logger
 
+import re
+from typing import Optional as _Optional
+
+# Simple stopwords to skip when extracting object hints from task text
+_STOPWORDS = frozenset({
+    "a", "an", "the", "put", "place", "move", "pick", "up", "on", "onto",
+    "in", "into", "to", "from", "and", "or", "of", "with", "get", "take",
+    "stack", "grasp", "bring", "is", "are", "it", "its", "that", "this",
+})
+
+
+def _transform_cam_to_world(
+    cam_pos: np.ndarray,
+    robot_state: _Optional[dict],
+) -> _Optional[np.ndarray]:
+    """
+    Transform a camera-frame 3-D point to world/robot-base frame.
+
+    Reads the camera transform from robot_state["camera"] which must contain:
+      - "position":        [x, y, z]  camera origin in world frame
+      - "quaternion_xyzw": [qx, qy, qz, qw]  camera orientation in world frame
+
+    Returns the world-frame position, or None if the transform is unavailable.
+    """
+    if robot_state is None:
+        return None
+    cam_tf = robot_state.get("camera")
+    if cam_tf is None:
+        return None
+    try:
+        from scipy.spatial.transform import Rotation
+        cam_origin = np.array(cam_tf["position"], dtype=float)
+        cam_rot    = Rotation.from_quat(cam_tf["quaternion_xyzw"])
+        return cam_rot.apply(cam_pos) + cam_origin
+    except Exception:
+        return None
+
+
+def _extract_noun_phrases(text: str) -> List[str]:
+    """
+    Extract candidate object noun phrases from a task description.
+
+    Uses a simple adjective+noun pattern (e.g. "red block", "blue block")
+    without requiring NLP dependencies.  Returns lowercased multi-word phrases
+    and single content words that are not stopwords.
+    """
+    words = re.findall(r"[a-zA-Z]+", text.lower())
+    phrases: List[str] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w in _STOPWORDS:
+            i += 1
+            continue
+        # If next word is also a content word, emit a two-word phrase
+        if i + 1 < len(words) and words[i + 1] not in _STOPWORDS:
+            phrases.append(f"{w} {words[i + 1]}")
+            i += 2
+        else:
+            phrases.append(w)
+            i += 1
+    return phrases
+
 
 def _build_ram_tagger(ckpt_path: str, image_size: int, device: str):
     """Load RAM+ tagger and return a callable tag(rgb_np) -> (prompt_str, raw_str)."""
@@ -83,6 +146,8 @@ class GSAM2ObjectTracker:
         self.tag_interval = tag_interval
         self.registry = DetectedObjectRegistry()
 
+        self.logger.info("Loading GroundingDINO (%s) + SAM2 (%s) on %s…",
+                         grounding_model_id, sam2_ckpt_path, device)
         self._gsam2 = IncrementalObjectTracker(
             grounding_model_id=grounding_model_id,
             sam2_model_cfg=sam2_model_cfg,
@@ -91,19 +156,39 @@ class GSAM2ObjectTracker:
             prompt_text="object.",
             detection_interval=detection_interval,
         )
+        self.logger.info("GroundingDINO + SAM2 loaded.")
 
         self._tagger = None
         if ram_ckpt_path is not None:
-            self.logger.info("Loading RAM+ tagger from %s", ram_ckpt_path)
+            self.logger.info("Loading RAM+ tagger from %s…", ram_ckpt_path)
             self._tagger = _build_ram_tagger(ram_ckpt_path, ram_image_size, device)
             self.logger.info("RAM+ tagger loaded.")
 
         self._current_prompt: str = "object."
         self._frame_count: int = 0
+        self._extra_tags: List[str] = []
 
     def set_tagger(self, tagger_callable):
         """Override the RAM+ tagger with any callable tag(rgb_np) -> (prompt, raw)."""
         self._tagger = tagger_callable
+
+    def set_extra_tags(self, tags: List[str]) -> None:
+        """Inject additional search terms (e.g. from task description) into the GroundingDINO prompt."""
+        self._extra_tags = [t.strip().lower() for t in tags if t.strip()]
+        # Immediately merge into current prompt so the next frame uses them
+        self._current_prompt = self._merge_prompt(self._current_prompt, self._extra_tags)
+        self._gsam2.set_prompt(self._current_prompt)
+        self.logger.debug("Extra tags set: %s → prompt: %s", self._extra_tags, self._current_prompt)
+
+    @staticmethod
+    def _merge_prompt(ram_prompt: str, extra_tags: List[str]) -> str:
+        """Append extra tags to RAM prompt, deduplicating existing terms."""
+        existing = {t.rstrip(".").strip() for t in ram_prompt.split() if t.strip()}
+        additions = [t for t in extra_tags if t not in existing]
+        if not additions:
+            return ram_prompt
+        extra_str = " ".join(t + "." for t in additions)
+        return (ram_prompt.rstrip() + " " + extra_str).strip()
 
     async def detect_objects(
         self,
@@ -121,7 +206,8 @@ class GSAM2ObjectTracker:
             depth_frame: Optional depth image in metres (same HxW as color_frame)
             camera_intrinsics: Camera intrinsics for 3D back-projection
             temperature: Unused (kept for interface compatibility)
-            robot_state: Unused (kept for interface compatibility)
+            robot_state: Optional robot state dict containing camera transform for
+                         converting camera-frame positions to world frame.
 
         Returns:
             List of DetectedObject instances added to self.registry
@@ -138,10 +224,12 @@ class GSAM2ObjectTracker:
             new_prompt, raw = await loop.run_in_executor(
                 None, self._tagger, rgb_np
             )
-            if new_prompt and new_prompt != self._current_prompt:
-                self.logger.debug("RAM+ prompt update: %s (was: %s)", new_prompt, self._current_prompt)
-                self._current_prompt = new_prompt
-                self._gsam2.set_prompt(new_prompt)
+            if new_prompt:
+                merged = self._merge_prompt(new_prompt, self._extra_tags)
+                if merged != self._current_prompt:
+                    self.logger.debug("RAM+ prompt update: %s (was: %s)", merged, self._current_prompt)
+                    self._current_prompt = merged
+                    self._gsam2.set_prompt(merged)
 
         # --- SAM2 tracking (GPU-bound, run in thread pool to avoid blocking event loop) ---
         def _run_gsam2():
@@ -162,7 +250,9 @@ class GSAM2ObjectTracker:
 
         for obj_id, obj_info in mask_dict.labels.items():
             class_name = obj_info.class_name or "object"
-            object_id = f"{class_name}_{obj_id}"
+            # Normalise to valid PDDL identifier: spaces → underscores, lowercase
+            safe_name = class_name.strip().lower().replace(" ", "_")
+            object_id = f"{safe_name}_{obj_id}"
 
             # Pixel bounding box from ObjectInfo
             x1 = int(obj_info.x1) if obj_info.x1 is not None else 0
@@ -172,6 +262,10 @@ class GSAM2ObjectTracker:
 
             # Mask centroid for 2D position
             mask = obj_info.mask
+            if mask is not None:
+                import torch
+                if isinstance(mask, torch.Tensor):
+                    mask = mask.cpu().numpy()
             if mask is not None and mask.any():
                 ys, xs = np.where(mask)
                 centroid_y = int(ys.mean())
@@ -184,10 +278,14 @@ class GSAM2ObjectTracker:
             # bounding_box_2d: [y1, x1, y2, x2]
             bbox_2d = [y1, x1, y2, x2]
 
-            # 3D position from depth
+            # 3D position: back-project to camera frame, then transform to world frame
             position_3d = None
             if depth_frame is not None and camera_intrinsics is not None:
-                position_3d = compute_3d_position(position_2d, depth_frame, camera_intrinsics)
+                cam_pos = compute_3d_position(position_2d, depth_frame, camera_intrinsics)
+                if cam_pos is not None:
+                    position_3d = _transform_cam_to_world(cam_pos, robot_state)
+                    if position_3d is None:
+                        position_3d = cam_pos  # fallback: keep camera-frame if no transform
 
             interaction_point = InteractionPoint(
                 position_2d=position_2d,
@@ -195,7 +293,7 @@ class GSAM2ObjectTracker:
             )
 
             obj = DetectedObject(
-                object_type=class_name,
+                object_type=safe_name,
                 object_id=object_id,
                 affordances={"graspable"},
                 interaction_points={"grasp": interaction_point},
@@ -273,8 +371,19 @@ class GSAM2ContinuousObjectTracker:
     def set_pddl_predicates(self, predicates) -> None:
         """No-op: GSAM2 uses visual detection, not predicate-guided LLM prompts."""
 
+    def set_pddl_actions(self, actions) -> None:
+        """No-op: GSAM2 uses visual detection, not action-guided LLM prompts."""
+
     def set_task_context(self, task_description=None, available_actions=None, goal_objects=None) -> None:
-        """No-op: GSAM2 uses RAM+ for tagging, not task-conditioned LLM prompts."""
+        """Extract object noun phrases from task description and inject into GroundingDINO prompt."""
+        hints: List[str] = []
+        if goal_objects:
+            hints.extend(goal_objects)
+        if task_description:
+            hints.extend(_extract_noun_phrases(task_description))
+        if hints:
+            self._tracker.set_extra_tags(hints)
+            self.logger.info("GSAM2 task hints injected: %s", hints)
 
     def set_frame_provider(self, provider: Callable[[], tuple]):
         self._frame_provider = provider
@@ -342,6 +451,18 @@ class GSAM2ContinuousObjectTracker:
             elapsed = time.time() - loop_start
             if self.update_interval > elapsed:
                 await asyncio.sleep(self.update_interval - elapsed)
+
+    async def get_stats(self) -> TrackingStats:
+        """Return a snapshot of current tracking statistics."""
+        return TrackingStats(
+            total_frames=self.stats.total_frames,
+            total_detections=self.stats.total_detections,
+            skipped_frames=self.stats.skipped_frames,
+            avg_detection_time=self.stats.avg_detection_time,
+            last_detection_time=self.stats.last_detection_time,
+            cache_hit_rate=self.stats.cache_hit_rate,
+            is_running=self.stats.is_running,
+        )
 
     def get_all_objects(self) -> List[DetectedObject]:
         return self.registry.get_all_objects()
