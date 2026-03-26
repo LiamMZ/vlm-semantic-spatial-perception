@@ -152,9 +152,9 @@ class TaskAnalysis:
 @dataclass
 class L1GoalArtifact:
     """Output of L1: Goal Specification layer."""
-    goal_predicates: List[str]    # grounded PDDL literals: ["(on red_block_1 blue_block_1)"]
-    goal_objects: List[str]       # observed object IDs referenced in goals
-    global_predicates: List[str]  # robot-state predicates: ["hand-empty"]
+    goal_predicates: List[str] = field(default_factory=list)
+    goal_objects: List[str] = field(default_factory=list)
+    global_predicates: List[str] = field(default_factory=list)
     generation_attempts: int = 1
     validation_errors: List[str] = field(default_factory=list)
 
@@ -162,9 +162,11 @@ class L1GoalArtifact:
 @dataclass
 class L2PredicateArtifact:
     """Output of L2: Predicate Vocabulary layer."""
-    predicate_signatures: List[str]  # ["(on ?obj ?surface)", "(holding ?obj)"]
-    sensed_predicates: List[str]     # predicates tagged as sensed/external
-    checked_variants: List[str]      # auto-generated checked-X variants
+    predicate_signatures: List[str] = field(default_factory=list)
+    sensed_predicates: List[str] = field(default_factory=list)
+    checked_variants: List[str] = field(default_factory=list)
+    # Maps predicate name → type classification string (robot_state|object_state|sensed|external|checked)
+    type_classifications: Dict[str, str] = field(default_factory=dict)
     generation_attempts: int = 1
     validation_errors: List[str] = field(default_factory=list)
 
@@ -172,8 +174,8 @@ class L2PredicateArtifact:
 @dataclass
 class L3ActionArtifact:
     """Output of L3: Action Schema layer."""
-    actions: List[Dict]          # same schema as TaskAnalysis.required_actions
-    sensing_actions: List[Dict]  # auto-generated sensing/check actions
+    actions: List[Dict] = field(default_factory=list)
+    sensing_actions: List[Dict] = field(default_factory=list)
     generation_attempts: int = 1
     validation_errors: List[str] = field(default_factory=list)
 

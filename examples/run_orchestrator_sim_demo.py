@@ -25,7 +25,7 @@ Usage:
         uv run python examples/run_orchestrator_sim_demo.py
 
 Optional flags (set as env vars):
-    DEMO_TASK          Task description (default: "Put the red block on the blue block")
+    DEMO_TASK          Task description (default: color-sorting task — red block → red container, blue block → blue container)
     DEMO_DETECT_CYCLES Max detection cycles before forcing solve (default: 3)
     DEMO_STEP_PAUSE    Seconds to pause at each milestone (default: 2)
     DEMO_OUTPUT_DIR    Base output directory (default: outputs/sim_demo).
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 import os
 import sys
@@ -134,11 +135,14 @@ def _info(label: str, value: Any = "") -> None:
 # Scene definition
 # ---------------------------------------------------------------------------
 
-TASK = os.getenv("DEMO_TASK", "Put the red block on the blue block")
+TASK = os.getenv("DEMO_TASK", "Sort the blocks into the container that matches each block's color: put red blocks in the red container and blue blocks in the blue container")
 
-# HuggingFace model — used by default. Set to empty string to fall back to Google GenAI.
-# Override via env var: HF_MODEL="microsoft/Phi-3.5-vision-instruct"
-HF_MODEL = os.getenv("HF_MODEL", "Qwen/Qwen3-VL-4B")
+# HuggingFace model — used for planning when set. Empty string falls back to Google GenAI.
+HF_MODEL = os.getenv("HF_MODEL", "")
+
+# Google GenAI models (used when HF_MODEL is not set)
+GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")          # domain generation / planning
+DECOMPOSER_MODEL  = os.getenv("DECOMPOSER_MODEL", "gemini-robotics-er-1.5-preview")  # skill decomposition
 
 # GSAM2 perception backend (set USE_GSAM2=1 to enable)
 USE_GSAM2 = os.getenv("USE_GSAM2", "").strip() in ("1", "true", "yes")
@@ -150,23 +154,38 @@ GSAM2_DET_INTERVAL    = int(os.getenv("GSAM2_DET_INTERVAL", "20"))
 GSAM2_TAG_INTERVAL    = int(os.getenv("GSAM2_TAG_INTERVAL", "30"))
 
 SCENE_OBJECTS = [
+    # Blocks to be sorted
     {
         "object_id":   "red_block_1",
         "object_type": "block",
         "affordances": ["graspable", "stackable"],
-        "position_3d": [0.3, 0.0, 0.04],
+        "position_3d": [0.35, 0.08, 0.04],
     },
     {
         "object_id":   "blue_block_1",
         "object_type": "block",
         "affordances": ["graspable", "stackable"],
-        "position_3d": [0.5, 0.0, 0.04],
+        "position_3d": [0.35, -0.08, 0.04],
     },
+    # Target containers (open trays)
+    {
+        "object_id":   "red_container_1",
+        "object_type": "container",
+        "affordances": ["containable", "support_surface"],
+        "position_3d": [0.52, 0.12, 0.02],
+    },
+    {
+        "object_id":   "blue_container_1",
+        "object_type": "container",
+        "affordances": ["containable", "support_surface"],
+        "position_3d": [0.52, -0.12, 0.02],
+    },
+    # Work surface
     {
         "object_id":   "table_1",
         "object_type": "surface",
         "affordances": ["support_surface"],
-        "position_3d": [0.4, 0.0, 0.0],
+        "position_3d": [0.42, 0.0, 0.0],
     },
 ]
 
@@ -236,6 +255,136 @@ class DetectionTracker:
 
 
 # ---------------------------------------------------------------------------
+# Perception debug image
+# ---------------------------------------------------------------------------
+
+def _save_perception_debug_image(
+    perception_pool_dir: Path,
+    output_path: Path,
+) -> Optional[Path]:
+    """
+    Draw bounding boxes and object labels onto the latest snapshot color image
+    and save a debug PNG to *output_path*.
+
+    Reads the snapshot index to locate the newest snapshot, then overlays:
+      - A coloured bounding box per detected object (normalised 0-1000 coords)
+      - The object_id label above each box
+      - A small dot at position_2d (centroid) when no bounding box is present
+
+    Returns the saved path, or None if anything is missing.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        log.warning("Pillow not available — skipping perception debug image")
+        return None
+
+    index_path = perception_pool_dir / "index.json"
+    if not index_path.exists():
+        log.warning("No perception pool index found at %s", index_path)
+        return None
+
+    with open(index_path) as f:
+        index = json.load(f)
+
+    snapshots = index.get("snapshots") or {}
+    if not snapshots:
+        log.warning("Perception pool has no snapshots yet")
+        return None
+
+    # Pick the most recent snapshot by captured_at timestamp
+    latest_sid = max(
+        snapshots,
+        key=lambda sid: snapshots[sid].get("captured_at", ""),
+    )
+    snap_meta = snapshots[latest_sid]
+    snap_dir = perception_pool_dir / "snapshots" / latest_sid
+
+    color_path = snap_dir / "color.png"
+    det_path   = snap_dir / "detections.json"
+
+    if not color_path.exists():
+        log.warning("Snapshot %s missing color.png", latest_sid)
+        return None
+
+    img = Image.open(color_path).convert("RGB")
+    w, h = img.size
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    # Try to get a font; fall back to default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Colour palette cycling for distinct boxes
+    _PALETTE = [
+        (255,  80,  80, 200),   # red
+        ( 80, 120, 255, 200),   # blue
+        ( 80, 220,  80, 200),   # green
+        (255, 200,  50, 200),   # yellow
+        (220,  80, 220, 200),   # magenta
+        ( 80, 220, 220, 200),   # cyan
+        (255, 160,  50, 200),   # orange
+    ]
+
+    objects = []
+    if det_path.exists():
+        with open(det_path) as f:
+            det = json.load(f)
+        objects = det.get("objects") or []
+
+    for i, obj in enumerate(objects):
+        color = _PALETTE[i % len(_PALETTE)]
+        oid   = obj.get("object_id", f"obj_{i}")
+        bbox  = obj.get("bounding_box_2d")   # [y1, x1, y2, x2] in 0-1000 normalised
+        pos2d = obj.get("position_2d")        # [y, x] in 0-1000 normalised
+
+        if bbox and len(bbox) == 4:
+            y1n, x1n, y2n, x2n = bbox
+            x1 = int(x1n / 1000 * w)
+            y1 = int(y1n / 1000 * h)
+            x2 = int(x2n / 1000 * w)
+            y2 = int(y2n / 1000 * h)
+            # Filled semi-transparent rect + solid border
+            draw.rectangle([x1, y1, x2, y2], fill=(*color[:3], 50), outline=color, width=2)
+            label_y = max(0, y1 - 18)
+            draw.rectangle([x1, label_y, x1 + len(oid) * 8 + 6, label_y + 16],
+                           fill=(*color[:3], 200))
+            draw.text((x1 + 3, label_y + 1), oid, fill=(255, 255, 255, 255), font=font)
+        elif pos2d and len(pos2d) >= 2:
+            yn, xn = pos2d[0], pos2d[1]
+            cx = int(xn / 1000 * w)
+            cy = int(yn / 1000 * h)
+            r = 6
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r],
+                         fill=(*color[:3], 200), outline=(255, 255, 255, 255), width=2)
+            draw.text((cx + r + 2, cy - 8), oid, fill=(*color[:3], 255), font=font)
+
+    # Draw interaction points as small crosses
+    for i, obj in enumerate(objects):
+        color = _PALETTE[i % len(_PALETTE)]
+        for ip_name, ip in (obj.get("interaction_points") or {}).items():
+            pos = ip.get("position_2d")
+            if pos and len(pos) >= 2:
+                cx = int(pos[1] / 1000 * w)
+                cy = int(pos[0] / 1000 * h)
+                arm = 4
+                draw.line([cx - arm, cy, cx + arm, cy], fill=(255, 255, 255, 230), width=2)
+                draw.line([cx, cy - arm, cx, cy + arm], fill=(255, 255, 255, 230), width=2)
+                draw.text((cx + 5, cy - 6), ip_name, fill=(220, 220, 220, 200), font=font)
+
+    # Watermark with snapshot id and object count
+    stamp = f"snapshot: {latest_sid}  |  objects: {len(objects)}"
+    draw.rectangle([0, h - 20, w, h], fill=(0, 0, 0, 160))
+    draw.text((4, h - 17), stamp, fill=(200, 200, 200, 255), font=font)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
 # Main demo
 # ---------------------------------------------------------------------------
 
@@ -259,15 +408,16 @@ async def run_demo() -> int:
 
     _banner("Orchestrator Simulation Demo")
     _info("Task", TASK)
-    _info("Scene", [o["object_id"] for o in SCENE_OBJECTS])
+    _info("Sim objects placed", [o["object_id"] for o in SCENE_OBJECTS])
     _info("Output", OUTPUT_DIR)
     if USE_GSAM2:
         _info("Perception", "GSAM2 (RAM+ + GroundingDINO + SAM2)")
         _info("SAM2 ckpt", GSAM2_SAM2_CKPT or "(not set — will fail)")
         _info("RAM+ ckpt", GSAM2_RAM_CKPT or "(not set — will fail)")
     else:
-        _info("Perception", f"HuggingFace ({HF_MODEL})" if use_hf else "Google GenAI (gemini-2.0-flash)")
-    _info("Planning LLM", f"HuggingFace ({HF_MODEL})" if use_hf else "Google GenAI (gemini-2.0-flash)")
+        _info("Perception", f"HuggingFace ({HF_MODEL})" if use_hf else f"Google GenAI ({GEMINI_MODEL})")
+    _info("Planning LLM", f"HuggingFace ({HF_MODEL})" if use_hf else f"Google GenAI ({GEMINI_MODEL})")
+    _info("Decomposer LLM", f"Google GenAI ({DECOMPOSER_MODEL})")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Keep a "latest" symlink pointing to this run
@@ -304,8 +454,8 @@ async def run_demo() -> int:
             if not api_key:
                 log.error("GEMINI_API_KEY is not set. Set HF_MODEL to use a local model or USE_GSAM2=1 for GSAM2.")
                 return 1
-            llm_client = GoogleGenAIClient(model="gemini-2.0-flash", api_key=api_key)
-            _ok("Google GenAI client ready")
+            llm_client = GoogleGenAIClient(model=GEMINI_MODEL, api_key=api_key)
+            _ok(f"Google GenAI client ready (model={GEMINI_MODEL})")
 
     # ------------------------------------------------------------------
     # 1. Start PyBullet GUI environment
@@ -451,6 +601,9 @@ async def run_demo() -> int:
         _tock("gsam2_model_load", _t0_gsam2)
         # Replace the LLM-based tracker with the GSAM2 tracker
         orchestrator.tracker = gsam2_tracker
+        # Wire the orchestrator's detection callback so snapshots, PDDL updates,
+        # and detection_count all work correctly through the GSAM2 tracker.
+        gsam2_tracker.on_detection_complete = orchestrator._on_detection_callback
         _ok(f"GSAM2 tracker active (SAM2 + {'RAM+' if GSAM2_RAM_CKPT else 'no tagger'}) on {gsam2_device} "
             f"({_timings['gsam2_model_load']:.1f}s)")
 
@@ -467,17 +620,6 @@ async def run_demo() -> int:
     env.set_status("Detecting scene objects…", color=[0.8, 0.6, 0.2])
     orchestrator.current_task = TASK  # needed by tracker before domain generation
     orchestrator.tracker.set_task_context(task_description=TASK)  # inject task hints before detection
-
-    # Seed registry with known sim objects so L5 can compute on() facts via position proximity
-    from src.perception.object_registry import DetectedObject
-    for sim_obj in SCENE_OBJECTS:
-        seed = DetectedObject(
-            object_id=sim_obj["object_id"],
-            object_type=sim_obj["object_type"],
-            affordances=set(sim_obj.get("affordances", [])),
-            position_3d=np.array(sim_obj["position_3d"]) if sim_obj.get("position_3d") else None,
-        )
-        orchestrator.tracker.registry.add_object(seed)
 
     _t0 = _tick("perception_prepass")
     await orchestrator.start_detection()
@@ -536,6 +678,16 @@ async def run_demo() -> int:
     _ok(f"Detection complete — {len(detected)} objects in registry")
     for obj in detected:
         _info(f"  {obj.object_id}", f"type={obj.object_type} affordances={obj.affordances} pos3d={getattr(obj,'position_3d',None)}")
+
+    # Save perception debug image (latest snapshot + bounding boxes + labels)
+    debug_img_path = _save_perception_debug_image(
+        perception_pool_dir=OUTPUT_DIR / "perception_pool",
+        output_path=OUTPUT_DIR / "perception_debug.png",
+    )
+    if debug_img_path:
+        _ok(f"Perception debug image → {debug_img_path}")
+    else:
+        _warn("Could not save perception debug image")
 
     # Highlight everything detected
     env.highlight_objects([o.object_id for o in detected if o.object_id in {s["object_id"] for s in SCENE_OBJECTS}])
@@ -623,6 +775,7 @@ async def run_demo() -> int:
         )
         decomposer = SkillDecomposer(
             api_key=api_key or os.getenv("GOOGLE_API_KEY", ""),
+            model_name=DECOMPOSER_MODEL,
             orchestrator=orchestrator,
         )
 

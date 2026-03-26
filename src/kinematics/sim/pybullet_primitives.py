@@ -84,12 +84,12 @@ class PyBulletPrimitives:
     # Primitives                                                           #
     # ------------------------------------------------------------------ #
 
-    def move_to_pose(
+    def move_gripper_to_pose(
         self,
         target_position: Optional[List[float]] = None,
         preset_orientation: str = "top_down",
         is_place: bool = False,
-        # Legacy / fallback params
+        # Fallback resolution params
         point_label: Optional[str] = None,
         is_top_down_grasp: bool = True,
         is_side_grasp: bool = False,
@@ -97,7 +97,9 @@ class PyBulletPrimitives:
         **_kwargs: Any,
     ) -> Dict[str, Any]:
         """
-        Move the EEF to a target position.
+        Move the gripper end-effector to a target position.
+
+        Distinguished from navigate_to_pose (base/mobile platform motion, added later).
 
         target_position is preferred (set by PrimitiveExecutor after back-projecting
         target_pixel_yx from the snapshot).  If absent, point_label is resolved
@@ -111,7 +113,7 @@ class PyBulletPrimitives:
             target_position = self._resolve_point_label(point_label)
 
         if target_position is None:
-            self._logger.warning("move_to_pose: no target_position and no resolvable point_label")
+            self._logger.warning("move_gripper_to_pose: no target_position and no resolvable point_label")
             return {"success": False, "reason": "cannot determine target position"}
 
         # Orientation: normalise both old and new style params
@@ -128,7 +130,7 @@ class PyBulletPrimitives:
         # Approach with standoff then move to contact
         standoff = (np.array(pos) + np.array([0.0, 0.0, 0.06])).tolist()
         label = point_label or str(pos)
-        self._logger.info("move_to_pose: orientation=%s → %s", preset_orientation, pos)
+        self._logger.info("move_gripper_to_pose: orientation=%s → %s", preset_orientation, pos)
         self._move_to(standoff, target_orn, label=f"approach {label}")
         self._move_to(pos,      target_orn, label=f"contact  {label}")
 
@@ -136,10 +138,6 @@ class PyBulletPrimitives:
             self._try_attach(pos)
 
         return {"success": True, "target_position": pos}
-
-    def move_gripper_to_pose(self, **kwargs: Any) -> Dict[str, Any]:
-        """Alias for move_to_pose — retained for forward-compat with navigate_to_pose."""
-        return self.move_to_pose(**kwargs)
 
     def push_pull(
         self,
@@ -240,12 +238,15 @@ class PyBulletPrimitives:
         self._logger.info("retract_gripper: moving to home")
 
         # If holding an object, keep it attached during retraction
-        start = self._env.get_robot_joint_state()
-        if start is None:
-            start = _HOME_JOINTS
+        n_arm = len(self._env._arm_joints) if self._env._arm_joints else len(_HOME_JOINTS)
+        raw_start = self._env.get_robot_joint_state()
+        if raw_start is None:
+            start = np.array(_HOME_JOINTS, dtype=float)
+        else:
+            # Slice to arm joints only — gripper joints are not controlled here
+            start = np.array(raw_start, dtype=float)[:n_arm]
 
         target = np.array(_HOME_JOINTS, dtype=float)
-        start  = np.array(start, dtype=float)
 
         for i in range(_MOTION_STEPS):
             alpha = (i + 1) / _MOTION_STEPS
@@ -333,15 +334,16 @@ class PyBulletPrimitives:
             physicsClientId=c,
         )
 
-        start = self._env.get_robot_joint_state()
-        if start is None:
-            start = np.array(_HOME_JOINTS)
-        else:
-            start = np.array(start)
-
-        # Slice IK result to arm joints only (gripper joints are not IK-controlled)
+        # Slice to arm joints only — gripper joints are not IK-controlled
         n_arm = len(self._env._arm_joints) if self._env._arm_joints else len(_HOME_JOINTS)
         target = np.array(ik_joints[:n_arm])
+
+        raw_start = self._env.get_robot_joint_state()
+        if raw_start is None:
+            start = np.array(_HOME_JOINTS)
+        else:
+            # get_robot_joint_state may return all joints (arm + gripper); slice to arm only
+            start = np.array(raw_start)[:n_arm]
 
         for i in range(_MOTION_STEPS):
             alpha = (i + 1) / _MOTION_STEPS

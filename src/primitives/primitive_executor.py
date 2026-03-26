@@ -194,6 +194,25 @@ class PrimitiveExecutor:
                     primitive.parameters[key] = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
                     self.logger.debug("Transformed %s: %s -> %s", key, pos, primitive.parameters[key])
 
+        # Auto-strip unknown parameters (LLM cross-contamination fallback).
+        # Unknown parameters are logged as warnings and removed rather than
+        # raising hard failures — the remaining params may still be valid.
+        for idx, primitive in enumerate(plan.primitives):
+            schema = PRIMITIVE_LIBRARY.get(primitive.name)
+            if schema is None:
+                continue
+            allowed = set(schema.required_params) | set(schema.optional_params)
+            unknown = [k for k in list(primitive.parameters) if k not in allowed]
+            for k in unknown:
+                self.logger.warning(
+                    "[prepare_plan] [%d] stripping unknown param '%s' from %s",
+                    idx, k, primitive.name,
+                )
+                primitive.parameters.pop(k)
+                plan.diagnostics.warnings.append(
+                    f"[{idx}] stripped unknown parameter '{k}' from {primitive.name}"
+                )
+
         validation_errors = plan.validate(PRIMITIVE_LIBRARY)
         if validation_errors:
             raise ValueError(f"Plan validation failed: {validation_errors}")

@@ -1183,21 +1183,42 @@ class TaskOrchestrator:
                             except ValueError:
                                 pass
 
-                # Re-derive unary affordance predicates from live detected objects.
-                # This catches cases where L5 was built before perception ran (empty scene)
-                # or where domain refinement re-added predicates that L2-V5 had pruned.
+                # Derive `clear` facts: an object is clear if nothing is `on` it.
+                # This handles blocksworld-style domains where `clear` is added by refinement.
                 domain_predicates = set(self.pddl.predicates.keys())
-                for obj in all_objects:
-                    for affordance in (obj.affordances or set()):
-                        pred_name = affordance.replace(" ", "-").replace("_", "-")
-                        if pred_name in domain_predicates:
-                            key = (pred_name, (obj.object_id,))
+                if "clear" in domain_predicates:
+                    occupied: set = set()
+                    for pred_name, args in l5.true_literals if (l5 and l5.true_literals) else []:
+                        if pred_name == "on" and len(args) == 2:
+                            occupied.add(args[1])  # surface has something on it
+                    for obj in all_objects:
+                        if obj.object_id not in occupied:
+                            key = ("clear", (obj.object_id,))
                             if key not in added_initial:
                                 try:
-                                    await self.pddl.add_initial_literal_async(pred_name, [obj.object_id], negated=False)
+                                    await self.pddl.add_initial_literal_async("clear", [obj.object_id], negated=False)
                                     added_initial.add(key)
                                 except ValueError:
                                     pass
+
+                # Re-derive unary affordance predicates from live detected objects.
+                # This catches cases where L5 was built before perception ran (empty scene)
+                # or where domain refinement re-added predicates that L2-V5 had pruned.
+                # Try both bare name (e.g. `graspable`) and object-prefixed name
+                # (e.g. `object-graspable`) since the prompt encourages prefixed naming.
+                for obj in all_objects:
+                    for affordance in (obj.affordances or set()):
+                        base = affordance.replace(" ", "-").replace("_", "-")
+                        candidates = [base, f"object-{base}"]
+                        for pred_name in candidates:
+                            if pred_name in domain_predicates:
+                                key = (pred_name, (obj.object_id,))
+                                if key not in added_initial:
+                                    try:
+                                        await self.pddl.add_initial_literal_async(pred_name, [obj.object_id], negated=False)
+                                        added_initial.add(key)
+                                    except ValueError:
+                                        pass
                 if added_initial:
                     self.logger.info(f"  • Added {len(added_initial)} initial literals from L5 + affordances")
 
@@ -1229,7 +1250,10 @@ class TaskOrchestrator:
         self.logger.info("Problem Summary:")
         self.logger.info("  • Objects: %s", len(problem_snapshot["object_instances"]))
         self.logger.info("  • Initial literals: %s", len(problem_snapshot["initial_literals"]))
-        self.logger.info("  • Goal literals: %s", len(problem_snapshot["goal_literals"]))
+        # goal_literals tracks structured Literal objects; goal_formulas tracks raw PDDL strings.
+        # Goals are added via add_goal_formula_async so count goal_formulas.
+        goal_count = len(problem_snapshot.get("goal_literals", [])) + len(self.pddl.goal_formulas)
+        self.logger.info("  • Goal literals: %s", goal_count)
 
         self.logger.info("%s", "=" * 70)
 

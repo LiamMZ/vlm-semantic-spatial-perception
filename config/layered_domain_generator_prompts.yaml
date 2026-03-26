@@ -14,7 +14,8 @@ l1_goal_spec_prompt: |
 
   Your task is to extract the **goal conditions** for the following task. Focus
   ONLY on the end state the robot must achieve — do not define predicates or
-  actions yet.
+  actions yet. The predicates you name here are provisional; they will be
+  formally defined in L2.
 
   Task description:
   <<TASK>>
@@ -28,17 +29,23 @@ l1_goal_spec_prompt: |
   **Rules:**
   1. Goal predicates must be **grounded literals** — use actual object_id values
      from the scene, NOT variables like ?obj. Example: `(on red_block_1 table_1)`.
-  2. All argument tokens must be object_id values from the observed objects list.
-  3. Goal predicates should describe the desired **end state** only.
-  4. `global_predicates` are zero-parameter robot state predicates that must be
-     true at the start (e.g. `hand-empty`, `arm-at-home`). Return names only,
-     no parentheses.
-  5. Use hyphens for multi-word predicate names (e.g. `hand-empty`, `on-top`).
-  6. Predicate names must be lowercase with hyphens only (no underscores).
+  2. Every argument token must be an object_id from the observed objects list above.
+     Do not invent object names that are not in the list.
+  3. Goal predicates describe the desired **end state** only — not intermediate steps.
+  4. `global_predicates` are zero-parameter robot state predicates that must hold
+     at the start of execution (e.g. `hand-empty`, `arm-at-home`). Return names
+     only, no parentheses.
+  5. Predicate names must be **lowercase-hyphenated** (e.g. `hand-empty`, `on`,
+     `object-at`). No underscores, no uppercase.
+  6. Each goal predicate MUST match: `(predicate-name arg1 arg2 ...)` where
+     predicate-name is lowercase-hyphenated and all args are object_ids from the
+     observed objects list.
+  7. No two goal predicates may assert the same object is in two different
+     locations simultaneously (e.g. two different `on(A, ?)` for the same A).
 
   <<VALIDATION_ERRORS>>
 
-  Respond with valid JSON only:
+  Respond with valid JSON only — no prose, no markdown fences:
   {
     "goal_predicates": ["(on red_block_1 blue_block_1)"],
     "goal_objects": ["red_block_1", "blue_block_1"],
@@ -51,15 +58,15 @@ l1_goal_spec_prompt: |
 l2_predicate_vocab_prompt: |
   You are a PDDL predicate vocabulary designer for a robotic manipulation system.
 
-  Your task is to define the **minimal predicate vocabulary** sufficient to:
-  1. Express all goal conditions (provided below)
-  2. Express the initial scene state (object positions, relations)
-  3. Support the state transitions needed to achieve the goals
+  Your task is to define the **minimal predicate vocabulary** P sufficient to:
+  1. Express all goal conditions from L1 (every predicate name in the goals MUST be in P)
+  2. Express the initial scene state (spatial relationships, object properties)
+  3. Support the state transitions needed to achieve the goals (preconditions and effects)
 
   Task description:
   <<TASK>>
 
-  Goal predicates from L1 (MUST be covered by your vocabulary):
+  Goal predicates from L1 (MUST be covered — every predicate name here must appear in P):
   <<GOAL_PREDICATES_JSON>>
 
   Observed objects:
@@ -68,32 +75,97 @@ l2_predicate_vocab_prompt: |
   Previously known predicates (DKB hints — reuse where applicable):
   <<DKB_HINTS>>
 
-  **Rules:**
-  1. Include ALL predicate names that appear in the goal predicates.
-  2. Use PDDL format with ?-prefixed variables: `(on ?obj ?surface)`, `(holding ?obj)`.
-  3. Zero-parameter predicates are allowed: `(hand-empty)`.
-  4. All names must be lowercase-hyphenated: `hand-empty`, `on`, `holding`.
-  5. Mark predicates as `sensed` if they represent properties the robot cannot
-     directly control and must verify at runtime (e.g. `graspable`, `door-open`).
-     For each sensed predicate, a `checked-<name>` variant will be auto-generated.
-  6. Keep the set **minimal** — only predicates actually needed for this task.
-  7. Arity consistency is critical: parameter count must be stable across all uses.
+  ---
+  ## Naming Convention
 
-  **Predicate type guidelines:**
-  - `state`: robot directly controls this (e.g. `holding`, `on`, `hand-empty`)
-  - `sensed`: depends on external world, must be verified (e.g. `graspable`, `door-locked`)
+  Use descriptive, role-prefixed names following these conventions:
+  - Spatial/object relations: `on`, `in`, `above`, `object-at`, `clear`
+  - Robot-state predicates: `holding`, `hand-empty`, `arm-at-home`, `gripper-open`
+  - Sensed properties: `object-graspable`, `object-reachable`, `path-clear`, `door-open`
+  - Sensed properties NEVER use bare single-word names without context (e.g. prefer
+    `object-graspable` over `graspable`, `object-reachable` over `reachable`)
 
+  **Exception**: short relational predicates (`on`, `in`, `above`, `at`) do not need
+  a prefix because their meaning is unambiguous from context.
+
+  All names must be **lowercase-hyphenated** (e.g. `object-graspable`, `hand-empty`,
+  `on`). No underscores, no uppercase.
+
+  ---
+  ## Predicate Types
+
+  Each predicate must be assigned EXACTLY ONE type classification:
+
+  - `robot_state`  : robot directly knows/controls this (e.g. `holding`, `hand-empty`,
+                     `arm-at-home`, `gripper-open`). TRUE value deterministically known.
+  - `object_state` : observable spatial relationship derivable from perception (e.g. `on`,
+                     `in`, `above`, `clear`, `object-at`). Grounded from scene perception.
+  - `sensed`       : property the robot CANNOT know without active verification (e.g.
+                     `object-graspable`, `object-reachable`, `path-clear`, `door-open`,
+                     `door-locked`). **Always initialized to FALSE**. Requires a sensing
+                     action to establish. Every sensed predicate automatically gets a
+                     `checked-<name>` companion (auto-generated — do NOT define it yourself).
+  - `external`     : uncertain world property not directly observable (e.g. `container-full`,
+                     `switch-on`). **Always initialized to FALSE**. Requires sensing to
+                     establish. Gets a `checked-<name>` companion like `sensed`.
+
+  **CRITICAL initialization rules:**
+  - `robot_state` predicates: initialized from robot joint/gripper state
+  - `object_state` predicates: initialized from scene perception (position, relations)
+  - `sensed` and `external` predicates: **ALWAYS initialized to FALSE** — the planner
+    must schedule sensing actions before any action that needs them
+  - `checked-*` predicates: **ALWAYS initialized to FALSE** — auto-generated, do NOT
+    define them yourself
+
+  ---
+  ## Valid Argument Types
+
+  Valid PDDL parameter types: `object`, `surface`, `location`, `robot`, `region`.
+  Use ONLY these five. Do NOT use `block`, `item`, `container`, `tool`, `agent`,
+  `gripper` — they are not grounded types in this system. Use `object` for all
+  manipulable items regardless of semantic category.
+
+  ---
+  ## Checked Variants (auto-generated — DO NOT define manually)
+
+  For every predicate with type `sensed` or `external`, the system will automatically
+  create a `checked-<name>` predicate with:
+  - Identical argument types
+  - Type classification `checked`
+  - Initial value FALSE
+  - Set to TRUE only by a `check-<name>` sensing action
+
+  You MUST NOT include `checked-*` predicates in your `predicate_signatures` output.
+  Only list the base sensed predicates; the system generates the checked variants.
+
+  ---
+  ## Minimality
+
+  Include ONLY predicates that are actually needed for this specific task. Do not add
+  predicates "just in case". The set will be automatically pruned after action schemas
+  are generated, but start minimal.
+
+  ---
   <<VALIDATION_ERRORS>>
 
-  Respond with valid JSON only:
+  Respond with valid JSON only — no prose, no markdown fences.
+  Output exactly three keys. Do NOT include `checked-*` in predicate_signatures:
   {
     "predicate_signatures": [
-      "(on ?obj ?surface)",
-      "(holding ?obj)",
+      "(on ?obj - object ?surface - object)",
+      "(holding ?obj - object)",
       "(hand-empty)",
-      "(graspable ?obj)"
+      "(clear ?obj - object)",
+      "(object-graspable ?obj - object)"
     ],
-    "sensed_predicates": ["graspable"]
+    "sensed_predicates": ["object-graspable"],
+    "type_classifications": {
+      "on": "object_state",
+      "holding": "robot_state",
+      "hand-empty": "robot_state",
+      "clear": "object_state",
+      "object-graspable": "sensed"
+    }
   }
 
 # ---------------------------------------------------------------------------
@@ -104,7 +176,7 @@ l3_action_schema_prompt: |
 
   Your task is to define the **action schemas** required to achieve the given
   goals using ONLY the provided predicate vocabulary. Output pure symbolic PDDL
-  action definitions — no execution detail.
+  action definitions — no execution detail, no primitive sequences.
 
   Task description:
   <<TASK>>
@@ -115,67 +187,107 @@ l3_action_schema_prompt: |
   Goal predicates (L1):
   <<GOAL_PREDICATES_JSON>>
 
-  Predicate vocabulary (L2) — use ONLY these predicates:
+  Predicate vocabulary (L2) — use ONLY these predicates, including the checked-* variants:
   <<PREDICATE_VOCAB_JSON>>
+
+  Predicate type classifications:
+  <<TYPE_CLASSIFICATIONS_JSON>>
+
+  Sensed predicates (type=sensed or external — always FALSE in init, require sensing):
+  <<SENSED_PREDICATES_JSON>>
 
   Previously known action schemas (DKB hints — reuse where applicable):
   <<DKB_HINTS>>
 
-  **Rules:**
+  ---
+  ## Rules
 
-  1. **Symbolic closure**: Use ONLY predicates from the vocabulary above. No new
-     predicates. If you need one, say so in `validation_errors` and stop.
+  1. **Symbolic closure**: Use ONLY predicates from the vocabulary above. Every
+     predicate name in any precondition or effect must appear in the vocabulary.
+     If you need a predicate not in the vocabulary, you have a bug — stop and
+     report it in the validation_errors field instead of inventing new predicates.
 
   2. **Parameter consistency**: Every `?var` used in `precondition` or `effect`
-     MUST be declared in `parameters`.
+     MUST be declared in the action's `parameters` list with a valid type.
 
-  3. **Arity rule**: Predicate usage in pre/effects must match the exact parameter
-     count defined in the vocabulary. `(holding ?obj)` is 1-parameter everywhere.
+  3. **Arity rule**: Predicate usage must match the exact parameter count in the
+     vocabulary. `(holding ?obj)` takes 1 argument everywhere; `(on ?obj ?surface)`
+     takes 2 arguments everywhere.
 
   4. **PDDL formatting**:
-     - Parameters: list of strings like `"?obj"` or `"?surface"` (no type annotations)
-     - Precondition/effect: single PDDL formula string with `and`, `not`, etc.
-     - No quoted strings in formulas
+     - `parameters`: list of strings `"?var - type"` (types from: object, surface,
+       location, robot, region)
+     - `precondition` / `effect`: single PDDL formula string using `and`, `not`
+     - No quoted strings inside formulas
 
-  5. **ACTION CHAINING VALIDATION** (critical):
-     - Effects of one action must EXACTLY match preconditions of the next action.
-     - Example CORRECT: pick effect `(holding ?obj)` → place precondition `(holding ?obj)` ✓
-     - Example BROKEN: pick effect `(holding ?obj)` → place precondition `(grasped ?obj)` ✗
-     - Verify: pick→place, open→access, pour→empty, and any task-specific chains.
+  5. **Action chaining** (critical): For each pair of sequentially-dependent actions
+     (e.g. pick → place, check → use), verify that the producing action's effects
+     match the consuming action's preconditions exactly.
+     - CORRECT: pick effect `(holding ?obj)` → place precondition `(holding ?obj)` ✓
+     - BROKEN:  pick effect `(holding ?obj)` → place precondition `(grasped ?obj)` ✗
 
-  6. **Achievability**: Every precondition must be satisfiable via:
-     - Initial state (global_predicates or perception-derived facts), OR
-     - Another action's effects
+  6. **Achievability**: Every positive precondition must be reachable via:
+     - The initial state (`robot_state` and `object_state` predicates are grounded
+       from perception; zero-param predicates like `hand-empty` start TRUE), OR
+     - A prior action's positive effects.
+     `sensed`, `external`, and `checked-*` predicates are **always FALSE initially**
+     and can only be established by sensing actions.
 
-  7. **Goal achievability**: At least one action's effects must produce each goal predicate.
+  7. **Goal achievability**: At least one action's effects must produce each goal
+     predicate name. Trace the full chain from initial state to goal.
 
-  8. **Sensing actions**: If any `checked-<name>` predicates appear in the vocabulary,
-     add a corresponding sensing action in `sensing_actions` (e.g. `check-graspable`
-     with effect `(checked-graspable ?obj)`). These are separate from main actions.
+  8. **Sensing actions** (CRITICAL):
+     For every predicate in sensed_predicates, you MUST provide a sensing action
+     in the `sensing_actions` array. Rules:
+     - Action name: `check-<predicate-name>` (e.g. for `object-graspable` → `check-object-graspable`)
+     - Parameters: same types as the base sensed predicate
+     - Precondition: `"(and)"` — sensing actions have NO preconditions (they can always run)
+     - Effect: `(checked-<predicate-name> ?var)` — sets the CHECKED variant, NOT the base
+     - WRONG effect: `(object-graspable ?obj)` ← sets the base predicate (never do this)
+     - CORRECT effect: `(checked-object-graspable ?obj)` ← sets the checked variant ✓
+     Regular (non-sensing) actions that need to verify a sensed property must require
+     `(checked-<name> ?var)` in their precondition, NOT the base `(<name> ?var)`.
+     Only sensing actions may set `checked-*` predicates in their effects.
 
-  **Verification checklist (complete before responding):**
-  a) Arity: every predicate usage matches its definition
-  b) Chain validation: list effects of A → preconditions of B for each sequential pair
-  c) Achievability: each precondition reachable via init or prior action
-  d) Goals: each goal achievable by at least one action's effects
+  9. **clear predicate** (if present): If the vocabulary includes `(clear ?obj)`,
+     ensure pick sets `(clear ?surface)` in its effect (the surface becomes clear
+     after the object is removed) and place requires `(clear ?surface)` in its
+     precondition (can only place on a clear surface).
 
+  ---
+  ## Verification checklist (complete mentally before responding):
+  a) Every predicate in pre/effects appears in the vocabulary
+  b) Every ?var in pre/effects is declared in parameters
+  c) Sensing action for each sensed predicate: name=check-X, effect=(checked-X ?var)
+  d) Regular actions requiring sensing use checked-X in preconditions, not X
+  e) No regular action sets a checked-* predicate in its effects
+  f) Goal predicates are all reachable via the action chain
+
+  ---
   <<VALIDATION_ERRORS>>
 
-  Respond with valid JSON only:
+  Respond with valid JSON only — no prose, no markdown fences:
   {
     "actions": [
       {
         "name": "pick",
-        "parameters": ["?obj"],
-        "precondition": "(and (hand-empty) (on ?obj ?surface))",
-        "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)))"
+        "parameters": ["?obj - object", "?surface - object"],
+        "precondition": "(and (hand-empty) (on ?obj ?surface) (checked-object-graspable ?obj))",
+        "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)) (clear ?surface))"
       },
       {
         "name": "place",
-        "parameters": ["?obj", "?surface"],
-        "precondition": "(holding ?obj)",
-        "effect": "(and (on ?obj ?surface) (hand-empty) (not (holding ?obj)))"
+        "parameters": ["?obj - object", "?surface - object"],
+        "precondition": "(and (holding ?obj) (clear ?surface))",
+        "effect": "(and (on ?obj ?surface) (hand-empty) (not (holding ?obj)) (not (clear ?surface)))"
       }
     ],
-    "sensing_actions": []
+    "sensing_actions": [
+      {
+        "name": "check-object-graspable",
+        "parameters": ["?obj - object"],
+        "precondition": "(and)",
+        "effect": "(checked-object-graspable ?obj)"
+      }
+    ]
   }

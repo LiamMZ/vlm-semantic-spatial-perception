@@ -238,20 +238,39 @@ class SkillPlan:
 
 PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
     # ------------------------------------------------------------------
-    # move_to_pose  — move EEF to a target pose (pixel → 3D back-project)
+    # move_gripper_to_pose  — move EEF to a target pose
+    #   Distinguished from navigate_to_pose (base motion, added later).
     # ------------------------------------------------------------------
-    "move_to_pose": PrimitiveSchema(
-        name="move_to_pose",
+    "move_gripper_to_pose": PrimitiveSchema(
+        name="move_gripper_to_pose",
         optional_params=("target_pixel_yx", "target_position", "pivot_point",
                          "preset_orientation", "is_place",
                          "point_label", "is_top_down_grasp", "is_side_grasp"),
         allowed_frames=("base", "camera"),
         description=(
-            "Move the end-effector to a target pose.  "
+            "Move the gripper end-effector to a target pose. "
             "target_pixel_yx: normalized [y, x] (0-1000) pixel for back-projection. "
             "target_position: [x, y, z] in base frame (set by executor after back-projection). "
             "preset_orientation: 'top_down' or 'side'. "
-            "is_place: True when placing (adds z clearance)."
+            "is_place: True when placing (adds z clearance). "
+            "Distinguished from navigate_to_pose (base/mobile platform motion)."
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # push_pull  — constrained EEF motion along/about a surface
+    # ------------------------------------------------------------------
+    "push_pull": PrimitiveSchema(
+        name="push_pull",
+        required_params=("surface_label",),
+        optional_params=("force_direction", "is_button", "has_pivot", "hinge_location"),
+        allowed_frames=("base", "camera"),
+        description=(
+            "Push or pull relative to a Surface Map label. "
+            "surface_label: name of the surface or object to interact with. "
+            "force_direction: 'perpendicular' (push into surface) or 'parallel' (slide). "
+            "is_button: True for momentary press-and-retract. "
+            "has_pivot: True for revolute (door/drawer) articulation. "
+            "hinge_location: surface boundary label for the hinge axis."
         ),
     ),
     # ------------------------------------------------------------------
@@ -284,21 +303,6 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "distance": _positive_number_validator("distance"),
             "speed_factor": _positive_number_validator("speed_factor"),
         },
-    ),
-    # ------------------------------------------------------------------
-    # move_gripper_to_pose  — alias retained for forward-compat
-    # ------------------------------------------------------------------
-    "move_gripper_to_pose": PrimitiveSchema(
-        name="move_gripper_to_pose",
-        optional_params=("target_pixel_yx", "target_position", "pivot_point",
-                         "preset_orientation", "is_place",
-                         "point_label", "is_top_down_grasp", "is_side_grasp"),
-        allowed_frames=("base", "camera"),
-        description=(
-            "Move the gripper end-effector to a target pose. "
-            "Alias for move_to_pose — distinguished from navigate_to_pose (base motion). "
-            "target_position: [x, y, z] in base frame (set by executor after back-projection)."
-        ),
     ),
     # ------------------------------------------------------------------
     # twist  — wrist rotation about the end-effector Z axis

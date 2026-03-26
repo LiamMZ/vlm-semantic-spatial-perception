@@ -51,15 +51,20 @@ CAMERA_AIM_JOINTS = [0.100085, -1.407677, -0.098652, 1.314592, 0.0, 2.0, -0.1122
 
 # Default colours per object_id; fallback is grey
 OBJECT_COLORS: Dict[str, List[float]] = {
-    "red_block_1":  [0.85, 0.15, 0.15, 1.0],
-    "blue_block_1": [0.15, 0.35, 0.85, 1.0],
-    "table_1":      [0.55, 0.45, 0.30, 1.0],
+    "red_block_1":      [0.85, 0.15, 0.15, 1.0],
+    "red_block_2":      [0.85, 0.15, 0.15, 1.0],
+    "blue_block_1":     [0.15, 0.35, 0.85, 1.0],
+    "blue_block_2":     [0.15, 0.35, 0.85, 1.0],
+    "red_container_1":  [0.80, 0.10, 0.10, 0.75],
+    "blue_container_1": [0.10, 0.25, 0.80, 0.75],
+    "table_1":          [0.55, 0.45, 0.30, 1.0],
 }
 
 # Half-extents (metres) per object_type
 OBJECT_HALF_EXTENTS: Dict[str, List[float]] = {
-    "block":   [0.03, 0.03, 0.03],
-    "surface": [0.25, 0.25, 0.01],
+    "block":     [0.03, 0.03, 0.03],
+    "surface":   [0.25, 0.25, 0.01],
+    "container": [0.07, 0.07, 0.02],   # flat open tray / bin
 }
 
 # RealSense D435 approximate intrinsics

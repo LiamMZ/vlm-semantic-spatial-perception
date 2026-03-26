@@ -1,341 +1,512 @@
-# Validation Checks Reference
+# GTAMP Layer Validation Specification
+## Developer Reference
 
-This document catalogues every validation check in the planning and execution pipeline, the layer or stage it belongs to, the exact implementation location, and the failure behavior.
-
----
-
-## Table of Contents
-
-1. [Skill Plan & Primitive Validation](#1-skill-plan--primitive-validation)
-2. [Layered PDDL Domain Generation (L1–L5)](#2-layered-pddl-domain-generation-l1l5)
-3. [PDDL Domain Maintenance & Refinement](#3-pddl-domain-maintenance--refinement)
-4. [Task Orchestrator](#4-task-orchestrator)
-5. [Object Registry & Perception](#5-object-registry--perception)
-6. [Config](#6-config)
-7. [Summary Table](#7-summary-table)
-8. [Key Design Patterns](#8-key-design-patterns)
+Version: 1.1
+Status: Implementation Specification
 
 ---
 
-## 1. Skill Plan & Primitive Validation
+## Purpose
 
-### `src/primitives/skill_plan_types.py`
-
-#### `PrimitiveSchema.validate()` — [lines 75–109](../src/primitives/skill_plan_types.py#L75-L109)
-
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Required parameters | [85–87](../src/primitives/skill_plan_types.py#L85-L87) | All `required_params` present in call | Appends error to list |
-| Unknown parameters | [90–93](../src/primitives/skill_plan_types.py#L90-L93) | No params outside `required_params ∪ optional_params` | Appends error |
-| Frame | [96–100](../src/primitives/skill_plan_types.py#L96-L100) | `call.frame` is in `allowed_frames` | Appends error |
-| Per-param validators | [103–107](../src/primitives/skill_plan_types.py#L103-L107) | Custom validators in `param_validators` dict | Appends validator message |
-
-#### `SkillPlan.validate()` — [lines 218–236](../src/primitives/skill_plan_types.py#L218-L236)
-
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Unknown primitive name | [231–232](../src/primitives/skill_plan_types.py#L231-L232) | Primitive name exists in `schema_map` | Appends "unknown primitive" error |
-| Per-primitive call | [234–235](../src/primitives/skill_plan_types.py#L234-L235) | Each `PrimitiveCall` passes its schema | Appends indexed error messages |
-
-#### `PRIMITIVE_LIBRARY` parameter validators — [lines 239–321](../src/primitives/skill_plan_types.py#L239-L321)
-
-`_positive_number_validator` is applied to the following params:
-
-| Primitive | Param | Lines |
-|-----------|-------|-------|
-| `open_gripper` | `timeout` | [265–267](../src/primitives/skill_plan_types.py#L265-L267) |
-| `close_gripper` | `timeout` | [274–276](../src/primitives/skill_plan_types.py#L274-L276) |
-| `retract_gripper` | `distance`, `speed_factor` | [283–286](../src/primitives/skill_plan_types.py#L283-L286) |
-| `twist` | `rotation_angle_deg`, `speed_factor`, `timeout` | [315–319](../src/primitives/skill_plan_types.py#L315-L319) |
-
-Failure for all: returns `"must be > 0"` or `"must be numeric"` error string (collected, not raised).
+This document specifies every formatting requirement and validation check for each layer of the GTAMP domain generation pipeline. Each check is described in terms of what condition must hold, how to verify it, what to do when it fails, and what message to return. A developer reading this document should be able to implement the complete validation pipeline without ambiguity.
 
 ---
 
-### `src/primitives/primitive_executor.py`
+## Terminology
 
-#### `prepare_plan()` — [lines 100–202](../src/primitives/primitive_executor.py#L100-L202)
+**REJECT** means the output fails validation and must be regenerated. The specific failure message is returned to the LLM or VLM that produced the output, along with any corrective context (such as the list of valid options), and the system requests a new output.
 
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Depth/intrinsics for back-projection | [154–159](../src/primitives/primitive_executor.py#L154-L159) | Snapshot has depth and intrinsics when `target_pixel_yx` is set | Log WARNING, fall back to registry position |
-| Back-projection result | [163–168](../src/primitives/primitive_executor.py#L163-L168) | `compute_3d_position` returns a valid point | Log WARNING, fall back to registry position |
-| `point_label` injection | [178–185](../src/primitives/primitive_executor.py#L178-L185) | If no `target_position`, injects `point_label` from `references.object_id` | Silently injects fallback |
-| Base-frame coordinate transform | [188–195](../src/primitives/primitive_executor.py#L188-L195) | Applies cam→base transform to `target_position` / `pivot_point` when `cam_pose` available | Skips transform if no cam_pose |
-| **Plan validation (critical gate)** | [197–200](../src/primitives/primitive_executor.py#L197-L200) | All primitives pass `PRIMITIVE_LIBRARY` schema validation | **Raises `ValueError`: "Plan validation failed: {errors}"** |
+**AUTO-REPAIR** means the system fixes the problem deterministically without any LLM or VLM call. The repair procedure is constructive — it generates the missing artifact from existing validated information. Auto-repairs are always logged.
 
----
+**WARNING** means the condition is flagged but does not block progress. The system logs the warning and continues.
 
-## 2. Layered PDDL Domain Generation (L1–L5)
+**EXPLORATION** means the failure indicates a missing entity that may exist in the environment but has not been observed. The system enters the exploration mechanism to attempt to locate the entity before declaring failure.
 
-All layers live in `src/planning/layered_domain_generator.py`.
+**Predicate type classifications** used throughout this document:
+- *Robot state:* Properties directly known from robot state feedback. Examples: robot-at, gripper-empty.
+- *Object state:* Properties observable from the perception system. Examples: object-at, on.
+- *Sensed:* Properties that require active sensing to verify. Examples: object-graspable, path-clear.
+- *External:* Properties of the external world that are uncertain. Examples: door-locked, container-full.
+- *Checked:* Predicates that track whether sensing has occurred for a corresponding sensed or external predicate. Always initialized to FALSE. Examples: checked-object-graspable, checked-path-clear.
 
-### Retry loop — `_run_layer_with_retry()` — [lines 303–342](../src/planning/layered_domain_generator.py#L303-L342)
-
-Each LLM-driven layer (L1–L3) runs through this generic loop:
-1. Call `run_fn()` → get artifact
-2. Call `validate_fn(artifact)` → collect errors
-3. If errors and `repair_fn` provided → call `repair_fn(artifact)` → re-validate
-4. If still errors → append errors to prompt and retry up to `max_retries`
-5. On exhaustion → return artifact with errors recorded (non-fatal)
+**PDDL naming convention** referenced throughout: names must be lowercase, may contain hyphens between segments, must start with a letter, and may contain digits. Valid examples: object-at, checked-path-clear, robot-near. Invalid examples: Object_At, HOLDING, gripper empty.
 
 ---
 
-### L1 — Goal Specification
+## Layer L1: Goal Specification
 
-#### `_validate_l1()` — [lines 369–460](../src/planning/layered_domain_generator.py#L369-L460)
+### Expected Output
 
-| Check ID | Lines | What is validated | Failure |
-|----------|-------|-------------------|---------|
-| L1-V1 Non-empty goals | [376–380](../src/planning/layered_domain_generator.py#L376-L380) | `goal_predicates` is not empty | Appends error, returns early |
-| L1-V2a Parentheses | [391–396](../src/planning/layered_domain_generator.py#L391-L396) | Each literal starts with `(` and ends with `)` | Appends error |
-| L1-V2b Grounded (no variables) | [398–403](../src/planning/layered_domain_generator.py#L398-L403) | No `?` variable tokens in goal predicates | Appends error |
-| L1-V2c Empty literal | [405–408](../src/planning/layered_domain_generator.py#L405-L408) | Literal has content after stripping parens | Appends error |
-| L1-V2d PDDL name pattern | [413–418](../src/planning/layered_domain_generator.py#L413-L418) | Predicate name matches `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` | Appends error |
-| L1-V2e Argument present | [420–426](../src/planning/layered_domain_generator.py#L420-L426) | At least one argument after predicate name | Appends error |
-| L1-V2f Empty argument | [429–431](../src/planning/layered_domain_generator.py#L429-L431) | No empty-string argument tokens | Appends error |
-| L1-V3 Contradiction detection | [436–449](../src/planning/layered_domain_generator.py#L436-L449) | Same subject not mapped to two different values by same predicate | Appends "Contradiction" error |
-| L1-V4 Scene entity references | [452–458](../src/planning/layered_domain_generator.py#L452-L458) | All argument tokens appear in observed scene object IDs (warn-only if scene empty) | Appends "not found in observed scene" error |
+The LLM produces a set of goal predicates, where each goal predicate consists of a predicate name, one or more argument strings, and an optional negation flag. The goal set represents the desired end-state conditions that the planner must achieve.
 
 ---
 
-### L2 — Predicate Vocabulary
+### L1-V1: Non-Emptiness
 
-#### `_validate_l2()` — [lines 490–568](../src/planning/layered_domain_generator.py#L490-L568)
+**What must hold:** The goal set must contain at least one goal predicate.
 
-| Check ID | Lines | What is validated | Failure |
-|----------|-------|-------------------|---------|
-| L2-V1 Goal predicate coverage | [505–512](../src/planning/layered_domain_generator.py#L505-L512) | Every predicate name from L1 goals defined in `predicate_signatures` | Appends "not defined in predicate vocabulary" error |
-| L2-V2a Predicate name pattern | [514–523](../src/planning/layered_domain_generator.py#L514-L523) | Each predicate name matches `_PDDL_NAME_RE` | Appends naming error |
-| L2-V2b Type name pattern | [524–530](../src/planning/layered_domain_generator.py#L524-L530) | Inline type names match `_PDDL_NAME_RE` | Appends type naming error |
-| L2-V3 Checked variant arity | [532–543](../src/planning/layered_domain_generator.py#L532-L543) | If `checked-X` exists, its arity matches base `X` | Appends parameter count mismatch error |
-| L2-V4 Variable type consistency | [545–556](../src/planning/layered_domain_generator.py#L545-L556) | No variable has conflicting type assignments across predicates | Appends "conflicting type assignments" error |
-| L2-V6 Type classification validity | [558–566](../src/planning/layered_domain_generator.py#L558-L566) | `type_classifications` values are in `VALID_TYPE_CLASSIFICATIONS` | Appends "invalid type_classification" error |
+**How to check:** Count the number of goal predicates. If the count is zero, the check fails.
 
-#### `_repair_l2_auto()` — [lines 570–602](../src/planning/layered_domain_generator.py#L570-L602)
-
-Auto-generates missing `checked-X` variants for predicates tagged `sensed`. Appends new signatures if not already present.
+**On failure:** REJECT. Return the message: "Goal set is empty. Re-examine the task description and extract at least one desired end-state condition."
 
 ---
 
-### L3 — Action Schemas
+### L1-V2: Well-Formedness
 
-#### `_validate_l3()` — [lines 632–729](../src/planning/layered_domain_generator.py#L632-L729)
+**What must hold:** Every goal predicate must have a predicate name that conforms to the PDDL naming convention, and must have at least one argument. Each argument must be a non-empty string.
 
-| Check ID | Lines | What is validated | Failure |
-|----------|-------|-------------------|---------|
-| L3-V1 Symbolic closure | [662–670](../src/planning/layered_domain_generator.py#L662-L670) | All predicates in pre/effects exist in L2 vocabulary | Appends "uses undefined predicates" error |
-| L3-V2 Parameter consistency | [672–680](../src/planning/layered_domain_generator.py#L672-L680) | All `?vars` in pre/effects are declared in `:parameters` | Appends "uses undeclared variables" error |
-| L3-V3 Sensing coverage | [682–698](../src/planning/layered_domain_generator.py#L682-L698) | Every `checked-*` predicate in any precondition has at least one action that adds it | Appends "No action produces" error |
-| L3-V4 Goal achievability (BFS) | [700–727](../src/planning/layered_domain_generator.py#L700-L727) | All L1 goal predicate names reachable from initial state via positive effects (`bfs_reachable_predicates` at [lines 128–153](../src/planning/layered_domain_generator.py#L128-L153)) | Appends "unreachable" / "no producer" errors |
+**How to check:** For each goal predicate, verify that the predicate name matches the PDDL naming convention. Verify that the argument list is non-empty. Verify that every argument is a non-empty string.
 
-#### `_repair_l3_auto()` — [lines 731–770](../src/planning/layered_domain_generator.py#L731-L770)
-
-Auto-generates sensing actions (`check-X`) for any `checked-*` predicate that has no producer.
+**On failure:** REJECT. Return the specific goal predicates that failed, identifying whether the issue is the predicate name, missing arguments, or empty argument strings. Include a description of the expected naming convention.
 
 ---
 
-### L4 — Grounding Pre-check (algorithmic, no LLM)
+### L1-V3: Internal Consistency
 
-#### `_run_l4_precheck()` — [lines 812–884](../src/planning/layered_domain_generator.py#L812-L884)
+**What must hold:** The goal set must not contain contradictory assertions. A contradiction occurs when two goal predicates assert incompatible values for a uniqueness-constrained argument. For example, if the predicate "object-at" constrains an object to be at only one location, then the goals "(object-at mug counter)" and "(object-at mug table)" are contradictory because the mug cannot be at two locations simultaneously.
 
-Warnings only — does not block L5.
+**How to check:** The system maintains a uniqueness constraint registry — a static configuration that lists which predicates have uniqueness constraints and which argument positions are constrained. For each predicate in the registry, group all non-negated goal predicates using that predicate by the constrained argument. If any constrained argument maps to more than one value of the varying argument, report a contradiction.
 
-| Check ID | Lines | What is validated | Failure |
-|----------|-------|-------------------|---------|
-| L4-V1 Domain type grounding | [846–859](../src/planning/layered_domain_generator.py#L846-L859) | Every PDDL type used in actions has ≥1 matching scene object | Appends warning |
-| L4-V2 Parameterized action feasibility | [861–874](../src/planning/layered_domain_generator.py#L861-L874) | Parameterized actions have viable scene objects | Appends warning |
-| L4-V3 Goal entity existence | [876–882](../src/planning/layered_domain_generator.py#L876-L882) | Every entity named in L1 goals exists in scene | Appends warning |
+**On failure:** REJECT. Return the specific contradicting goal predicates, identify which uniqueness constraint they violate, and explain why they conflict (e.g., "entity 'mug' cannot be at both 'counter' and 'table' simultaneously because 'object-at' constrains an object to one location").
 
 ---
 
-### L5 — Initial State Construction (algorithmic, no LLM)
+### L1-V4: Argument Plausibility
 
-#### `_run_l5()` — [lines 890–1044](../src/planning/layered_domain_generator.py#L890-L1044)
+**What must hold:** Every argument string in every goal predicate should reference an entity that exists in the current scene representation.
 
-| Check ID | Lines | What is validated / computed | Failure |
-|----------|-------|------------------------------|---------|
-| `checked-*` always FALSE | [910–941](../src/planning/layered_domain_generator.py#L910-L941) | All sensed predicates initialised as FALSE | — |
-| L5-V1 Graspable derivation | [948–953](../src/planning/layered_domain_generator.py#L948-L953) | Affordance `"graspable"` → positive literal | — |
-| L5-V2 Spatial predicates (on/above/stacked) | [955–1009](../src/planning/layered_domain_generator.py#L955-L1009) | Position-based proximity: on (z<0.3m, xy<0.5m), stacked (dz 0–0.15m, dx/dy<0.08m) | — |
-| L5-V3 Entity reference validation | [1011–1025](../src/planning/layered_domain_generator.py#L1011-L1025) | All literal args refer to known scene entities | Log WARNING, auto-remove offending literal |
-| L5-V5 Trivial goal detection | [1027–1042](../src/planning/layered_domain_generator.py#L1027-L1042) | Initial state does not already satisfy all goals | Log WARNING only |
+**How to check:** Collect all entity identifiers and semantic labels from the scene representation — this includes all object IDs, all object semantic labels, all surface IDs, all surface semantic labels, and the robot identifier. For each argument in each goal predicate, check whether it appears in this combined set.
+
+**On failure:** REJECT. Return the specific arguments that do not match any known entity, along with the complete list of known entities. Note that arguments failing this check are candidates for exploration — the entity may exist in the environment but has not been observed yet. The system should record these as potential exploration targets for use at L4.
 
 ---
 
-## 3. PDDL Domain Maintenance & Refinement
+### L1 Auto-Repair
 
-### `src/planning/pddl_domain_maintainer.py`
+None. All L1 failures require LLM re-generation with the specific failure message.
 
-#### `_initialize_domain_from_analysis()` — [lines 291–394](../src/planning/pddl_domain_maintainer.py#L291-L394)
+### L1 Locking
 
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Null task_analysis | [293–294](../src/planning/pddl_domain_maintainer.py#L293-L294) | `task_analysis` not None | Returns early |
-| Predicate name non-empty | [320–321](../src/planning/pddl_domain_maintainer.py#L320-L321) | Predicate name after normalization is non-empty | Skips predicate |
-| Action type check | [348–351](../src/planning/pddl_domain_maintainer.py#L348-L351) | `required_actions[i]` is a dict | **Raises `ValueError`** |
-| Formula sanitization | [370–373](../src/planning/pddl_domain_maintainer.py#L370-L373) | Removes quoted strings from PDDL formulas via `sanitize_pddl_formula()` ([lines 89–132](../src/planning/pddl_domain_maintainer.py#L89-L132)) | Non-fatal, returns sanitized formula |
-
-#### `validate_and_fix_action_predicates()` — [lines 545–603](../src/planning/pddl_domain_maintainer.py#L545-L603)
-
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Undefined predicates in actions | [568–589](../src/planning/pddl_domain_maintainer.py#L568-L589) | All predicates used in preconditions/effects exist in domain | **Auto-adds missing predicate** to domain |
-| Action parse errors | [591–593](../src/planning/pddl_domain_maintainer.py#L591-L593) | Action formulas parseable | Log WARNING, track in `invalid_actions` |
-
-#### `refine_domain_from_error()` — [lines 923–1200](../src/planning/pddl_domain_maintainer.py#L923-L1200)
-
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Problem file `:objects` non-empty | [968–999](../src/planning/pddl_domain_maintainer.py#L968-L999) | Problem file has objects defined | Log WARNING (perception issue indicator) |
-| LLM refinement response JSON | [1065](../src/planning/pddl_domain_maintainer.py#L1065) | Response is valid JSON | Catches `json.JSONDecodeError` |
-| Detected object not null | [1084–1088](../src/planning/pddl_domain_maintainer.py#L1084-L1088) | Suggested object not `None`/`"None"`/`"?"` | Skips update |
-| Fix has old/new text | [1151–1154](../src/planning/pddl_domain_maintainer.py#L1151-L1154) | Fix dict contains `old_text` and `new_text` | Skips fix |
-
-#### `sanitize_pddl_name()` — [lines 24–86](../src/planning/pddl_domain_maintainer.py#L24-L86)
-
-Normalises names: lowercase, strip parens/quotes, replace spaces with `-`, ensure starts with letter, truncate. Non-fatal — returns sanitized form.
-
-#### `_normalize_predicate_signature()` — [lines 664–710](../src/planning/pddl_domain_maintainer.py#L664-L710)
-
-| Check | Lines | What is validated | Failure |
-|-------|-------|-------------------|---------|
-| Non-empty signature string | [677–686](../src/planning/pddl_domain_maintainer.py#L677-L686) | Signature has tokens after splitting | Returns empty string |
-| Parameter deduplication | [688–702](../src/planning/pddl_domain_maintainer.py#L688-L702) | No duplicate variable names | Deduplicates silently |
+On successful validation, the goal set is frozen as an immutable artifact. No downstream layer may modify it. All downstream layers receive a read-only reference to the locked goal set.
 
 ---
 
-## 4. Task Orchestrator
+## Layer L2: Predicate Vocabulary
 
-### `src/planning/task_orchestrator.py`
+### Expected Output
 
-| Check | Method | Lines | What is validated | Failure |
-|-------|--------|-------|-------------------|---------|
-| Orchestrator initialized | `process_task_request` | [343–344](../src/planning/task_orchestrator.py#L343-L344) | State is not UNINITIALIZED | **Raises `RuntimeError`** |
-| Goal object null filter | `process_task_request` | [389–390](../src/planning/task_orchestrator.py#L389-L390) | Filters `None`/`"None"` from goal_objects | Silently drops |
-| PDDL system initialized | `generate_pddl_files` | [1111–1112](../src/planning/task_orchestrator.py#L1111-L1112) | `pddl` and `maintainer` not None | **Raises `RuntimeError`** |
-| Objects detected (registry) | `generate_pddl_files` | [1131–1139](../src/planning/task_orchestrator.py#L1131-L1139) | Registry has ≥1 detected object | Log WARNING (non-fatal) |
-| Unknown object type auto-register | `generate_pddl_files` | [1142–1154](../src/planning/task_orchestrator.py#L1142-L1154) | Object type exists in PDDL domain | **Auto-adds** type as child of `object` |
-| Domain/problem files exist | `solve_and_plan` | [1323–1326](../src/planning/task_orchestrator.py#L1323-L1326) | Generated PDDL files present on disk | **Raises `FileNotFoundError`** |
-| Object detection timeout | `solve_and_plan` | [1268–1286](../src/planning/task_orchestrator.py#L1268-L1286) | Objects appear within `max_wait_seconds` | Log WARNING if timeout, proceeds |
-| Max refinement attempts | `solve_and_plan_with_refinement` | [1380–1382](../src/planning/task_orchestrator.py#L1380-L1382) | Attempt count < `max_refinement_attempts` | Returns `False` |
-| Refinable error pattern | `_is_refinable_error` | [1534–1572](../src/planning/task_orchestrator.py#L1534-L1572) | Error message matches known refinable keywords | Returns boolean (non-fatal guard) |
-
-#### Affordance-based initial literal derivation — [lines 1185–1199](../src/planning/task_orchestrator.py#L1185-L1199)
-
-For each detected object, maps affordance names (e.g. `"graspable"`) to predicate names and adds them as initial literals — only if the predicate is already defined in the domain. Acts as a fallback for L5 when scene was empty during generation.
+The LLM produces a set of predicate definitions. Each predicate definition consists of a name, a list of typed arguments (where each argument has a name and a type), and a type classification indicating how the predicate's truth value is determined (robot state, object state, sensed, external, or checked).
 
 ---
 
-## 5. Object Registry & Perception
+### L2-V1: Goal Coverage
 
-### `src/perception/object_registry.py`
+**What must hold:** Every predicate name that appears in any goal predicate from L1 must have a corresponding definition in the predicate set.
 
-| Check | Method | Lines | What is validated | Failure |
-|-------|--------|-------|-------------------|---------|
-| File existence | `load_from_json` | [363–364](../src/perception/object_registry.py#L363-L364) | JSON file exists at path | **Raises `FileNotFoundError`** |
-| Object existence before update | `update_object` | [141–142](../src/perception/object_registry.py#L141-L142) | Object ID exists in registry | Returns `False` |
+**How to check:** Extract all predicate names from the locked L1 goal set. Check that each of these names exists as a key in the predicate set. Any goal predicate name not found in the predicate set is a missing predicate.
 
-### `src/perception/object_tracker.py`
-
-| Check | Method | Lines | What is validated | Failure |
-|-------|--------|-------|-------------------|---------|
-| `<think>` block stripping | `_parse_json_response` | (see file) | Strips `<think>…</think>` before JSON parse | Non-fatal pre-processing |
-| JSON extraction fallback | `_parse_json_response` | (see file) | Tries bare parse → fenced block → first `{}`/`[]` | Raises `json.JSONDecodeError` on all failures |
+**On failure:** REJECT. Return the specific predicate names that appear in goals but have no definition. Instruct the LLM to add definitions for these predicates.
 
 ---
 
-## 6. Config
+### L2-V2: Naming Compliance
 
-### `config/orchestrator_config.py`
+**What must hold:** Every predicate name and every argument type name must conform to the PDDL naming convention.
 
-`OrchestratorConfig` is a Python dataclass with typed fields. Validation relies on Python's type system — no explicit runtime validators. Key fields:
+**How to check:** For each predicate, verify the predicate name matches the naming convention. For each argument in each predicate, verify the type string matches the naming convention.
 
-| Field | Type | Notes |
-|-------|------|-------|
-| `api_key` | `str` | Required (no default) |
-| `use_sim_camera` | `bool` | Skips RealSense init when True |
-| `use_layered_generation` | `bool` | Enables L1–L5 pipeline |
-| `dkb_dir` | `Optional[Path]` | Domain knowledge base dir |
-| `solver_timeout` | `float` | Max solver wall time |
-| `max_refinement_attempts` | `int` | Refinement retry limit |
+**On failure:** REJECT. Return each name or type that violates the convention, along with a description of the expected format.
 
 ---
 
-## 7. Summary Table
+### L2-V3: Checked-Variant Completeness
 
-| Stage | Check ID | File | Lines | Severity | Failure Behavior |
-|-------|----------|------|-------|----------|-----------------|
-| Primitive schema | Required params | [skill_plan_types.py](../src/primitives/skill_plan_types.py#L85-L87) | 85–87 | Error | Collected |
-| Primitive schema | Unknown params | [skill_plan_types.py](../src/primitives/skill_plan_types.py#L90-L93) | 90–93 | Error | Collected |
-| Primitive schema | Frame check | [skill_plan_types.py](../src/primitives/skill_plan_types.py#L96-L100) | 96–100 | Error | Collected |
-| Primitive schema | Param validators | [skill_plan_types.py](../src/primitives/skill_plan_types.py#L103-L107) | 103–107 | Error | Collected |
-| Primitive schema | Unknown primitive name | [skill_plan_types.py](../src/primitives/skill_plan_types.py#L231-L232) | 231–232 | Error | Collected |
-| **Execution gate** | **Plan validation** | [primitive_executor.py](../src/primitives/primitive_executor.py#L197-L200) | **197–200** | **HARD** | **Raises ValueError** |
-| Execution | Depth/intrinsics | [primitive_executor.py](../src/primitives/primitive_executor.py#L154-L159) | 154–159 | Warning | Falls back to registry |
-| Execution | Back-projection result | [primitive_executor.py](../src/primitives/primitive_executor.py#L163-L168) | 163–168 | Warning | Falls back to registry |
-| L1 | Non-empty goals | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L376-L380) | 376–380 | Error | Collected, early return |
-| L1 | Parentheses | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L391-L396) | 391–396 | Error | Collected |
-| L1 | Grounded literals | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L398-L403) | 398–403 | Error | Collected |
-| L1 | PDDL name pattern | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L413-L418) | 413–418 | Error | Collected |
-| L1 | Argument present | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L420-L426) | 420–426 | Error | Collected |
-| L1 | Contradiction | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L436-L449) | 436–449 | Error | Collected |
-| L1 | Scene entity refs | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L452-L458) | 452–458 | Error | Collected |
-| L2 | Goal pred coverage | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L505-L512) | 505–512 | Error | Collected |
-| L2 | Predicate name pattern | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L514-L523) | 514–523 | Error | Collected |
-| L2 | Type name pattern | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L524-L530) | 524–530 | Error | Collected |
-| L2 | checked-X arity | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L532-L543) | 532–543 | Error | Collected |
-| L2 | Var type consistency | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L545-L556) | 545–556 | Error | Collected |
-| L2 | Type classification | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L558-L566) | 558–566 | Error | Collected |
-| L2 (repair) | checked-X auto-generate | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L570-L602) | 570–602 | — | Auto-repair |
-| L3 | Symbolic closure | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L662-L670) | 662–670 | Error | Collected |
-| L3 | Parameter consistency | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L672-L680) | 672–680 | Error | Collected |
-| L3 | Sensing coverage | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L682-L698) | 682–698 | Error | Collected |
-| L3 | Goal achievability (BFS) | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L700-L727) | 700–727 | Error | Collected |
-| L3 (repair) | Sensing action auto-generate | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L731-L770) | 731–770 | — | Auto-repair |
-| L4 | Domain type grounding | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L846-L859) | 846–859 | Warning | Non-blocking |
-| L4 | Action feasibility | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L861-L874) | 861–874 | Warning | Non-blocking |
-| L4 | Goal entity existence | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L876-L882) | 876–882 | Warning | Non-blocking |
-| L5 | checked-* always FALSE | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L910-L941) | 910–941 | — | Enforced |
-| L5 | Entity reference validation | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L1011-L1025) | 1011–1025 | Warning | Auto-remove literal |
-| L5 | Trivial goal detection | [layered_domain_generator.py](../src/planning/layered_domain_generator.py#L1027-L1042) | 1027–1042 | Warning | Log only |
-| Domain init | Action type check | [pddl_domain_maintainer.py](../src/planning/pddl_domain_maintainer.py#L348-L351) | 348–351 | HARD | Raises ValueError |
-| Domain init | Undefined predicates | [pddl_domain_maintainer.py](../src/planning/pddl_domain_maintainer.py#L568-L589) | 568–589 | — | Auto-adds to domain |
-| Refinement | Problem :objects empty | [pddl_domain_maintainer.py](../src/planning/pddl_domain_maintainer.py#L968-L999) | 968–999 | Warning | Log only |
-| Refinement | LLM response JSON | [pddl_domain_maintainer.py](../src/planning/pddl_domain_maintainer.py#L1065) | 1065 | Error | Catches JSONDecodeError |
-| Refinement | Null object suggestion | [pddl_domain_maintainer.py](../src/planning/pddl_domain_maintainer.py#L1084-L1088) | 1084–1088 | — | Silently skips |
-| Orchestrator | State initialized | [task_orchestrator.py](../src/planning/task_orchestrator.py#L343-L344) | 343–344 | HARD | Raises RuntimeError |
-| Orchestrator | PDDL initialized | [task_orchestrator.py](../src/planning/task_orchestrator.py#L1111-L1112) | 1111–1112 | HARD | Raises RuntimeError |
-| Orchestrator | Unknown object type | [task_orchestrator.py](../src/planning/task_orchestrator.py#L1142-L1154) | 1142–1154 | — | Auto-registers type |
-| Orchestrator | PDDL files on disk | [task_orchestrator.py](../src/planning/task_orchestrator.py#L1323-L1326) | 1323–1326 | HARD | Raises FileNotFoundError |
-| Orchestrator | Max refinements | [task_orchestrator.py](../src/planning/task_orchestrator.py#L1380-L1382) | 1380–1382 | — | Returns False |
-| Registry | File existence | [object_registry.py](../src/perception/object_registry.py#L363-L364) | 363–364 | HARD | Raises FileNotFoundError |
-| Registry | Object ID existence | [object_registry.py](../src/perception/object_registry.py#L141-L142) | 141–142 | — | Returns False |
+**What must hold:** For every predicate whose type classification is "sensed" or "external," a corresponding predicate must exist with the name "checked-" prepended to the original name, with type classification "checked," and with identical argument types in the same order.
+
+**How to check:** Filter the predicate set for all predicates classified as "sensed" or "external." For each such predicate with name N, check whether a predicate named "checked-N" exists in the set. If it exists, verify that its type classification is "checked" and that its argument types match the original predicate's argument types exactly.
+
+If the checked variant exists but has mismatched argument types or wrong classification, this is a type mismatch error. If the checked variant is entirely missing, this triggers auto-repair.
+
+**On type mismatch:** REJECT. Return the specific mismatches for LLM correction.
+
+**On missing variant:** AUTO-REPAIR. For each missing checked variant, the system creates a new predicate definition with name "checked-N," the same argument names and types as the base predicate, and type classification "checked." No LLM call is required.
 
 ---
 
-## 8. Key Design Patterns
+### L2-V4: Type Validity
 
-### Hard stops vs. soft failures
+**What must hold:** Every argument type used in any predicate definition must be a member of the valid PDDL type set recognized by the system. The valid types are determined by the pre-defined grounding rules — specifically, every type must have a corresponding grounding rule that maps it to a scene element category. The standard valid types are: object, location, surface, robot, and region. Additional types may be added to the system configuration if corresponding grounding rules are provided.
 
-- **Hard stops** (`raise`) occur at system boundaries: missing files, uninitialized state, invalid plan at execution time.
-- **Soft failures** (append error / log warning) occur inside LLM-driven generation layers so the pipeline can retry or auto-repair without crashing.
+**How to check:** Collect all type strings from all argument definitions across all predicates. Check each type string against the set of valid types. Any type not in the valid set is a violation.
 
-### Auto-repair before retry
+**On failure:** REJECT. Return each invalid type, the predicate and argument it appears in, and the list of valid types.
 
-L2 and L3 have dedicated repair methods that run *before* the retry prompt is sent:
-- [`_repair_l2_auto()`](../src/planning/layered_domain_generator.py#L570-L602) — generates missing `checked-X` variants
-- [`_repair_l3_auto()`](../src/planning/layered_domain_generator.py#L731-L770) — generates missing sensing actions (`check-X`)
-- [`validate_and_fix_action_predicates()`](../src/planning/pddl_domain_maintainer.py#L545-L603) — auto-adds any undefined predicates referenced in actions
+---
 
-### Graceful degradation in execution
+### L2-V5: Minimality (Deferred Check)
 
-`PrimitiveExecutor.prepare_plan()` never hard-fails on missing depth/intrinsics — it falls back to resolving the target from `references.object_id` via the registry. The only hard failure is the final `plan.validate()` call after all translations are complete.
+**What must hold:** Every predicate in the vocabulary should be referenced by at least one action precondition, action effect, or goal predicate. Predicates that appear nowhere are dead weight that bloats the state space.
 
-### Layer retry budget
+**When to check:** This check is NOT run during L2 validation. It is deferred until after L3 validation completes, because the action schemas needed to determine predicate usage do not exist yet at L2 time.
 
-Each L1–L3 layer gets `max_retries=2` attempts by default. Validation errors from the previous attempt are appended to the next prompt via a `<<VALIDATION_ERRORS>>` placeholder, guiding the LLM toward a valid response.
+**How to check:** After L3 is validated, compute the union of all predicate names appearing in: the goal set (L1), any action precondition (L3), and any action effect (L3). Any predicate in the vocabulary that does not appear in this union is unused.
 
-### L4 is advisory, L5 is constructive
+**On failure:** AUTO-REPAIR. Remove all unused predicates from the vocabulary. This is safe because a predicate that appears nowhere in goals or actions cannot affect planning. Log which predicates were removed.
 
-L4 produces only warnings — it never blocks L5 from running. L5 is fully algorithmic (no LLM) and constructs the initial state from scene geometry and affordances, with L5-V3 silently removing any literals that reference unknown objects.
+---
+
+### L2-V6: Type Classification Validity
+
+**What must hold:** Every predicate's type classification must be one of the recognized classification values: "robot_state," "object_state," "sensed," "external," or "checked."
+
+**How to check:** For each predicate, verify that its type classification string matches one of the five valid values.
+
+**On failure:** REJECT. Return each invalid classification, the predicate it appears on, and the list of valid classifications.
+
+---
+
+### L2 Locking
+
+On successful validation (including any auto-repairs), the predicate set is frozen as an immutable artifact. The auto-repair log (listing any checked variants or other modifications that were generated automatically) is attached to the artifact for traceability.
+
+---
+
+## Layer L3: Action Schema Generation
+
+### Expected Output
+
+The LLM produces a set of action schemas. Each action schema consists of a name, a list of typed parameters (where each parameter has a name and a type), a precondition formula expressed as a PDDL string, and an effect formula expressed as a PDDL string.
+
+### Prerequisite Capability
+
+The validation system must be able to parse PDDL formula strings to extract predicate names and variable references. Specifically:
+- Predicate extraction must handle conjunction (and), negation (not), disjunction (or), and nested formulas, returning the set of all predicate names referenced.
+- Positive effect extraction must return only predicate names that appear as positive effects (not wrapped in negation).
+- Variable extraction must return all PDDL variable references (strings beginning with "?") from a formula.
+
+---
+
+### L3-V1: Symbolic Closure
+
+**What must hold:** Every predicate name that appears anywhere in any action's precondition formula or effect formula must exist as a defined predicate in the locked L2 predicate vocabulary.
+
+**How to check:** For each action schema, parse the precondition formula and effect formula to extract all referenced predicate names. Take the union of all predicate names across all actions. Check that every name in this union exists in the L2 predicate set. Any predicate name found in an action formula but not in the predicate set is a violation.
+
+**On failure:** REJECT. For each violating action, return the action name, the undefined predicate names, and whether each undefined predicate appears in the preconditions, effects, or both. Include the complete list of available predicates from L2 so the LLM can correct its references.
+
+---
+
+### L3-V2: Parameter Consistency
+
+**What must hold:** For every action schema, every variable referenced in its precondition or effect formula must be declared in that action's parameter list, and every declared parameter must have a type from the valid PDDL type set.
+
+**How to check:** For each action schema, extract all variable references from the precondition and effect formulas. Collect the set of declared parameter names (with the "?" prefix). Any variable in the formulas that does not appear in the declared set is an undeclared variable. Additionally, verify that every declared parameter's type is in the valid PDDL type set (same set used in L2-V4).
+
+**On failure:** REJECT. Return the specific undeclared variables per action (listing which formula they appear in), and any parameters with invalid types. Include the action's declared parameter list for context.
+
+---
+
+### L3-V3: Sensing Coverage
+
+**What must hold:** For every predicate whose name starts with "checked-" that appears in any action's precondition, there must exist at least one action in the action set whose positive effects include setting that checked predicate to true. This ensures the planner has a way to verify every uncertain property it might need to rely on.
+
+**How to check:** Collect all predicate names starting with "checked-" that appear in any action's preconditions. Separately, collect all predicate names starting with "checked-" that appear as positive effects in any action. The difference between these two sets (predicates required in preconditions but never produced by any effect) is the set of uncovered checked predicates.
+
+**On failure (uncovered predicates exist):** AUTO-REPAIR. For each uncovered checked predicate "checked-N," the system generates a sensing action as follows: the action is named "check-N," its parameters match the argument types of the base predicate N (looked up in the L2 vocabulary), its precondition references an appropriate proximity predicate (such as "robot-near" applied to the first argument, if such a predicate exists in the vocabulary; otherwise the precondition is left trivially satisfiable), and its effect sets "checked-N" to true for the given arguments. This generation is deterministic and requires no LLM call.
+
+If the base predicate N does not exist in the L2 vocabulary, the auto-repair cannot proceed and the system must REJECT, reporting that the checked predicate references a non-existent base predicate.
+
+---
+
+### L3-V4: Goal Achievability
+
+**What must hold:** The action set must be structurally capable of reaching every goal predicate from some plausible initial state. At minimum, every goal predicate must be producible through some chain of action effects. This is a structural check, not a full planning attempt — it verifies the domain is not trivially unsolvable.
+
+**How to check:** Construct a relaxed planning graph using delete-relaxation. This is a standard technique from classical planning:
+
+Begin with an initial fact layer containing all predicate names that could plausibly be true in any initial state. This includes all predicates classified as "robot_state" or "object_state" (which can be grounded from perception) and all "checked" predicates (which can be set by sensing actions). In the relaxed version, ignore delete effects — only accumulate positive effects.
+
+Iteratively expand: for each action whose precondition predicates are all present in the current fact layer, add all of that action's positive effect predicates to the fact layer. Repeat until either all goal predicates are present in the fact layer (pass) or no new predicates are added in an expansion step (fixpoint reached without covering goals — fail).
+
+This algorithm is polynomial in the size of the domain (number of actions times number of predicates times maximum number of expansion layers). For typical manipulation domains it completes in milliseconds.
+
+**On failure:** REJECT. Report which goal predicates are unreachable, and for each unreachable predicate, report whether any action produces it at all. If no action produces a goal predicate, the message should state: "No action in the domain produces the predicate [name]. Add an action whose effects include this predicate." If actions exist that produce the predicate but their preconditions are never satisfiable, the message should identify the broken precondition chain.
+
+---
+
+### L3 Post-Validation Step
+
+After L3 passes all checks, immediately run the deferred L2-V5 minimality check using the now-available action schemas.
+
+### L3 Locking
+
+On successful validation (including any auto-repaired sensing actions), the action set is frozen. The auto-repair log is attached.
+
+---
+
+## Layer L4: Symbolic Grounding and Skill Specification Generation
+
+L4 produces two artifacts and validates both. Artifact 4a (grounding mappings) is a system-level check against the scene. Artifact 4b (skill specifications) validates VLM-generated primitive decompositions against the primitive library schema and the scene representation.
+
+### Validation Order
+
+L4 validation must be executed in the following order because later checks depend on results of earlier checks:
+
+1. L4-V1 through L4-V3 (grounding checks — must pass before skill specifications are generated)
+2. L4-V4 through L4-V7 (structural checks on the VLM output — verify against library schema)
+3. Grounding resolution (resolve symbolic labels to concrete poses using the scene representation)
+4. L4-V8 through L4-V9 (post-grounding checks — require resolved poses)
+
+---
+
+### L4-V1: Grounding Rule Completeness
+
+**What must hold:** Every PDDL type used anywhere in the domain (in predicate argument types and action parameter types) must have a corresponding entry in the pre-defined grounding rule table. The grounding rules are a static system configuration that maps PDDL types to scene element categories.
+
+**How to check:** Collect all type strings from all predicate arguments (L2) and all action parameters (L3). Check each type against the grounding rule table. Any type without a grounding rule is a violation.
+
+**On failure:** REJECT. This is a system configuration error — either the grounding rule table needs to be extended to cover the new type, or the L2 vocabulary introduced a type that should not exist. Return the missing types and the available grounding rules.
+
+---
+
+### L4-V2: Scene Element Availability
+
+**What must hold:** For every scene element category required by the grounding rules used in the domain, the current scene representation must contain at least one element of that category. For example, if any predicate uses the type "object" (which grounds to the objects section of the scene representation), then the objects section must be non-empty.
+
+**How to check:** Determine which scene element categories are needed by looking up the grounding rule for each PDDL type used in the domain. For each required category, check whether the scene representation contains at least one element of that category. The categories are: objects, surfaces, robot, and regions.
+
+**On failure:** REJECT. Trigger a perception update and retry. If the category is still empty after a fresh perception update, report a perception failure identifying which element categories are missing and which PDDL types require them.
+
+---
+
+### L4-V3: Entity Coverage
+
+**What must hold:** Every entity referenced by name in the goal set must be present in the current scene representation, either as an object ID, object semantic label, surface ID, surface semantic label, or the robot identifier.
+
+**How to check:** Extract all argument strings from all goal predicates. Build the set of known entities from the scene representation (all object IDs, object semantic labels, surface IDs, surface semantic labels, and the robot ID). Check each goal argument against this set.
+
+**On failure:** EXPLORATION. Do not reject outright. Instead, flag each missing entity as an exploration target. The system should generate exploration sub-problems to locate these entities in the environment before proceeding. If exploration is not feasible or all exploration attempts for an entity are exhausted, then reject with the explanation that the entity could not be found.
+
+---
+
+### L4-V4: Primitive Membership
+
+**What must hold:** Every primitive named in the VLM-generated skill specification must exist in the primitive library. The primitive library defines the complete executable vocabulary of the system.
+
+**How to check:** For each step in the skill specification's primitive sequence, check whether the primitive name exists as a key in the primitive library.
+
+**On failure:** REJECT. Return the unknown primitive names and the complete list of available primitives in the library. Send this to the VLM for re-decomposition.
+
+---
+
+### L4-V5: Semantic Parameter Validity
+
+**What must hold:** For each primitive in the skill specification, every semantic parameter provided must be a recognized parameter name for that primitive, and its value must be within the set of valid values defined by the primitive library's parameter schema. Specifically: enum-typed parameters must have a value from the enumerated valid set; float-typed parameters must be numeric; integer-typed parameters must be whole numbers.
+
+**How to check:** For each step in the primitive sequence, look up the primitive's parameter schema from the library. For each semantic parameter provided in the step, verify: (a) the parameter name exists in the schema, (b) the value conforms to the type specified in the schema (enum membership, numeric type, etc.).
+
+**On failure:** REJECT. For each invalid parameter, return the step index, primitive name, parameter name, the provided value, and the valid options (for enum types) or expected type (for numeric types). Send to the VLM for re-decomposition.
+
+---
+
+### L4-V6: Symbolic Reference Resolution
+
+**What must hold:** Every symbolic label used in situational parameters must resolve to a concrete element in the current scene representation. Specifically:
+
+Labels in parameters typed as "interaction_point" must match a named interaction point on the target object in the scene representation. Labels in parameters typed as "surface" must match a surface ID or surface semantic label. Labels in parameters typed as "location" must match either a surface or an object identifier. Labels in parameters typed as "surface_boundary" must match a boundary identifier on the referenced surface. Labels in parameters typed as "region" must match a surface or region identifier.
+
+**How to check:** For each step in the primitive sequence, for each situational parameter, look up the parameter's grounding type from the primitive library schema. Based on the grounding type, check whether the provided label exists in the appropriate section of the scene representation. For interaction points, this requires looking up the target object first and then checking its interaction point dictionary.
+
+**On failure:** The response depends on the type of resolution failure:
+
+If the label references an interaction point that does not exist on the target object: first trigger a targeted perception update for that object (the interaction point may exist but not have been detected yet). If the label still does not resolve after the perception update, REJECT and return the available interaction point labels for that object to the VLM for re-decomposition.
+
+If the label references a surface, location, or region that does not exist: REJECT and return the available labels of the appropriate type to the VLM for re-decomposition.
+
+---
+
+### L4-V7: Required Parameter Completeness
+
+**What must hold:** For each primitive in the skill specification, every parameter marked as "required" in the primitive library schema must have a value assigned, either as a semantic parameter or a situational parameter. Additionally, conditionally required parameters must be present when their condition is met. For example, the "hinge_boundary" parameter of the push_pull primitive is required whenever "articulation_mode" is set to "revolute."
+
+**How to check:** For each step in the primitive sequence, look up the primitive's parameter schema. Identify all required parameters (those marked as required, plus any conditionally required parameters whose conditions are satisfied by the provided semantic parameters). Compute the set of all parameter names that have been assigned a value (union of semantic and situational parameter keys). Any required parameter not in the assigned set is missing.
+
+**On failure:** REJECT. Return the step index, primitive name, and each missing required parameter with its specification (type, valid values if applicable). Send to the VLM for re-decomposition.
+
+---
+
+### L4-V8: Constraint Instantiation
+
+**What must hold:** After all symbolic labels have been resolved to concrete geometric values via grounding rules, every geometric constraint defined by the primitive library for each primitive must be fully instantiable — meaning all pose, geometry, and spatial arguments in the constraint are concrete numeric values, not null or symbolic.
+
+This check runs AFTER grounding resolution, not before.
+
+**How to check:** For each step in the primitive sequence, look up the constraint templates defined for that primitive in the library (e.g., "reachable(target)" or "collision_free(path_to(target))"). Substitute the grounded values into each constraint template. Verify that no argument in the instantiated constraint is null, unresolved, or still symbolic.
+
+This check does NOT evaluate whether the constraints are satisfied (that happens during geometric feasibility verification by the motion planner). It only verifies that the constraints CAN be evaluated — that all inputs are concrete.
+
+**On failure:** REJECT. Return which constraints could not be instantiated and which arguments remain unresolved. This typically indicates a grounding resolution failure (a label resolved to a null pose, which may mean the perception system detected the entity but could not compute its geometry). Trigger a perception update for the relevant entity and retry. If still failing, send to VLM for re-decomposition.
+
+---
+
+### L4-V9: Scene Feasibility Pre-Check
+
+**What must hold:** Every grounded target pose must pass lightweight geometric feasibility checks that can rule out obviously impossible configurations before invoking the expensive motion planner. These are necessary-but-not-sufficient conditions: passing them does not guarantee feasibility, but failing them guarantees infeasibility.
+
+Three checks are performed:
+
+**Workspace containment:** For every primitive that moves the gripper or base to a target pose, the target position must be within the robot's pre-computed workspace bounding volume. This is a single point-in-volume test.
+
+**Gross reachability:** For every gripper target pose, the Euclidean distance from the robot base to the target position must not exceed the robot's maximum reach. This is a single distance comparison.
+
+**Grasp aperture compatibility:** For any primitive sequence where a close_gripper follows a move_gripper_to_pose (indicating a grasp), the target object's bounding box dimensions must be compatible with the selected grasp mode and the gripper's maximum aperture. For a top-down grasp, the object's minimum horizontal dimension must not exceed the gripper aperture. For a side grasp, the object's minimum cross-sectional dimension (perpendicular to the approach) must not exceed the gripper aperture. This is a comparison of two scalar values.
+
+**How to check:** For each step referencing a target pose: resolve the pose to coordinates, perform the workspace containment check, perform the reachability distance check, and (if a grasp is indicated by the sequence context) perform the aperture compatibility check.
+
+**On failure:** REJECT. Return each failing check with the specific geometric values (distance vs. max reach, dimension vs. aperture, etc.) and the explanation of why it is infeasible. Send to the VLM for re-decomposition, excluding the failing options. For example, if a top-down grasp fails the aperture check, tell the VLM: "Top-down grasp is infeasible for this object (minimum dimension exceeds gripper aperture). Consider a side grasp or different interaction point."
+
+---
+
+### L4 Locking
+
+On successful validation of both artifacts, the grounding mappings and skill specifications are frozen. Skill specifications are also cached in the Domain Knowledge Base indexed by action name and target object, with the object's class annotation for cross-instance reuse.
+
+---
+
+## Layer L5: Initial State Construction
+
+L5 is fully automated — no LLM or VLM is involved. The system deterministically constructs the initial PDDL state by applying grounding rules to the current scene representation, following initialization rules that depend on each predicate's type classification.
+
+### Construction Rules
+
+The initial state is a set of facts, where each fact is a predicate applied to specific entity arguments with a boolean truth value.
+
+The system enumerates all applicable predicate-entity combinations by computing, for each predicate, the set of all entity tuples matching the predicate's argument types (using the grounding rules to determine which entities match each type). For each such tuple, a truth value is assigned according to the predicate's type classification:
+
+- **Robot state predicates:** The truth value is queried directly from the robot's state interface. These are always deterministically known.
+- **Object state predicates:** The truth value is determined by evaluating the corresponding spatial relationship in the scene representation's spatial relations data.
+- **Checked predicates:** The truth value is always FALSE. This is invariant — checked predicates are never initialized to TRUE regardless of any prior knowledge, because the sensing coverage guarantee requires runtime verification.
+- **Sensed and external predicates:** The truth value is always FALSE (conservative default). This forces the planner to include sensing actions before relying on these properties, maintaining the sensing coverage guarantee.
+
+---
+
+### L5-V1: State Completeness
+
+**What must hold:** Every applicable predicate-entity combination must have a truth value assigned in the initial state. No combinations may be missing.
+
+**How to check:** Compute the set of all expected predicate-entity combinations (the same enumeration used during construction). Verify that the initial state contains an entry for every expected combination. If using the closed-world assumption, missing entries default to FALSE; otherwise, missing entries are flagged.
+
+**On failure:** AUTO-REPAIR. For any missing combinations, add them to the initial state with value FALSE (conservative default). Since L5 is automated, missing entries indicate a gap in the enumeration logic rather than an LLM error.
+
+---
+
+### L5-V2: Initialization Rule Compliance
+
+**What must hold:** Every fact in the initial state must follow the correct initialization rule for its predicate's type classification. Specifically: all checked predicates must be FALSE, and all sensed and external predicates must be FALSE (conservative default).
+
+**How to check:** For each fact in the initial state, look up the predicate's type classification from the L2 vocabulary. If the classification is "checked" and the value is not FALSE, the fact violates the rule. If the classification is "sensed" or "external" and the value is not FALSE, the fact violates the rule.
+
+**On failure:** AUTO-REPAIR. Reset any violating facts to FALSE. Log each correction. Since L5 is automated, violations indicate a bug in the construction procedure.
+
+---
+
+### L5-V3: Type Match
+
+**What must hold:** For every fact in the initial state, the entity constants in the argument positions must match the types declared in the predicate definition. An entity identified as an object in the scene representation must only appear in argument positions typed as "object." An entity identified as a surface must only appear in positions typed as "surface" or "location." The robot identifier must only appear in positions typed as "robot."
+
+**How to check:** For each fact, look up the predicate definition from L2. For each argument in the fact, determine the entity's type by checking which section of the scene representation contains it (objects, surfaces, or robot). Verify that this type matches or is compatible with the type declared for that argument position in the predicate definition.
+
+**On failure:** REJECT. This indicates a system bug in the state construction procedure (since L5 is automated). Return the specific type mismatches. Trigger a re-examination of the entity type assignments and re-run state construction.
+
+---
+
+### L5-V4: Consistency with Scene Representation
+
+**What must hold:** Every spatial predicate (such as object-at, on, in, attached-to) that is asserted as TRUE in the initial state must correspond to a spatial relationship actually present in the scene representation's spatial relations data. The initial state must not assert spatial facts that contradict what the perception system observes.
+
+**How to check:** Identify all facts in the initial state whose predicate is classified as a spatial predicate (maintained as a static configuration list). For each such fact that has value TRUE, verify that a matching spatial relation exists in the scene representation. A match requires the same predicate name, the same first entity, and the same second entity.
+
+**On failure:** REJECT. This indicates a bug in the construction procedure. Return the specific inconsistent facts. Trigger a fresh perception update and re-run state construction.
+
+---
+
+### L5-V5: Goal-State Distinctness
+
+**What must hold:** The initial state should not already satisfy all goal predicates. If it does, the task is trivially complete — the planner will produce an empty plan.
+
+**How to check:** For each goal predicate from L1, evaluate it against the initial state. A non-negated goal is satisfied if the corresponding fact is TRUE. A negated goal is satisfied if the corresponding fact is FALSE. If all goals are satisfied, the check triggers.
+
+**On failure:** WARNING (not rejection). Log the warning: "Initial state already satisfies all goals. The task may be trivially complete. Verify that the goal specification and perception are correct." Continue execution — the planner will correctly produce an empty plan if the task is indeed already complete.
+
+---
+
+### L5 Locking
+
+On successful validation (including any auto-repairs), the initial state is frozen. The complete domain (predicate vocabulary from L2, action schemas from L3, initial state from L5, and goal set from L1) is passed to the planner.
+
+---
+
+## Validation Check Summary
+
+**Layer L1 — Goal Specification (4 checks):**
+
+| ID | Condition | Response |
+|----|-----------|----------|
+| L1-V1 | Goal set is non-empty | REJECT |
+| L1-V2 | All goal predicates are syntactically well-formed | REJECT |
+| L1-V3 | No contradictory goals under uniqueness constraints | REJECT |
+| L1-V4 | All goal arguments reference entities in the scene | REJECT (flag for exploration) |
+
+**Layer L2 — Predicate Vocabulary (6 checks):**
+
+| ID | Condition | Response |
+|----|-----------|----------|
+| L2-V1 | All goal predicate names are defined | REJECT |
+| L2-V2 | All names follow PDDL naming convention | REJECT |
+| L2-V3 | Every sensed/external predicate has a checked variant | AUTO-REPAIR |
+| L2-V4 | All argument types are in the valid type set | REJECT |
+| L2-V5 | No unused predicates (deferred to after L3) | AUTO-REPAIR |
+| L2-V6 | All type classifications are valid | REJECT |
+
+**Layer L3 — Action Schemas (4 checks):**
+
+| ID | Condition | Response |
+|----|-----------|----------|
+| L3-V1 | All predicates in actions exist in vocabulary | REJECT |
+| L3-V2 | All variables declared with valid types | REJECT |
+| L3-V3 | All checked predicates in preconditions have producing actions | AUTO-REPAIR |
+| L3-V4 | All goal predicates reachable via relaxed planning graph | REJECT |
+
+**Layer L4 — Grounding and Skill Specifications (9 checks):**
+
+| ID | Condition | Response |
+|----|-----------|----------|
+| L4-V1 | Grounding rules exist for all PDDL types | REJECT |
+| L4-V2 | Scene has elements for all required categories | REJECT (perception update) |
+| L4-V3 | All goal entities present in scene | EXPLORATION |
+| L4-V4 | All primitives in sequence exist in library | REJECT (VLM re-decompose) |
+| L4-V5 | All semantic parameters valid per schema | REJECT (VLM re-decompose) |
+| L4-V6 | All symbolic labels resolve in scene | REJECT (perception update or VLM re-decompose) |
+| L4-V7 | All required parameters present | REJECT (VLM re-decompose) |
+| L4-V8 | All constraints instantiable after grounding | REJECT |
+| L4-V9 | All target poses pass feasibility pre-checks | REJECT (VLM re-decompose with exclusions) |
+
+**Layer L5 — Initial State (5 checks):**
+
+| ID | Condition | Response |
+|----|-----------|----------|
+| L5-V1 | All predicate-entity combinations assigned | AUTO-REPAIR |
+| L5-V2 | Checked and sensed predicates initialized correctly | AUTO-REPAIR |
+| L5-V3 | Entity types match predicate argument types | REJECT (system bug) |
+| L5-V4 | Spatial facts consistent with scene | REJECT (system bug) |
+| L5-V5 | Initial state does not already satisfy all goals | WARNING |
+
+**Auto-Repair Summary (5 procedures, all deterministic, no LLM/VLM required):**
+
+| Triggered By | What Is Repaired |
+|-------------|-----------------|
+| L2-V3 | Missing checked-variant predicates are generated with matching argument types and "checked" classification |
+| L2-V5 | Unused predicates are removed from the vocabulary |
+| L3-V3 | Missing sensing actions are generated from predicate templates with appropriate parameters and effects |
+| L5-V1 | Missing state facts are added with FALSE as the conservative default value |
+| L5-V2 | Checked and sensed predicates incorrectly set to TRUE are reset to FALSE |
