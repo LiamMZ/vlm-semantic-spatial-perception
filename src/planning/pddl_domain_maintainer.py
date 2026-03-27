@@ -2,10 +2,6 @@
 PDDL representation builder with staged validation and repair.
 """
 
-import asyncio
-import re
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
-from pathlib import Path
 import json
 import re
 from pathlib import Path
@@ -22,6 +18,7 @@ from .utils.task_types import (
     AbstractGoal,
     ActionSchemaLibrary,
     GroundingSummary,
+    LayeredDomainArtifact,
     PredicateInventory,
     TaskAnalysis,
 )
@@ -231,7 +228,7 @@ class PDDLDomainMaintainer:
         """
 
         if self.task_analysis is None or self.current_task is None:
-            raise RuntimeError("Call build_representation() before ground_representation().")
+            return {"skipped": True, "reason": "no task analysis yet"}
 
         previous_object_ids = set(self.task_analysis.grounding_summary.observed_object_ids)
         previous_predicates = set(self.task_analysis.grounding_summary.grounded_predicates)
@@ -430,7 +427,7 @@ class PDDLDomainMaintainer:
 
         return self.task_analysis
 
-    async def initialize_from_layered_artifact(self, artifact: "LayeredDomainArtifact") -> "TaskAnalysis":
+    async def initialize_from_layered_artifact(self, artifact: LayeredDomainArtifact) -> TaskAnalysis:
         """
         Initialize PDDL domain from a LayeredDomainArtifact produced by LayeredDomainGenerator.
 
@@ -468,7 +465,9 @@ class PDDLDomainMaintainer:
 
         # Add predicted predicates
         # First, infer parameter counts from action definitions
-        predicate_param_counts = self._infer_predicate_arities_from_actions()
+        predicate_param_counts = self._infer_predicate_arities_from_actions(
+            self.task_analysis.required_actions
+        )
 
         normalized_predicates: List[str] = []
         seen_normalized: Set[str] = set()
@@ -993,7 +992,8 @@ class PDDLDomainMaintainer:
         text = self.llm_analyzer._generate_content(content_parts=[prompt], timeout=30.0)
         if not text:
             raise RuntimeError(f"Repair prompt `{template_key}` returned an empty response.")
-        payload = json.loads(text)
+        from .layered_domain_generator import _extract_json
+        payload = _extract_json(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Expected JSON object from {template_key}")
         return payload
@@ -1080,6 +1080,23 @@ class PDDLDomainMaintainer:
             if pred_name and not params:
                 globals_.add(pred_name)
         return globals_
+
+    @staticmethod
+    def _infer_predicate_arities_from_actions(actions: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Scan action preconditions/effects and return {predicate_name: arg_count}."""
+        counts: Dict[str, int] = {}
+        _logical = {"and", "or", "not", "forall", "exists", "when", "imply"}
+        for action in actions:
+            for formula in (action.get("precondition", ""), action.get("effect", "")):
+                for m in re.finditer(r"\(([^()]+)\)", formula or ""):
+                    tokens = m.group(1).strip().split()
+                    if not tokens or tokens[0].lower() in _logical:
+                        continue
+                    name = tokens[0].lower()
+                    arg_count = len([t for t in tokens[1:] if not t.startswith("(")])
+                    if name not in counts or counts[name] < arg_count:
+                        counts[name] = arg_count
+        return counts
 
     @staticmethod
     def _normalize_predicate_signature(

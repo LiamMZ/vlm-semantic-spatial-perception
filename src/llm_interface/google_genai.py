@@ -113,8 +113,28 @@ class GoogleGenAIClient(LLMClient):
             contents=sdk_contents,
             config=sdk_config,
         )
+        # Log finish reason and token usage to help diagnose truncation
+        try:
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is not None:
+                finish_reason = getattr(candidate, "finish_reason", None)
+                usage = self._extract_usage(response)
+                if finish_reason and str(finish_reason) not in ("FinishReason.STOP", "STOP", "1"):
+                    logger.warning(
+                        "generate_async finish_reason=%s tokens=%s — response may be truncated",
+                        finish_reason, usage,
+                    )
+        except Exception:
+            pass
+        try:
+            text = response.text
+        except Exception:
+            text = ""
+            for candidate in (response.candidates or []):
+                for part in (getattr(candidate.content, "parts", None) or []):
+                    text += getattr(part, "text", "") or ""
         return LLMResponse(
-            text=response.text or "",
+            text=text or "",
             model=self._model,
             usage_metadata=self._extract_usage(response),
         )

@@ -81,6 +81,9 @@ class LLMTaskAnalyzer:
         }
         self.robot_description = (config_data.get("robot_description") or "").strip()
 
+        self.call_count: int = 0
+        self.total_elapsed_seconds: float = 0.0
+
         if llm_client is not None:
             print(f"ℹ LLMTaskAnalyzer using injected LLMClient: {type(llm_client).__name__}")
         else:
@@ -311,59 +314,6 @@ class LLMTaskAnalyzer:
             diagnostics={},
         )
 
-    def clear_cache(self) -> None:
-        """Compatibility no-op. The staged analyzer no longer caches responses."""
-
-        # Build content parts
-        if self._llm_client is not None:
-            from src.llm_interface.base import GenerateConfig, ImagePart
-            llm_parts = []
-            if pil_image:
-                img_byte_arr = io.BytesIO()
-                pil_image.save(img_byte_arr, format='PNG')
-                llm_parts.append(ImagePart(data=img_byte_arr.getvalue()))
-            llm_parts.append(prompt)
-            cfg = GenerateConfig(
-                temperature=0.1,
-                top_p=0.9,
-                max_output_tokens=8192,
-                response_mime_type="application/json",
-            )
-            response_text = self._llm_client.generate(llm_parts, config=cfg).text
-        else:
-            content_parts = []
-            if pil_image:
-                img_byte_arr = io.BytesIO()
-                pil_image.save(img_byte_arr, format='PNG')
-                img_bytes = img_byte_arr.getvalue()
-                content_parts.append(types.Part.from_bytes(data=img_bytes, mime_type='image/png'))
-            content_parts.append(prompt)
-
-            config = types.GenerateContentConfig(
-                temperature=0.1,
-                top_p=0.9,
-                max_output_tokens=8192,
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=0)
-            )
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=content_parts,
-                config=config
-            )
-            response_text = response.text
-        print(f"************************************ {response_text}")
-        elapsed = time.time() - start_time
-        print(f"   → LLM analysis completed in {elapsed:.2f}s")
-
-        # Parse response
-        analysis = self._parse_response(response_text)
-
-        # Cache result
-        self._cache[cache_key] = analysis
-
-        return analysis
-
     def _build_initial_analysis_prompt(self, task: str) -> str:
         """
         Build prompt for INITIAL task analysis (before any observations).
@@ -532,70 +482,82 @@ Focus on:
 4. Include all task-relevant predicates
 5. Ensure all PDDL actions follow proper syntax (no quoted strings!)"""
 
-    def _parse_response(self, response_text: str) -> TaskAnalysis:
-        """Parse LLM JSON response into TaskAnalysis."""
+    def _generate_stage_json(
+        self,
+        template_key: str,
+        replacements: Dict[str, str],
+        environment_image: Optional[Union[np.ndarray, Image.Image, str, Path]],
+        timeout: float,
+    ) -> Dict[str, Any]:
+        """Render a prompt template and call the LLM, returning a parsed JSON dict."""
+        prompt = render_prompt_template(self._get_prompt_template(template_key), replacements)
+        pil_image = self._prepare_image(environment_image) if environment_image is not None else None
+        response_text = self._generate_content(content_parts=[prompt], timeout=timeout, image=pil_image)
         try:
-            data = json.loads(response_text)
+            payload = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to parse JSON for {template_key}: {exc}\n{response_text}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"Expected JSON object for {template_key}, got {type(payload).__name__}")
+        return payload
 
-            # Accept both legacy and current action keys to stay compatible with prompt schema
-            actions = (
-                data.get("required_actions")
-                or data.get("relevant_actions")
-                or data.get("actions")
-                or []
+    def _generate_content(
+        self,
+        content_parts: List[Any],
+        timeout: float,
+        image: Optional[Image.Image] = None,
+    ) -> str:
+        """Call the LLM synchronously and return the response text."""
+        start = time.time()
+
+        if self._llm_client is not None:
+            from src.llm_interface.base import GenerateConfig, ImagePart
+            llm_parts: List[Any] = []
+            if image is not None:
+                buf = io.BytesIO()
+                image.save(buf, format="PNG")
+                llm_parts.append(ImagePart(data=buf.getvalue()))
+            # content_parts contains prompt string(s)
+            llm_parts.extend(p for p in content_parts if isinstance(p, str))
+            cfg = GenerateConfig(
+                temperature=0.1,
+                top_p=0.9,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
             )
-
-            return TaskAnalysis(
-                goal_predicates=data.get("goal_predicates", []),
-                preconditions=data.get("preconditions", []),
-                goal_objects=data.get("goal_objects", []),
-                initial_predicates=data.get("initial_predicates", []),
-                global_predicates=data.get("global_predicates", []),
-                relevant_predicates=data.get("relevant_predicates", []),
-                required_actions=actions,
-            )
-        except Exception as e:
-            print(f"   ⚠ Failed to parse LLM response: {e}")
-            raise
-
-    def _create_fallback_analysis(
-        self, task: str, objects: List[Dict]
-    ) -> TaskAnalysis:
-        """Create basic fallback analysis if LLM fails."""
-        return TaskAnalysis(
-            action_sequence=["navigate", "manipulate"],
-            goal_predicates=["completed(task)"],
-            preconditions=["ready(robot)"],
-            goal_objects=[obj.get("object_id", "") for obj in objects[:3]],
-            tool_objects=[],
-            obstacle_objects=[],
-            initial_predicates=[],
-            global_predicates=["hand_is_empty"],
-            relevant_predicates=["at", "holding"],
-            required_actions=[],
-            complexity="medium",
-            estimated_steps=2
-        )
-
-    def _make_cache_key(self, task: str, objects: List[Dict]) -> str:
-        """Create cache key from task and objects."""
-        obj_ids = sorted([obj.get("object_id", "") for obj in objects])
-        return f"{task}_{','.join(obj_ids)}"
-
-    def _prepare_image(self, image: Union[np.ndarray, Image.Image, str, Path]) -> Image.Image:
-        """Convert image to PIL Image format."""
-        if isinstance(image, (str, Path)):
-            return Image.open(image)
-        elif isinstance(image, np.ndarray):
-            return Image.fromarray(image)
-        elif isinstance(image, Image.Image):
-            return image
+            response_text = self._llm_client.generate(llm_parts, config=cfg).text
         else:
-            raise ValueError(f"Unsupported image type: {type(image)}")
+            if self.client is None:
+                raise RuntimeError(
+                    "LLMTaskAnalyzer requires GEMINI_API_KEY or GOOGLE_API_KEY."
+                )
+            sdk_parts: List[Any] = []
+            if image is not None:
+                buf = io.BytesIO()
+                image.save(buf, format="PNG")
+                sdk_parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png"))
+            sdk_parts.extend(content_parts)
+            config = types.GenerateContentConfig(
+                temperature=0.1,
+                top_p=0.9,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=sdk_parts,
+                config=config,
+            )
+            response_text = response.text or ""
 
-    def clear_cache(self):
-        """Clear analysis cache."""
-        self._cache.clear()
+        elapsed = time.time() - start
+        self.call_count += 1
+        self.total_elapsed_seconds += elapsed
+        _ = timeout
+        if not response_text:
+            raise RuntimeError("Model returned an empty response body.")
+        return response_text
 
     def _get_prompt_template(self, template_key: str) -> str:
         template = self.prompt_templates.get(template_key)

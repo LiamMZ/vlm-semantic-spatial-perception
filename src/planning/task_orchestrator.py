@@ -248,7 +248,7 @@ class TaskOrchestrator:
                 self.logger.info("  • Default robot provider attached: XArmPybulletInterface (sim)")
             except Exception as e:
                 self.logger.warning("  • No robot provider attached (sim initialization failed: %s)", e)
-
+                
         # Initialize continuous tracker
         self.tracker = ContinuousObjectTracker(
             api_key=self.config.api_key,

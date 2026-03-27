@@ -4,10 +4,9 @@ Task analysis and monitoring types.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -144,6 +143,39 @@ class TaskAnalysis:
         """Return action schemas formatted for downstream components."""
         return list(self.action_schemas.actions)
 
+    # ------------------------------------------------------------------
+    # Backward-compat properties (map old flat names → new nested types)
+    # ------------------------------------------------------------------
+
+    @property
+    def goal_predicates(self) -> List[str]:
+        return list(self.abstract_goal.goal_literals)
+
+    @property
+    def goal_objects(self) -> List[str]:
+        return list(self.abstract_goal.goal_objects)
+
+    @property
+    def relevant_predicates(self) -> List[str]:
+        return list(self.predicate_inventory.predicates)
+
+    @relevant_predicates.setter
+    def relevant_predicates(self, value: List[str]) -> None:
+        self.predicate_inventory.predicates = list(value)
+
+    @property
+    def required_actions(self) -> List[Dict[str, Any]]:
+        return list(self.action_schemas.actions)
+
+    @property
+    def global_predicates(self) -> List[str]:
+        """Zero-arity predicates derived from the predicate inventory."""
+        return [
+            sig.strip("()").split()[0]
+            for sig in self.predicate_inventory.predicates
+            if sig.count("?") == 0
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Layered Domain Generation Artifacts (L1–L5)
@@ -206,23 +238,33 @@ class LayeredDomainArtifact:
     scene_objects: List[Dict]
 
     def to_task_analysis(self) -> "TaskAnalysis":
-        """Bridge method: convert to legacy TaskAnalysis for backward compatibility."""
+        """Bridge method: convert layered artifacts to the new TaskAnalysis."""
         all_actions = self.l3.actions + self.l3.sensing_actions
-        initial_predicates: List[str] = []
+
+        grounded_predicates: List[str] = []
         if self.l5:
             for pred_name, args in self.l5.true_literals:
                 if args:
-                    initial_predicates.append(f"({pred_name} {' '.join(args)})")
+                    grounded_predicates.append(f"({pred_name} {' '.join(args)})")
                 else:
-                    initial_predicates.append(f"({pred_name})")
+                    grounded_predicates.append(f"({pred_name})")
+
         return TaskAnalysis(
-            goal_predicates=self.l1.goal_predicates,
-            preconditions=[],
-            goal_objects=self.l1.goal_objects,
-            initial_predicates=initial_predicates,
-            global_predicates=self.l1.global_predicates,
-            relevant_predicates=self.l2.predicate_signatures,
-            required_actions=all_actions,
+            abstract_goal=AbstractGoal(
+                summary=self.task_description,
+                goal_literals=self.l1.goal_predicates,
+                goal_objects=self.l1.goal_objects,
+            ),
+            predicate_inventory=PredicateInventory(
+                predicates=self.l2.predicate_signatures,
+            ),
+            action_schemas=ActionSchemaLibrary(
+                actions=all_actions,
+            ),
+            grounding_summary=GroundingSummary(
+                grounded_predicates=grounded_predicates,
+                observed_object_ids=[o.get("object_id", "") for o in self.scene_objects],
+            ),
         )
 
 

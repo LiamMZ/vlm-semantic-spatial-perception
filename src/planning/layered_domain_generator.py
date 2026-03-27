@@ -68,14 +68,13 @@ def _extract_json(text: str) -> Any:
             return json.loads(fenced.group(1).strip())
         except json.JSONDecodeError:
             pass
-    # 3. Find the first {...} or [...] block in the text
-    for pattern in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
-        m = re.search(pattern, text)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                pass
+    # 3. Find the first {...} block in the text (prefer object over array)
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
     raise json.JSONDecodeError("No valid JSON found in model output", text, 0)
 
 
@@ -1674,7 +1673,7 @@ class LayeredDomainGenerator:
             cfg = GenerateConfig(
                 temperature=temperature,
                 top_p=0.9,
-                max_output_tokens=4096,
+                max_output_tokens=8192,
                 response_mime_type=response_mime_type,
             )
             response = await self._llm_client.generate_async(prompt, config=cfg)
@@ -1683,7 +1682,7 @@ class LayeredDomainGenerator:
         config = types.GenerateContentConfig(
             temperature=temperature,
             top_p=0.9,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
             response_mime_type=response_mime_type,
         )
         response = self.client.models.generate_content(
