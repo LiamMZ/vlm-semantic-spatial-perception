@@ -303,14 +303,21 @@ class SkillDecomposer:
 
         object_section = "\n".join(_format_obj(o) for o in relevant[:10]) or "none"
 
-        return template.format(
-            primitive_catalog=primitive_catalog.strip(),
-            action_name=action_name,
-            parameters=json.dumps(parameters, ensure_ascii=True),
-            object_section=object_section,
-            last_snapshot_id=snapshot_artifacts.snapshot_id,
-            perception_context=perception_context,
-        )
+        # Use simple sequential replacement instead of str.format() to avoid
+        # IndexError / KeyError when substituted values contain curly braces
+        # (e.g. JSON dicts in object_section or perception_context).
+        substitutions = {
+            "{primitive_catalog}": primitive_catalog.strip(),
+            "{action_name}": action_name,
+            "{parameters}": json.dumps(parameters, ensure_ascii=True),
+            "{object_section}": object_section,
+            "{last_snapshot_id}": str(snapshot_artifacts.snapshot_id),
+            "{perception_context}": perception_context,
+        }
+        result = template
+        for placeholder, value in substitutions.items():
+            result = result.replace(placeholder, value)
+        return result
 
     def _call_llm(
         self,

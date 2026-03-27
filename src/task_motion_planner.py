@@ -62,10 +62,8 @@ from src.planning.pddl_solver import SolverResult
 from src.primitives.skill_decomposer import SkillDecomposer
 from src.primitives.primitive_executor import PrimitiveExecutor, PrimitiveExecutionResult
 from src.primitives.skill_plan_types import SkillPlan
-from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
 from src.utils.genai_logging import configure_genai_logging
 from src.camera.realsense_camera import RealSenseCamera
-from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
 # Import orchestrator config
 import sys
 config_path = Path(__file__).parent.parent / "config"
@@ -115,7 +113,7 @@ class TAMPConfig:
 
     # Execution settings
     dry_run_default: bool = False  # Default dry-run mode for execution
-    primitives_interface: Optional[Any] = CuRoboMotionPlanner(robot_ip="192.168.1.224")  # Actual robot primitives interface
+    primitives_interface: Optional[Any] = None  # Robot primitives interface (set at runtime)
 
     # Callbacks
     on_state_change: Optional[Callable[[TAMPState], None]] = None

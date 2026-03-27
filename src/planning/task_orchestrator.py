@@ -125,6 +125,9 @@ class TaskOrchestrator:
         self.tracker: Optional[ContinuousObjectTracker] = None
         self.solver: Optional[PDDLSolver] = None
 
+        # Layered domain generator (optional gated/guardrailed pipeline)
+        self._layered_generator: Optional[Any] = None
+
         # Task state
         self.current_task: Optional[str] = None
         self.task_analysis: Optional[TaskAnalysis] = None
@@ -170,7 +173,7 @@ class TaskOrchestrator:
         self.logger.info("Initializing Task Orchestrator...")
 
         # Initialize camera if not provided
-        if self._camera is None:
+        if self._camera is None and not getattr(self.config, "use_sim_camera", False):
             self.logger.info(
                 "  • Initializing RealSense camera (%sx%s @ %s FPS)...",
                 self.config.camera_width,
@@ -186,8 +189,10 @@ class TaskOrchestrator:
                 logger=self.logger.getChild("RealSenseCamera"),
             )
             self.logger.info("    ✓ Camera initialized")
-        else:
+        elif self._camera is not None:
             self.logger.info("  • Using provided camera")
+        else:
+            self.logger.info("  • Sim camera mode — frame provider will be injected")
 
         # Initialize PDDL representation if not provided
         if self.pddl is None:
@@ -198,11 +203,13 @@ class TaskOrchestrator:
             self.logger.info("  • PDDL representation created")
 
         # Initialize PDDL components
+        _llm_client = getattr(self.config, "llm_client", None)
         self.maintainer = PDDLDomainMaintainer(
             self.pddl,
             api_key=self.config.api_key,
             model_name=self.config.model_name,
             task_analyzer_prompts_path=self.config.task_analyzer_prompts_path,
+            llm_client=_llm_client,
         )
 
         self.monitor = TaskStateMonitor(
@@ -213,15 +220,35 @@ class TaskOrchestrator:
         )
         self.logger.info("  • PDDL domain maintainer and monitor initialized")
 
-        # Attach default robot provider if none supplied (xArm CuRobo interface)
+        # Initialize layered domain generator when enabled
+        if getattr(self.config, "use_layered_generation", False):
+            from .layered_domain_generator import LayeredDomainGenerator
+            dkb = None
+            dkb_dir = getattr(self.config, "dkb_dir", None)
+            if dkb_dir is not None:
+                try:
+                    from .domain_knowledge_base import DomainKnowledgeBase
+                    dkb = DomainKnowledgeBase(dkb_dir)
+                    dkb.load()
+                except Exception as e:
+                    self.logger.warning("  • DKB load failed (%s), proceeding without DKB", e)
+            self._layered_generator = LayeredDomainGenerator(
+                api_key=self.config.api_key,
+                model_name=self.config.model_name,
+                dkb=dkb,
+                llm_client=_llm_client,
+            )
+            self.logger.info("  • Layered domain generator initialized (use_layered_generation=True)")
+
+        # Attach default robot provider if none supplied — use PyBullet sim interface
         if getattr(self.config, "robot", None) is None:
             try:
-                from ..kinematics.xarm_curobo_interface import CuRoboMotionPlanner
-                self.config.robot = CuRoboMotionPlanner()
-                self.logger.info("  • Default robot provider attached: CuRoboMotionPlanner")
+                from ..kinematics.xarm_pybullet_interface import XArmPybulletInterface
+                self.config.robot = XArmPybulletInterface()
+                self.logger.info("  • Default robot provider attached: XArmPybulletInterface (sim)")
             except Exception as e:
-                self.logger.warning("  • No robot provider attached (default xArm initialization failed: %s)", e)
-
+                self.logger.warning("  • No robot provider attached (sim initialization failed: %s)", e)
+                
         # Initialize continuous tracker
         self.tracker = ContinuousObjectTracker(
             api_key=self.config.api_key,
@@ -230,7 +257,8 @@ class TaskOrchestrator:
             update_interval=self.config.update_interval,
             on_detection_complete=self._on_detection_callback,
             logger=self.logger.getChild("ObjectTracker"),
-            robot=self.config.robot
+            robot=self.config.robot,
+            llm_client=_llm_client,
         )
 
         # Set frame provider
@@ -330,10 +358,32 @@ class TaskOrchestrator:
 
         # Analyze task and initialize domain
         self.logger.info("  • Analyzing task with LLM...")
-        self.task_analysis = await self.maintainer.build_representation(
-            task=task_description,
-            image=environment_image,
-        )
+        if self._layered_generator is not None:
+            # Gated/guardrailed pipeline: L1→L5 with validation gates
+            self.logger.info("  • Using layered domain generator (L1–L5 pipeline)...")
+            # Use any objects already detected by the tracker
+            detected = self.get_detected_objects()
+            observed_objects = [
+                {
+                    "object_id": obj.object_id,
+                    "object_type": obj.object_type,
+                    "affordances": list(obj.affordances),
+                    "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None,
+                }
+                for obj in detected
+            ]
+            artifact = await self._layered_generator.generate_domain(
+                task_description,
+                observed_objects=observed_objects,
+                image=environment_image,
+            )
+            self.task_analysis = await self.maintainer.initialize_from_layered_artifact(artifact)
+        else:
+            # Legacy monolithic path
+            self.task_analysis = await self.maintainer.initialize_from_task(
+                task_description,
+                environment_image=environment_image
+            )
 
         self.logger.info("✓ Task analyzed!")
         valid_goal_objects = [obj for obj in self.task_analysis.goal_object_references() if obj and obj != "None"]
@@ -473,6 +523,8 @@ class TaskOrchestrator:
 
     def _get_camera_frames(self):
         """Frame provider for continuous tracker."""
+        if self._camera is None:
+            return None, None, None, None
         try:
             color, depth = self._camera.get_aligned_frames()
             intrinsics = self._camera.get_camera_intrinsics()
@@ -1091,11 +1143,16 @@ class TaskOrchestrator:
             for obj in all_objects:
                 # Add object instance if not already present
                 if obj.object_id not in self.pddl.object_instances:
+                    obj_type = obj.object_type
+                    # Auto-register unknown types as children of 'object'
+                    if obj_type not in self.pddl.object_types:
+                        await self.pddl.add_object_type_async(obj_type, parent="object")
+                        self.logger.debug(f"      Auto-registered type '{obj_type}' (parent: object)")
                     await self.pddl.add_object_instance_async(
                         obj.object_id,
-                        "object"
+                        obj_type
                     )
-                    self.logger.info(f"      Added: {obj.object_id} (object)")
+                    self.logger.info(f"      Added: {obj.object_id} ({obj_type})")
 
             # Add global predicates to initial state
             if self.maintainer:
@@ -1109,6 +1166,61 @@ class TaskOrchestrator:
                             self.logger.info(f"      Added global predicate: {pred_name}")
                         except ValueError as e:
                             self.logger.warning(f"      Failed to add global predicate '{pred_name}': {e}")
+
+                # Apply L5 initial state literals first (handles on, above, etc.)
+                # These use position_3d proximity from the scene at generation time.
+                added_initial: set = set()
+                l5 = getattr(self.maintainer, "_l5_artifact", None)
+                if l5 and l5.true_literals:
+                    for pred_name, args in l5.true_literals:
+                        if args and not all(a in self.pddl.object_instances for a in args):
+                            continue
+                        key = (pred_name, tuple(args))
+                        if key not in added_initial:
+                            try:
+                                await self.pddl.add_initial_literal_async(pred_name, args, negated=False)
+                                added_initial.add(key)
+                            except ValueError:
+                                pass
+
+                # Derive `clear` facts: an object is clear if nothing is `on` it.
+                # This handles blocksworld-style domains where `clear` is added by refinement.
+                domain_predicates = set(self.pddl.predicates.keys())
+                if "clear" in domain_predicates:
+                    occupied: set = set()
+                    for pred_name, args in l5.true_literals if (l5 and l5.true_literals) else []:
+                        if pred_name == "on" and len(args) == 2:
+                            occupied.add(args[1])  # surface has something on it
+                    for obj in all_objects:
+                        if obj.object_id not in occupied:
+                            key = ("clear", (obj.object_id,))
+                            if key not in added_initial:
+                                try:
+                                    await self.pddl.add_initial_literal_async("clear", [obj.object_id], negated=False)
+                                    added_initial.add(key)
+                                except ValueError:
+                                    pass
+
+                # Re-derive unary affordance predicates from live detected objects.
+                # This catches cases where L5 was built before perception ran (empty scene)
+                # or where domain refinement re-added predicates that L2-V5 had pruned.
+                # Try both bare name (e.g. `graspable`) and object-prefixed name
+                # (e.g. `object-graspable`) since the prompt encourages prefixed naming.
+                for obj in all_objects:
+                    for affordance in (obj.affordances or set()):
+                        base = affordance.replace(" ", "-").replace("_", "-")
+                        candidates = [base, f"object-{base}"]
+                        for pred_name in candidates:
+                            if pred_name in domain_predicates:
+                                key = (pred_name, (obj.object_id,))
+                                if key not in added_initial:
+                                    try:
+                                        await self.pddl.add_initial_literal_async(pred_name, [obj.object_id], negated=False)
+                                        added_initial.add(key)
+                                    except ValueError:
+                                        pass
+                if added_initial:
+                    self.logger.info(f"  • Added {len(added_initial)} initial literals from L5 + affordances")
 
         # Set goals if requested
         if set_goals:
@@ -1138,7 +1250,10 @@ class TaskOrchestrator:
         self.logger.info("Problem Summary:")
         self.logger.info("  • Objects: %s", len(problem_snapshot["object_instances"]))
         self.logger.info("  • Initial literals: %s", len(problem_snapshot["initial_literals"]))
-        self.logger.info("  • Goal literals: %s", len(problem_snapshot["goal_literals"]))
+        # goal_literals tracks structured Literal objects; goal_formulas tracks raw PDDL strings.
+        # Goals are added via add_goal_formula_async so count goal_formulas.
+        goal_count = len(problem_snapshot.get("goal_literals", [])) + len(self.pddl.goal_formulas)
+        self.logger.info("  • Goal literals: %s", goal_count)
 
         self.logger.info("%s", "=" * 70)
 

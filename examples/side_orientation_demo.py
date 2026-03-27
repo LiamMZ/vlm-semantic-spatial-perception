@@ -3,7 +3,7 @@
 Simple demo to test `move_to_pose_with_preparation` using preset_orientation="side".
 
 This runs planning only (execute=False) for safety, printing planning results.
-Assumes the workspace config and robot IP are set in `CuRoboMotionPlanner.initialize_default_config()`.
+Assumes the workspace config is set in `XArmPybulletInterface`.
 """
 import sys
 import time
@@ -12,12 +12,12 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.kinematics.xarm_curobo_interface import CuRoboMotionPlanner
+from src.kinematics.xarm_pybullet_interface import XArmPybulletInterface
 
 
 def main():
     # Instantiate planner; no static camera TF provided for simplicity.
-    planner = CuRoboMotionPlanner(static_camera_tf=None, robot_ip='192.168.1.224')
+    planner = XArmPybulletInterface(static_camera_tf=None)
 
     # Example target in camera frame: slightly forward and above the table.
     # Adjust as needed for your setup. Units are meters.
