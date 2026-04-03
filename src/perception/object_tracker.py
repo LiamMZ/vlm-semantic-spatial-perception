@@ -1572,6 +1572,90 @@ class TrackingStats:
     is_running: bool = False
 
 
+_DEBUG_PALETTE = [
+    (255,  80,  80, 200),
+    ( 80, 120, 255, 200),
+    ( 80, 220,  80, 200),
+    (255, 200,  50, 200),
+    (220,  80, 220, 200),
+    ( 80, 220, 220, 200),
+    (255, 160,  50, 200),
+]
+
+
+def save_debug_frame(
+    png_bytes: bytes,
+    objects: List[Any],
+    frame_index: int,
+    save_dir: Path,
+    lock: threading.Lock,
+) -> None:
+    """Render bounding boxes + labels onto a frame PNG and write to save_dir.
+
+    Intended to be called from a daemon thread. Updates a ``latest.png`` symlink
+    atomically so external viewers always see the most recent frame.
+    """
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        w, h = img.size
+        from PIL import ImageDraw, ImageFont
+        draw = ImageDraw.Draw(img, "RGBA")
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except Exception:
+            font = ImageFont.load_default()
+
+        for i, obj in enumerate(objects):
+            color = _DEBUG_PALETTE[i % len(_DEBUG_PALETTE)]
+            oid = obj.object_id
+            bbox = obj.bounding_box_2d
+            pos2d = obj.position_2d
+
+            if bbox and len(bbox) == 4:
+                y1n, x1n, y2n, x2n = bbox
+                x1 = int(x1n / 1000 * w)
+                y1 = int(y1n / 1000 * h)
+                x2 = int(x2n / 1000 * w)
+                y2 = int(y2n / 1000 * h)
+                draw.rectangle([x1, y1, x2, y2], fill=(*color[:3], 50), outline=color, width=2)
+                label_y = max(0, y1 - 18)
+                draw.rectangle([x1, label_y, x1 + len(oid) * 8 + 6, label_y + 16],
+                               fill=(*color[:3], 200))
+                draw.text((x1 + 3, label_y + 1), oid, fill=(255, 255, 255, 255), font=font)
+            elif pos2d and len(pos2d) >= 2:
+                cx = int(pos2d[1] / 1000 * w)
+                cy = int(pos2d[0] / 1000 * h)
+                r = 6
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r],
+                             fill=(*color[:3], 200), outline=(255, 255, 255, 255), width=2)
+                draw.text((cx + r + 2, cy - 8), oid, fill=(*color[:3], 255), font=font)
+
+            for ip_name, ip in (obj.interaction_points or {}).items():
+                pos = ip.position_2d if hasattr(ip, "position_2d") else None
+                if pos and len(pos) >= 2:
+                    cx = int(pos[1] / 1000 * w)
+                    cy = int(pos[0] / 1000 * h)
+                    arm = 4
+                    draw.line([cx - arm, cy, cx + arm, cy], fill=(255, 255, 255, 230), width=2)
+                    draw.line([cx, cy - arm, cx, cy + arm], fill=(255, 255, 255, 230), width=2)
+                    draw.text((cx + 5, cy - 6), ip_name, fill=(220, 220, 220, 200), font=font)
+
+        stamp = f"frame {frame_index:04d}  |  objects: {len(objects)}"
+        draw.rectangle([0, h - 20, w, h], fill=(0, 0, 0, 160))
+        draw.text((4, h - 17), stamp, fill=(200, 200, 200, 255), font=font)
+
+        out_path = save_dir / f"frame_{frame_index:04d}.png"
+        img.save(out_path)
+        latest = save_dir / "latest.png"
+        with lock:
+            if latest.is_symlink() or latest.exists():
+                latest.unlink()
+            latest.symlink_to(out_path.name)
+    except Exception:
+        logging.getLogger(__name__).debug("Debug frame save failed", exc_info=True)
+
+
 class ContinuousObjectTracker(ObjectTracker):
     """
     Background service for continuous object tracking.
@@ -1593,6 +1677,7 @@ class ContinuousObjectTracker(ObjectTracker):
         logger: Optional[logging.Logger] = None,
         robot: Optional[Any] = None,
         llm_client: Optional[Any] = None,
+        debug_save_dir: Optional[Union[str, Path]] = None,
     ):
         super().__init__(
             api_key=api_key,
@@ -1620,10 +1705,22 @@ class ContinuousObjectTracker(ObjectTracker):
         self.stats = TrackingStats()
         self._last_detection_count: int = 0
 
+        # Debug image streaming
+        self._debug_save_dir: Optional[Path] = Path(debug_save_dir) if debug_save_dir else None
+        self._debug_frame_index: int = 0
+        self._debug_executor = threading.Thread(target=lambda: None, daemon=True)  # placeholder
+        self._debug_lock = threading.Lock()
+
     @property
     def should_detect(self) -> bool:
         """Return whether detection should run for the current frame."""
         return True
+
+    def _save_debug_frame(self, png_bytes: bytes, objects: List[Any], frame_index: int) -> None:
+        """Render bounding boxes + labels onto the frame and write to debug_save_dir (background thread)."""
+        if self._debug_save_dir is None:
+            return
+        save_debug_frame(png_bytes, objects, frame_index, self._debug_save_dir, self._debug_lock)
 
     def set_frame_provider(
         self,
@@ -1732,6 +1829,19 @@ class ContinuousObjectTracker(ObjectTracker):
                         await self.on_detection_complete(len(detected_objects))
                     else:
                         self.on_detection_complete(len(detected_objects))
+
+                # Stream annotated debug frame in background if enabled
+                if self._debug_save_dir is not None and self._last_detection_png is not None:
+                    frame_idx = self._debug_frame_index
+                    self._debug_frame_index += 1
+                    png_snapshot = bytes(self._last_detection_png)
+                    objects_snapshot = list(detected_objects)
+                    t = threading.Thread(
+                        target=self._save_debug_frame,
+                        args=(png_snapshot, objects_snapshot, frame_idx),
+                        daemon=True,
+                    )
+                    t.start()
 
             except Exception as e:
                 self.logger.error("=" * 60)

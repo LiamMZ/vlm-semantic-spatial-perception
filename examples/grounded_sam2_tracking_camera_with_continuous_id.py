@@ -170,16 +170,8 @@ class IncrementalObjectTracker:
             sam_model_ckpt=sam2_ckpt_path,
             device=device,
         )
-        self.video_predictor = build_sam2_video_predictor(
-            sam2_model_cfg, sam2_ckpt_path
-        )
-
-        # Initialize inference state
-        self.inference_state = self.video_predictor.init_state()
-        self.inference_state["images"] = torch.empty((0, 3, 1024, 1024), device=device)
         self.total_frames = 0
         self.objects_count = 0
-        self.frame_cache_limit = detection_interval - 1  # or higher depending on memory
 
         # Store tracking results
         self.last_mask_dict = MaskDictionaryModel()
@@ -188,50 +180,36 @@ class IncrementalObjectTracker:
     def add_image(self, image_np: np.ndarray):
         """
         Add a new image frame to the tracker and perform detection or tracking update.
+
+        Uses SAM2ImagePredictor per-frame (no video predictor) for live camera
+        compatibility with the installed SAM2 version.
+
         Args:
             image_np (np.ndarray): Input RGB image as (H, W, 3), dtype=uint8.
         Returns:
             np.ndarray: Annotated image with object masks and labels.
         """
-        import numpy as np
-        from PIL import Image
-
         img_pil = Image.fromarray(image_np)
+        H, W = image_np.shape[:2]
 
-        # Step 1: Perform detection every detection_interval frames
+        # Run GroundingDINO + SAM2 on every detection_interval frame;
+        # on intermediate frames reuse the last known masks (stable tracking).
         if self.total_frames % self.detection_interval == 0:
-            if (
-                self.inference_state["video_height"] is None
-                or self.inference_state["video_width"] is None
-            ):
-                (
-                    self.inference_state["video_height"],
-                    self.inference_state["video_width"],
-                ) = image_np.shape[:2]
-
-            if self.inference_state["images"].shape[0] > self.frame_cache_limit:
-                print(
-                    f"[Reset] Resetting inference state after {self.frame_cache_limit} frames to free memory."
-                )
-                self.inference_state = self.video_predictor.init_state()
-                self.inference_state["images"] = torch.empty(
-                    (0, 3, 1024, 1024), device=self.device
-                )
-                (
-                    self.inference_state["video_height"],
-                    self.inference_state["video_width"],
-                ) = image_np.shape[:2]
-
-            # 1.1 GroundingDINO object detection
+            # GroundingDINO detection
             boxes, labels = self.grounding_predictor.predict(img_pil, self.prompt_text)
             if boxes.shape[0] == 0:
-                return
+                self.total_frames += 1
+                return self.visualize_frame_with_mask_and_metadata(
+                    image_np=image_np,
+                    mask_array=np.zeros((H, W), dtype=np.uint16),
+                    json_metadata=self.last_mask_dict.to_dict(),
+                )
 
-            # 1.2 SAM2 segmentation from detection boxes
+            # SAM2 image segmentation
             self.sam2_segmentor.set_image(image_np)
             masks, scores, logits = self.sam2_segmentor.predict_masks_from_boxes(boxes)
 
-            # 1.3 Build MaskDictionaryModel
+            # Build MaskDictionaryModel and assign stable IDs via IOU matching
             mask_dict = MaskDictionaryModel(
                 promote_type="mask", mask_name=f"mask_{self.total_frames:05d}.npy"
             )
@@ -240,70 +218,26 @@ class IncrementalObjectTracker:
                 box_list=torch.tensor(boxes),
                 label_list=labels,
             )
-
-            # 1.4 Object ID tracking and IOU-based update
             self.objects_count = mask_dict.update_masks(
                 tracking_annotation_dict=self.last_mask_dict,
                 iou_threshold=0.3,
                 objects_count=self.objects_count,
             )
-
-            # 1.5 Reset video tracker state
-            frame_idx = self.video_predictor.add_new_frame(
-                self.inference_state, image_np
-            )
-            self.video_predictor.reset_state(self.inference_state)
-
-            for object_id, object_info in mask_dict.labels.items():
-                frame_idx, _, _ = self.video_predictor.add_new_mask(
-                    self.inference_state,
-                    frame_idx,
-                    object_id,
-                    object_info.mask,
-                )
-
+            # update_masks strips box coords — recompute from mask
+            for obj_info in mask_dict.labels.values():
+                if obj_info.mask is not None:
+                    obj_info.update_box()
             self.track_dict = copy.deepcopy(mask_dict)
-            self.last_mask_dict = mask_dict
+            self.last_mask_dict = copy.deepcopy(mask_dict)
 
-        else:
-            # Step 2: Use incremental tracking for intermediate frames
-            frame_idx = self.video_predictor.add_new_frame(
-                self.inference_state, image_np
-            )
-
-        # Step 3: Tracking propagation using the video predictor
-        frame_idx, obj_ids, video_res_masks = self.video_predictor.infer_single_frame(
-            inference_state=self.inference_state,
-            frame_idx=frame_idx,
-        )
-
-        # Step 4: Update the mask dictionary based on tracked masks
-        frame_masks = MaskDictionaryModel()
-        for i, obj_id in enumerate(obj_ids):
-            out_mask = video_res_masks[i] > 0.0
-            object_info = ObjectInfo(
-                instance_id=obj_id,
-                mask=out_mask[0],
-                class_name=self.track_dict.get_target_class_name(obj_id),
-                logit=self.track_dict.get_target_logit(obj_id),
-            )
-            object_info.update_box()
-            frame_masks.labels[obj_id] = object_info
-            frame_masks.mask_name = f"mask_{frame_idx:05d}.npy"
-            frame_masks.mask_height = out_mask.shape[-2]
-            frame_masks.mask_width = out_mask.shape[-1]
-
-        self.last_mask_dict = copy.deepcopy(frame_masks)
-
-        # Step 5: Build mask array
-        H, W = image_np.shape[:2]
+        # Build mask array from last known detections
         mask_img = torch.zeros((H, W), dtype=torch.int32)
         for obj_id, obj_info in self.last_mask_dict.labels.items():
-            mask_img[obj_info.mask == True] = obj_id
+            if obj_info.mask is not None:
+                mask_img[obj_info.mask == True] = obj_id
+        mask_array = mask_img.cpu().numpy().astype(np.uint16)
 
-        mask_array = mask_img.cpu().numpy()
-
-        # Step 6: Visualization
+        # Visualization
         annotated_frame = self.visualize_frame_with_mask_and_metadata(
             image_np=image_np,
             mask_array=mask_array,
@@ -322,13 +256,9 @@ class IncrementalObjectTracker:
         """
         self.prompt_text = new_prompt
         self.total_frames = 0  # Trigger immediate re-detection
-        self.inference_state = self.video_predictor.init_state()
-        self.inference_state["images"] = torch.empty(
-            (0, 3, 1024, 1024), device=self.device
-        )
-        self.inference_state["video_height"] = None
-        self.inference_state["video_width"] = None
-
+        self.last_mask_dict = MaskDictionaryModel()
+        self.track_dict = MaskDictionaryModel()
+        self.objects_count = 0
         print(f"[Prompt Updated] New prompt: '{new_prompt}'. Tracker state reset.")
 
     def save_current_state(self, output_dir, raw_image: np.ndarray = None):

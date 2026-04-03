@@ -259,6 +259,7 @@ class TaskOrchestrator:
             logger=self.logger.getChild("ObjectTracker"),
             robot=self.config.robot,
             llm_client=_llm_client,
+            debug_save_dir=getattr(self.config, "debug_frames_dir", None),
         )
 
         # Set frame provider
@@ -369,6 +370,8 @@ class TaskOrchestrator:
                     "object_type": obj.object_type,
                     "affordances": list(obj.affordances),
                     "position_3d": obj.position_3d.tolist() if obj.position_3d is not None else None,
+                    "position_2d": obj.position_2d,
+                    "bounding_box_2d": obj.bounding_box_2d,
                 }
                 for obj in detected
             ]
@@ -822,6 +825,7 @@ class TaskOrchestrator:
                 json.dump(det_payload, f, indent=2)
 
             # Robot context (optional, via duck-typed get_robot_state)
+            robot_state_path = None
             if robot_state is not None:
                 robot_state_path = snapshot_dir / "robot_state.json"
                 with open(robot_state_path, "w") as f:
@@ -1437,6 +1441,19 @@ class TaskOrchestrator:
                 error_message=error_message,
                 validation=validation.get("validation"),
             )
+
+            # Print validation issues and suggested repair layer so the cause is visible
+            val_detail = validation.get("validation") or {}
+            issues = val_detail.get("issues") or []
+            suggested = val_detail.get("suggested_repair_layer")
+            if issues:
+                print(f"  • Validation issues ({len(issues)}):")
+                for issue in issues:
+                    lyr = issue.get("layer", "?")
+                    msg = issue.get("message", "")
+                    print(f"      [{lyr}] {msg}")
+            if suggested and suggested != layer:
+                print(f"  • Suggested repair layer (from validator): {suggested}")
             print(f"  • Targeted repair layer: {layer}")
             repair_record = await self.maintainer.repair_representation(
                 failure_context={
@@ -1511,7 +1528,14 @@ class TaskOrchestrator:
                 domain_stats = await self.maintainer.get_domain_statistics()
                 validation = domain_stats.get("validation", {})
                 if validation and not validation.get("valid", True):
+                    issues = validation.get("issues") or []
+                    suggested = validation.get("suggested_repair_layer", "")
                     print("\n🔧 Representation validation failed before solving; attempting targeted repair...")
+                    if issues:
+                        for issue in issues:
+                            print(f"   [{issue.get('layer','?')}] {issue.get('message','')}")
+                    if suggested:
+                        print(f"   Suggested repair layer: {suggested}")
                     refined = await self.refine_domain_from_failure(
                         error_message="Representation validation failed before solving",
                         pddl_files={

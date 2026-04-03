@@ -71,12 +71,16 @@ class SkillDecomposer:
         else:
             self._perception_pool_dir = Path(self._state_dir) / "perception_pool"
 
-        default_llm_config = {
+        # Models that support thinking (dynamic budget). Others get no ThinkingConfig.
+        _THINKING_MODELS = ("gemini-2.5",)
+        _supports_thinking = any(t in model_name for t in _THINKING_MODELS)
+        default_llm_config: Dict[str, Any] = {
             "top_p": 0.8,
             "max_output_tokens": 4096,
             "response_mime_type": "application/json",
-            "thinking_config": types.ThinkingConfig(thinking_budget=-1),
         }
+        if _supports_thinking:
+            default_llm_config["thinking_config"] = types.ThinkingConfig(thinking_budget=-1)
         self.llm_config_kwargs = {**default_llm_config, **(llm_config_kwargs or {})}
 
     # --------------------------------------------------------------------- #

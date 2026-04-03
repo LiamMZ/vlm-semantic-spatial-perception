@@ -522,6 +522,7 @@ async def run_demo() -> int:
         enable_snapshots=True,
         snapshot_every_n_detections=1,
         perception_pool_dir=OUTPUT_DIR / "perception_pool",
+        debug_frames_dir=OUTPUT_DIR / "debug_frames",
 
         # PDDL solver
         solver_backend="auto",
@@ -596,7 +597,9 @@ async def run_demo() -> int:
             tag_interval=GSAM2_TAG_INTERVAL,
             update_interval=config.update_interval,
             on_detection_complete=detect_tracker.on_detection,
+            llm_client=llm_client,
             logger=log.getChild("GSAM2Tracker"),
+            debug_save_dir=OUTPUT_DIR / "debug_frames",
         )
         _tock("gsam2_model_load", _t0_gsam2)
         # Replace the LLM-based tracker with the GSAM2 tracker
@@ -679,15 +682,12 @@ async def run_demo() -> int:
     for obj in detected:
         _info(f"  {obj.object_id}", f"type={obj.object_type} affordances={obj.affordances} pos3d={getattr(obj,'position_3d',None)}")
 
-    # Save perception debug image (latest snapshot + bounding boxes + labels)
-    debug_img_path = _save_perception_debug_image(
-        perception_pool_dir=OUTPUT_DIR / "perception_pool",
-        output_path=OUTPUT_DIR / "perception_debug.png",
-    )
-    if debug_img_path:
-        _ok(f"Perception debug image → {debug_img_path}")
+    # Debug frames are saved live during detection — report the latest
+    _latest_debug = OUTPUT_DIR / "debug_frames" / "latest.png"
+    if _latest_debug.exists():
+        _ok(f"Perception debug frames → {OUTPUT_DIR / 'debug_frames'} (latest: latest.png)")
     else:
-        _warn("Could not save perception debug image")
+        _warn("No debug frames written yet")
 
     # Highlight everything detected
     env.highlight_objects([o.object_id for o in detected if o.object_id in {s["object_id"] for s in SCENE_OBJECTS}])

@@ -524,6 +524,7 @@ Focus on:
                 top_p=0.9,
                 max_output_tokens=8192,
                 response_mime_type="application/json",
+                thinking_budget=0,
             )
             response_text = self._llm_client.generate(llm_parts, config=cfg).text
         else:

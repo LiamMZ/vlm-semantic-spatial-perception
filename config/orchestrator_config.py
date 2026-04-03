@@ -48,6 +48,8 @@ class OrchestratorConfig:
     # When None, will default to state_dir / "perception_pool" at runtime
     perception_pool_dir: Optional[Path] = None
     max_snapshot_count: Optional[int] = 200  # Rotate oldest if exceeded
+    # Stream annotated debug frames as detection runs; None disables
+    debug_frames_dir: Optional[Path] = None
     depth_encoding: Literal["npz"] = "npz"  # Keep simple for now
     # Optional LLM client (src.llm_interface.LLMClient).
     # When set, all sub-components (ObjectTracker, LLMTaskAnalyzer, LayeredDomainGenerator)

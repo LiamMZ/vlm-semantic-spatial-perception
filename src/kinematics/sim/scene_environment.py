@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import textwrap
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -44,7 +45,7 @@ from src.camera.base_camera import CameraFrame, CameraIntrinsics
 logger = logging.getLogger(__name__)
 
 _SIM_DIR = Path(__file__).parent
-_DEFAULT_URDF = _SIM_DIR / "xarm7.urdf"
+_DEFAULT_URDF = _SIM_DIR / "urdfs" / "xarm7_camera" / "xarm7.urdf"
 
 # Camera aimed at the work surface in front of the robot
 CAMERA_AIM_JOINTS = [0.100085, -1.407677, -0.098652, 1.314592, 0.0, 2.0, -0.112296]
@@ -90,10 +91,24 @@ class SceneEnvironment:
         urdf_path: Optional[Path] = None,
         camera_link: str = "camera_color_optical_frame",
         initial_joints: Optional[List[float]] = None,
+        n_arm_joints: int = 7,
+        tcp_link_name: str = "link_tcp",
+        camera_use_world_up: bool = False,
+        viewer_target: Optional[List[float]] = None,
+        viewer_distance: float = 1.1,
+        viewer_yaw: float = 45,
+        viewer_pitch: float = -30,
     ) -> None:
         self.urdf_path     = Path(urdf_path or _DEFAULT_URDF)
         self.camera_link   = camera_link
         self.initial_joints = initial_joints or CAMERA_AIM_JOINTS
+        self._n_arm_joints = n_arm_joints
+        self.tcp_link_name = tcp_link_name
+        self._camera_use_world_up  = camera_use_world_up
+        self._viewer_target   = viewer_target or [0.35, 0.0, 0.2]
+        self._viewer_distance = viewer_distance
+        self._viewer_yaw      = viewer_yaw
+        self._viewer_pitch    = viewer_pitch
 
         self._client: Optional[int] = None
         self._robot_id: Optional[int] = None
@@ -104,6 +119,8 @@ class SceneEnvironment:
         self._gripper_joints: List[int] = []    # gripper finger joints (rest)
         self._link_name_to_index: Dict[str, int] = {}
         self._object_colors: Dict[str, List[float]] = {}
+        self._step_thread: Optional[threading.Thread] = None
+        self._step_running: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -123,10 +140,10 @@ class SceneEnvironment:
         p.loadURDF("plane.urdf", physicsClientId=c)
 
         p.resetDebugVisualizerCamera(
-            cameraDistance=1.1,
-            cameraYaw=45,
-            cameraPitch=-30,
-            cameraTargetPosition=[0.35, 0.0, 0.2],
+            cameraDistance=self._viewer_distance,
+            cameraYaw=self._viewer_yaw,
+            cameraPitch=self._viewer_pitch,
+            cameraTargetPosition=self._viewer_target,
             physicsClientId=c,
         )
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=c)
@@ -142,12 +159,31 @@ class SceneEnvironment:
             )
             self._build_joint_map()
             self.set_robot_joints(self.initial_joints)
-            logger.info("Loaded xArm7 URDF (robot_id=%d, client=%d)", self._robot_id, c)
+            logger.info("Loaded URDF (robot_id=%d, client=%d)", self._robot_id, c)
         else:
             logger.warning("URDF not found at %s — skipping robot", self.urdf_path)
 
+        # Background thread: keeps the GUI responsive by stepping the sim at ~30 Hz
+        # when the main thread is busy with detection / planning.
+        self._step_running = True
+        self._step_thread = threading.Thread(target=self._background_step, daemon=True)
+        self._step_thread.start()
+
+    def _background_step(self) -> None:
+        """Continuously step the simulation at ~30 Hz to keep the GUI live."""
+        while self._step_running and self._client is not None:
+            try:
+                p.stepSimulation(physicsClientId=self._client)
+            except Exception:
+                break
+            time.sleep(1.0 / 30.0)
+
     def stop(self) -> None:
         """Disconnect from PyBullet."""
+        self._step_running = False
+        if self._step_thread is not None:
+            self._step_thread.join(timeout=1.0)
+            self._step_thread = None
         if PYBULLET_AVAILABLE and self._client is not None:
             p.disconnect(self._client)
             self._client = None
@@ -181,7 +217,7 @@ class SceneEnvironment:
             oid   = obj["object_id"]
             otype = obj.get("object_type", "block")
             pos   = obj.get("position_3d", [0, 0, 0])
-            half  = OBJECT_HALF_EXTENTS.get(otype, [0.03, 0.03, 0.03])
+            half  = OBJECT_HALF_EXTENTS.get(oid, OBJECT_HALF_EXTENTS.get(otype, [0.03, 0.03, 0.03]))
             color = OBJECT_COLORS.get(oid, [0.6, 0.6, 0.6, 1.0])
             self._object_colors[oid] = color
 
@@ -315,8 +351,22 @@ class SceneEnvironment:
         pos = np.array(state[4], dtype=float)
         rot = np.array(p.getMatrixFromQuaternion(state[5], physicsClientId=c)).reshape(3, 3)
 
-        target = pos + rot[:, 2]   # Z = forward in optical frame
-        up     = -rot[:, 1]        # Y = down → up = -Y
+        forward = rot[:, 2]  # Z = forward in optical frame
+        target  = pos + forward
+
+        if self._camera_use_world_up:
+            # Build an up vector from world +Z, orthogonalised against forward.
+            # Avoids roll errors when the URDF camera Y axis is not aligned with world Y.
+            world_up = np.array([0.0, 0.0, 1.0])
+            right = np.cross(forward, world_up)
+            right_norm = np.linalg.norm(right)
+            if right_norm > 1e-6:
+                right /= right_norm
+                up = np.cross(right, forward)
+            else:
+                up = -rot[:, 1]  # degenerate: forward ≈ ±Z, fall back to URDF up
+        else:
+            up = -rot[:, 1]  # Y = down → up = -Y (standard optical frame)
 
         view = p.computeViewMatrix(
             cameraEyePosition=pos.tolist(),
@@ -383,7 +433,7 @@ class SceneEnvironment:
         if not PYBULLET_AVAILABLE or self._robot_id is None:
             return None
         c = self._client
-        tcp_idx = self._link_name_to_index.get("link_tcp")
+        tcp_idx = self._link_name_to_index.get(self.tcp_link_name)
         if tcp_idx is None:
             return None
         state = p.getLinkState(self._robot_id, tcp_idx, physicsClientId=c)
@@ -435,7 +485,6 @@ class SceneEnvironment:
     def _build_joint_map(self) -> None:
         c = self._client
         num = p.getNumJoints(self._robot_id, physicsClientId=c)
-        _ARM_JOINT_COUNT = 7   # xArm7 has 7 arm joints; remaining are gripper
         for i in range(num):
             info = p.getJointInfo(self._robot_id, i, physicsClientId=c)
             link_name  = info[12].decode("utf-8")
@@ -443,7 +492,7 @@ class SceneEnvironment:
             self._link_name_to_index[link_name] = i
             if joint_type in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
                 self._movable_joints.append(i)
-                if len(self._arm_joints) < _ARM_JOINT_COUNT:
+                if len(self._arm_joints) < self._n_arm_joints:
                     self._arm_joints.append(i)
                 else:
                     self._gripper_joints.append(i)

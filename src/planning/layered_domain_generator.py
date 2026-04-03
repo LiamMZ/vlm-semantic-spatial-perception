@@ -1483,30 +1483,60 @@ class LayeredDomainGenerator:
         # Spatial predicates to track for L5-V4
         _SPATIAL_PREDS = {"on", "above", "in", "atop", "attached-to"}
 
-        # Add on(obj, surface) where obj is above an explicit support surface
+        # Add on(obj, surface) where obj is above an explicit support surface.
+        # Surface detection: an object is treated as a support surface if it has
+        # "support_surface" OR if it has "placeable_on"/"fixed" without "graspable"
+        # (the LLM often tags tables as placeable_on but omits support_surface).
+        def _is_surface(o: dict) -> bool:
+            affs = set(o.get("affordances", []))
+            if "support_surface" in affs:
+                return True
+            # Non-graspable objects with placeable_on or fixed are support surfaces
+            if "graspable" not in affs and ("placeable_on" in affs or "fixed" in affs):
+                return True
+            return False
+
         if "on" in pred_arities and pred_arities["on"] == 2:
-            surfaces = [o for o in scene_objects if "support_surface" in o.get("affordances", [])]
-            manipulables = [o for o in scene_objects if "support_surface" not in o.get("affordances", [])]
+            surfaces = [o for o in scene_objects if _is_surface(o)]
+            manipulables = [o for o in scene_objects if not _is_surface(o)]
             objects_with_on: Set[str] = set()
             for obj in manipulables:
                 obj_pos = obj.get("position_3d")
-                if not obj_pos:
+                obj_bbox = obj.get("bounding_box_2d")   # [y1, x1, y2, x2] in 0-1000 scale
+                obj_pos2d = obj.get("position_2d")       # [y, x] in 0-1000 scale
+                if not obj_pos and not obj_pos2d:
                     print(
-                        f"  [L5-V4] WARNING: object '{obj.get('object_id')}' has no position_3d "
+                        f"  [L5-V4] WARNING: object '{obj.get('object_id')}' has no position "
                         f"data — spatial facts for 'on' cannot be derived reliably."
                     )
                     continue
                 for surf in surfaces:
                     surf_pos = surf.get("position_3d")
-                    if not surf_pos:
-                        continue
-                    dz = obj_pos[2] - surf_pos[2]
-                    dx = abs(obj_pos[0] - surf_pos[0])
-                    dy = abs(obj_pos[1] - surf_pos[1]) if len(obj_pos) > 1 else 0
-                    if 0 <= dz <= 0.3 and dx < 0.5 and dy < 0.5:
+                    surf_bbox = surf.get("bounding_box_2d")
+                    matched = False
+
+                    # 3D proximity check (reliable when positions are world-frame)
+                    if obj_pos and surf_pos:
+                        dz = obj_pos[2] - surf_pos[2]
+                        dx = abs(obj_pos[0] - surf_pos[0])
+                        dy = abs(obj_pos[1] - surf_pos[1]) if len(obj_pos) > 1 else 0
+                        if 0 <= dz <= 0.3 and dx < 0.5 and dy < 0.5:
+                            matched = True
+
+                    # 2D bounding box containment fallback: the object's centroid
+                    # lies inside the surface's 2D bbox. Reliable regardless of
+                    # whether positions are world-frame or camera-frame.
+                    if not matched and obj_pos2d and surf_bbox and len(surf_bbox) == 4:
+                        sy1, sx1, sy2, sx2 = surf_bbox
+                        oy, ox = obj_pos2d[0], obj_pos2d[1]
+                        if sx1 <= ox <= sx2 and sy1 <= oy <= sy2:
+                            matched = True
+
+                    if matched:
                         oid = obj.get("object_id", "")
-                        true_lits.append(("on", [oid, surf.get("object_id", "")]))
-                        objects_with_on.add(oid)
+                        if oid not in objects_with_on:
+                            true_lits.append(("on", [oid, surf.get("object_id", "")]))
+                            objects_with_on.add(oid)
 
             # Add on(obj1, obj2) for clearly stacked objects (tight thresholds to avoid
             # false positives from noisy depth perception).
@@ -1533,12 +1563,17 @@ class LayeredDomainGenerator:
             # support proxy, or skip if no support can be inferred.
             # This prevents pick actions from being permanently inapplicable.
             if manipulables:
-                # Use the object with the lowest z as the "table proxy"
-                table_proxy = min(
-                    (o for o in scene_objects if o.get("position_3d")),
-                    key=lambda o: o["position_3d"][2],
-                    default=None,
-                )
+                # Only consider objects with support_surface affordance as the table proxy.
+                # Never use a graspable object as a support surface.
+                _surfaces = [o for o in scene_objects if _is_surface(o)]
+                # Prefer a surface with position data for z-ordering; fall back to first surface
+                _surfaces_with_pos = [o for o in _surfaces if o.get("position_3d")]
+                if _surfaces_with_pos:
+                    table_proxy = min(_surfaces_with_pos, key=lambda o: o["position_3d"][2])
+                elif _surfaces:
+                    table_proxy = _surfaces[0]
+                else:
+                    table_proxy = None
                 for obj in manipulables:
                     oid = obj.get("object_id", "")
                     if oid and oid not in objects_with_on and table_proxy and table_proxy.get("object_id") != oid:
@@ -1675,6 +1710,7 @@ class LayeredDomainGenerator:
                 top_p=0.9,
                 max_output_tokens=8192,
                 response_mime_type=response_mime_type,
+                thinking_budget=0,  # disable thinking — structured JSON needs output tokens, not reasoning
             )
             response = await self._llm_client.generate_async(prompt, config=cfg)
             return response.text
