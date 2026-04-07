@@ -2,8 +2,6 @@
 PDDL representation builder with staged validation and repair.
 """
 
-from __future__ import annotations
-
 import json
 import re
 from pathlib import Path
@@ -20,6 +18,7 @@ from .utils.task_types import (
     AbstractGoal,
     ActionSchemaLibrary,
     GroundingSummary,
+    LayeredDomainArtifact,
     PredicateInventory,
     TaskAnalysis,
 )
@@ -96,7 +95,19 @@ class PDDLDomainMaintainer:
         model_name: str = "gemini-robotics-er-1.5-preview",
         prompts_config_path: Optional[Union[str, Path]] = None,
         task_analyzer_prompts_path: Optional[Union[str, Path]] = None,
-    ) -> None:
+        llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
+    ):
+        """
+        Initialize domain maintainer.
+
+        Args:
+            pddl_representation: PDDL representation to maintain
+            api_key: Gemini API key for LLM analysis
+            model_name: LLM model to use
+            prompts_config_path: Override path to prompts config YAML (defaults to config/pddl_domain_maintainer_prompts.yaml)
+            task_analyzer_prompts_path: Override path to prompts config for LLMTaskAnalyzer (defaults to config/llm_task_analyzer_prompts.yaml)
+            llm_client: Optional LLMClient instance; when provided, api_key/model_name are ignored
+        """
         if prompts_config_path is None:
             prompts_config_path = self.DEFAULT_PROMPTS_CONFIG
 
@@ -105,6 +116,7 @@ class PDDLDomainMaintainer:
             api_key=api_key,
             model_name=model_name,
             prompts_config_path=task_analyzer_prompts_path,
+            llm_client=llm_client,
         )
         self.robot_description = self.llm_analyzer.robot_description
         self.prompts_config_path = Path(prompts_config_path)
@@ -216,7 +228,7 @@ class PDDLDomainMaintainer:
         """
 
         if self.task_analysis is None or self.current_task is None:
-            raise RuntimeError("Call build_representation() before ground_representation().")
+            return {"skipped": True, "reason": "no task analysis yet"}
 
         previous_object_ids = set(self.task_analysis.grounding_summary.observed_object_ids)
         previous_predicates = set(self.task_analysis.grounding_summary.grounded_predicates)
@@ -377,9 +389,170 @@ class PDDLDomainMaintainer:
         task_description: str,
         environment_image: Optional[Union[np.ndarray, Image.Image, str, Path]] = None,
     ) -> TaskAnalysis:
-        """Compatibility wrapper for staged representation building."""
+        """
+            Compatibility wrapper for staged representation building.
 
-        return await self.build_representation(task=task_description, image=environment_image)
+            Performs LLM-based analysis to predict required predicates, actions,
+            and object types, then initializes the domain accordingly.
+
+            Args:
+                task_description: Natural language task
+                environment_image: Optional environment image for context
+
+            Returns:
+                TaskAnalysis with predicted requirements
+        """
+        self.current_task = task_description
+
+        # Analyze task with LLM (no observations yet)
+        self.task_analysis = self.llm_analyzer.analyze_task(
+            task_description=task_description,
+            observed_objects=None,
+            observed_relationships=None,
+            environment_image=environment_image,
+            timeout=15.0
+        )
+
+        # Check if analysis succeeded
+        if self.task_analysis is None:
+            raise RuntimeError(f"LLM task analysis failed for task: {task_description}")
+
+        # Extract goal object types from task
+        self.goal_object_types = set(self.task_analysis.goal_objects)
+
+        # Initialize domain with predicted components
+        await self._initialize_domain_from_analysis()
+
+        self.domain_version += 1
+
+        return self.task_analysis
+
+    async def initialize_from_layered_artifact(self, artifact: LayeredDomainArtifact) -> TaskAnalysis:
+        """
+        Initialize PDDL domain from a LayeredDomainArtifact produced by LayeredDomainGenerator.
+
+        Converts the artifact to a TaskAnalysis via the bridge method and then runs the
+        existing _initialize_domain_from_analysis() write path unchanged.
+
+        Args:
+            artifact: Output of LayeredDomainGenerator.generate_domain()
+
+        Returns:
+            TaskAnalysis (backward-compatible with callers expecting this type)
+        """
+        self.current_task = artifact.task_description
+        self.task_analysis = artifact.to_task_analysis()
+        self.goal_object_types = set(self.task_analysis.goal_objects)
+        self._l5_artifact = artifact.l5  # stash for use in generate_pddl_files
+        await self._initialize_domain_from_analysis()
+        self.domain_version += 1
+        return self.task_analysis
+
+    async def _initialize_domain_from_analysis(self) -> None:
+        """Initialize PDDL domain based on task analysis."""
+        if not self.task_analysis:
+            return
+
+        # Store global predicates from task analysis
+        if self.task_analysis.global_predicates:
+            self.set_global_predicates(self.task_analysis.global_predicates)
+            print(f"  • Identified {len(self.task_analysis.global_predicates)} global predicates: {', '.join(self.task_analysis.global_predicates)}")
+
+            # Add global predicates to domain (they typically have no parameters)
+            for pred_name in self.task_analysis.global_predicates:
+                if pred_name not in self.pddl.predicates:
+                    await self.pddl.add_predicate_async(pred_name, [])
+
+        # Add predicted predicates
+        # First, infer parameter counts from action definitions
+        predicate_param_counts = self._infer_predicate_arities_from_actions(
+            self.task_analysis.required_actions
+        )
+
+        normalized_predicates: List[str] = []
+        seen_normalized: Set[str] = set()
+
+        for predicate_signature in self.task_analysis.relevant_predicates:
+            (
+                predicate_name,
+                parameter_defs,
+                normalized_display,
+            ) = self._normalize_predicate_signature(predicate_signature)
+
+            if not predicate_name:
+                continue
+
+            # If predicate has no parameters but is used with parameters in actions,
+            # infer the parameter count from action usage
+            if not parameter_defs and predicate_name in predicate_param_counts:
+                param_count = predicate_param_counts[predicate_name]
+                parameter_defs = [(f"obj{i+1}", "object") for i in range(param_count)]
+                # Update normalized display
+                param_vars = ' '.join([f"?{name}" for name, _ in parameter_defs])
+                normalized_display = f"({predicate_name} {param_vars})" if param_vars else predicate_name
+
+            if predicate_name not in self.pddl.predicates:
+                await self.pddl.add_predicate_async(
+                    predicate_name,
+                    parameter_defs,
+                )
+
+            if normalized_display and normalized_display not in seen_normalized:
+                normalized_predicates.append(normalized_display)
+                seen_normalized.add(normalized_display)
+
+        # Replace the task analysis list with normalized, untyped predicate strings
+        if normalized_predicates:
+            self.task_analysis.relevant_predicates = normalized_predicates
+
+        # Add LLM-generated actions
+        for idx, action_def in enumerate(self.task_analysis.required_actions):
+            if not isinstance(action_def, dict):
+                raise ValueError(
+                    f"Invalid required_actions[{idx}] type: expected dict, got {type(action_def).__name__}"
+                )
+            try:
+                # Parse parameters
+                params = []
+                if "parameters" in action_def:
+                    param_list = action_def["parameters"]
+                    if isinstance(param_list, list):
+                        for p in param_list:
+                            if not isinstance(p, str):
+                                continue
+                            if " - " in p:
+                                name, type_ = p.split(" - ")
+                                params.append((name.strip("?"), type_.strip()))
+                            else:
+                                param_name = p.strip().lstrip("?")
+                                if param_name:
+                                    # Default to untyped STRIPS parameter
+                                    params.append((param_name, "object"))
+
+                # Sanitize preconditions and effects to remove quoted strings
+                # LLMs sometimes add invalid quoted strings like: (is-empty ?obj "reservoir")
+                precondition = sanitize_pddl_formula(action_def.get("precondition", ""))
+                effect = sanitize_pddl_formula(action_def.get("effect", ""))
+
+                # Add action to domain
+                # Note: Using sync method here as PDDLRepresentation doesn't have async action methods yet
+                self.pddl.add_llm_generated_action(
+                    name=action_def.get("name", "unknown"),
+                    parameters=params,
+                    precondition=precondition,
+                    effect=effect,
+                    description=action_def.get("description", "")
+                )
+            except Exception as e:
+                print(f"⚠ Failed to add action {action_def.get('name')}: {e}")
+
+        # Validate that all predicates used in actions are defined
+        # Auto-add any missing predicates to ensure domain consistency
+        validation_result = await self.validate_and_fix_action_predicates()
+        if validation_result["missing_predicates"]:
+            print(f"✓ Auto-added {len(validation_result['missing_predicates'])} missing predicates")
+        if validation_result["invalid_actions"]:
+            print(f"⚠ Found {len(validation_result['invalid_actions'])} actions with parsing issues")
 
     async def update_from_observations(
         self,
@@ -819,7 +992,8 @@ class PDDLDomainMaintainer:
         text = self.llm_analyzer._generate_content(content_parts=[prompt], timeout=30.0)
         if not text:
             raise RuntimeError(f"Repair prompt `{template_key}` returned an empty response.")
-        payload = json.loads(text)
+        from .layered_domain_generator import _extract_json
+        payload = _extract_json(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Expected JSON object from {template_key}")
         return payload
@@ -906,6 +1080,23 @@ class PDDLDomainMaintainer:
             if pred_name and not params:
                 globals_.add(pred_name)
         return globals_
+
+    @staticmethod
+    def _infer_predicate_arities_from_actions(actions: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Scan action preconditions/effects and return {predicate_name: arg_count}."""
+        counts: Dict[str, int] = {}
+        _logical = {"and", "or", "not", "forall", "exists", "when", "imply"}
+        for action in actions:
+            for formula in (action.get("precondition", ""), action.get("effect", "")):
+                for m in re.finditer(r"\(([^()]+)\)", formula or ""):
+                    tokens = m.group(1).strip().split()
+                    if not tokens or tokens[0].lower() in _logical:
+                        continue
+                    name = tokens[0].lower()
+                    arg_count = len([t for t in tokens[1:] if not t.startswith("(")])
+                    if name not in counts or counts[name] < arg_count:
+                        counts[name] = arg_count
+        return counts
 
     @staticmethod
     def _normalize_predicate_signature(
