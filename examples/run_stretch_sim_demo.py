@@ -464,7 +464,6 @@ async def run_demo() -> int:
             sam2_model_cfg=GSAM2_SAM2_CFG,
             sam2_ckpt_path=GSAM2_SAM2_CKPT,
             grounding_model_id=GSAM2_GROUNDING_MODEL,
-            ram_ckpt_path=GSAM2_RAM_CKPT or None,
             detection_interval=GSAM2_DET_INTERVAL,
             device=gsam2_device,
             tag_interval=GSAM2_TAG_INTERVAL,

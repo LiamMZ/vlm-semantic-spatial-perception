@@ -7,10 +7,16 @@ with thread safety for concurrent access.
 
 import time
 import threading
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .clearance import ClearanceProfile
+    from .contact_graph import ContactGraph
+    from .occlusion import OcclusionMap
+    from .surface_map import SurfaceMap
 
 
 @dataclass
@@ -45,6 +51,8 @@ class DetectedObject:
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters
     bounding_box_2d: Optional[List[int]] = None  # [y1, x1, y2, x2]
     timestamp: float = field(default_factory=time.time)
+    clearance_profile: Optional["ClearanceProfile"] = None
+    surface_map: Optional["SurfaceMap"] = None  # populated for surface/table objects
 
 
 class DetectedObjectRegistry:
@@ -66,6 +74,8 @@ class DetectedObjectRegistry:
         self._objects: Dict[str, DetectedObject] = {}
         self._predicates: Set[str] = set()  # Global predicate set for all objects
         self._lock = threading.RLock()  # Reentrant lock for nested access
+        self.contact_graph: Optional["ContactGraph"] = None  # updated each frame
+        self.occlusion_map: Optional["OcclusionMap"] = None  # updated each frame
 
     def add_object(self, obj: DetectedObject) -> None:
         """

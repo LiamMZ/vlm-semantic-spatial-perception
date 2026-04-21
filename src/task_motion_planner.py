@@ -480,6 +480,15 @@ class TaskAndMotionPlanner:
 
         if result.executed:
             print(f"    ✓ Executed {len(skill_plan.primitives)} primitives")
+
+            # T5: after any manipulation primitive completes, recompute contact graph
+            # and clearance for affected objects and their neighbors.  This catches
+            # displaced objects, fallen objects, and spatial state drift.
+            tracker = self.orchestrator.tracker
+            if hasattr(tracker, "trigger_geometry_recompute"):
+                recomputed = tracker.trigger_geometry_recompute(force_occlusion=False)
+                if recomputed:
+                    self.logger.debug("T5: post-manipulation geometry recomputed after '%s'", action_name)
         else:
             print(f"    ✓ Validated {len(skill_plan.primitives)} primitives (dry run)")
 
@@ -667,6 +676,14 @@ class TaskAndMotionPlanner:
                 await self.orchestrator.start_detection()
                 await asyncio.sleep(5.0)  # Allow time for multiple detection cycles
                 await self.orchestrator.pause_detection()
+
+                # T2: after a sensing action, force an occlusion map update for
+                # newly observed regions — the camera moved, so history is stale.
+                tracker = self.orchestrator.tracker
+                if hasattr(tracker, "trigger_geometry_recompute"):
+                    updated = tracker.trigger_geometry_recompute(force_occlusion=True)
+                    if updated:
+                        print("    ✓ Occlusion map updated (T2 sensing trigger)")
                 perception_time = asyncio.get_event_loop().time() - perception_start
 
                 print(f"    ✓ Observation complete ({perception_time:.1f}s)")

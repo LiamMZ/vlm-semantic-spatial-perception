@@ -1418,6 +1418,14 @@ class TaskOrchestrator:
         print(f"REFINING PDDL DOMAIN (Attempt {self.refinement_attempts}/{self.config.max_refinement_attempts})")
         print(f"{'='*70}")
         print(f"Planning Error: {error_message}")
+
+        # T3: fresh geometry recompute including full contact-graph stability analysis.
+        # Precondition failures often mean the world state has drifted from the last
+        # perception snapshot; a full recompute gives the planner accurate spatial data.
+        if self.tracker and hasattr(self.tracker, "trigger_geometry_recompute"):
+            recomputed = self.tracker.trigger_geometry_recompute(force_occlusion=False)
+            if recomputed:
+                print("  • T3: full geometry recomputed (contact graph + clearance + surfaces)")
         print()
 
         try:

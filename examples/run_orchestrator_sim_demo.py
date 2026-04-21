@@ -584,14 +584,11 @@ async def run_demo() -> int:
         _info("Device", gsam2_device)
         _info("Loading", "GroundingDINO + SAM2 (this may take 30-60s)…")
         log.info("Loading GSAM2 models — SAM2 ckpt: %s", GSAM2_SAM2_CKPT)
-        if GSAM2_RAM_CKPT:
-            log.info("RAM+ ckpt: %s", GSAM2_RAM_CKPT)
         _t0_gsam2 = _tick("gsam2_model_load")
         gsam2_tracker = GSAM2ContinuousObjectTracker(
             sam2_model_cfg=GSAM2_SAM2_CFG,
             sam2_ckpt_path=GSAM2_SAM2_CKPT,
             grounding_model_id=GSAM2_GROUNDING_MODEL,
-            ram_ckpt_path=GSAM2_RAM_CKPT or None,
             detection_interval=GSAM2_DET_INTERVAL,
             device=gsam2_device,
             tag_interval=GSAM2_TAG_INTERVAL,
@@ -607,7 +604,7 @@ async def run_demo() -> int:
         # Wire the orchestrator's detection callback so snapshots, PDDL updates,
         # and detection_count all work correctly through the GSAM2 tracker.
         gsam2_tracker.on_detection_complete = orchestrator._on_detection_callback
-        _ok(f"GSAM2 tracker active (SAM2 + {'RAM+' if GSAM2_RAM_CKPT else 'no tagger'}) on {gsam2_device} "
+        _ok(f"GSAM2 tracker active (SAM2 + OpenAI tagger) on {gsam2_device} "
             f"({_timings['gsam2_model_load']:.1f}s)")
 
     # Override frame provider with our sim camera

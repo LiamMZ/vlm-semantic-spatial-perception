@@ -388,7 +388,7 @@ class SceneEnvironment:
             height=height,
             viewMatrix=view,
             projectionMatrix=proj,
-            renderer=p.ER_TINY_RENDERER,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL,
             physicsClientId=c,
         )
 
@@ -442,7 +442,14 @@ class SceneEnvironment:
         return pos, orn
 
     def get_camera_transform(self) -> Tuple[Optional[np.ndarray], Optional[object]]:
-        """Return (position, Rotation) of the wrist camera in world frame."""
+        """Return (position, Rotation) of the wrist camera in world frame.
+
+        The returned Rotation matches the *effective* view frame used by
+        capture_camera_frame — i.e. the same forward/up vectors passed to
+        computeViewMatrix — so that _world_to_cam projections align with the
+        rendered image.  The axes are: X=right, Y=down, Z=forward (OpenCV/
+        optical convention).
+        """
         from scipy.spatial.transform import Rotation
         if not PYBULLET_AVAILABLE or self._robot_id is None:
             return None, None
@@ -452,9 +459,322 @@ class SceneEnvironment:
             return None, None
         state = p.getLinkState(self._robot_id, cam_idx, physicsClientId=c)
         pos = np.array(state[4], dtype=float)
-        orn = np.array(state[5], dtype=float)  # xyzw
-        rot = Rotation.from_quat(orn)
+        rot_mat = np.array(p.getMatrixFromQuaternion(state[5], physicsClientId=c)).reshape(3, 3)
+
+        forward = rot_mat[:, 2]  # Z = optical forward
+
+        if self._camera_use_world_up:
+            world_up = np.array([0.0, 0.0, 1.0])
+            right = np.cross(forward, world_up)
+            right_norm = np.linalg.norm(right)
+            if right_norm > 1e-6:
+                right /= right_norm
+                up = np.cross(right, forward)
+            else:
+                up = -rot_mat[:, 1]
+        else:
+            up = -rot_mat[:, 1]
+            right = np.cross(forward, up)
+            right /= np.linalg.norm(right)
+
+        # Build rotation matrix: columns are world-frame X(right), Y(down), Z(fwd)
+        # camera frame: X=right, Y=down, Z=forward
+        cam_mat = np.stack([right, -up, forward], axis=1)  # 3×3, world←cam
+        rot = Rotation.from_matrix(cam_mat)
         return pos, rot
+
+    def draw_clearance_corridors(
+        self,
+        centroid: np.ndarray,
+        corridors: list,
+        line_width: float = 2.0,
+    ) -> None:
+        """Draw OBB approach corridors in the PyBullet GUI viewport.
+
+        Each corridor is drawn as a wireframe box (the actual OBB swept volume):
+          • green wireframe  — grasp_compatible
+          • red wireframe    — blocked / too narrow
+
+        Where an obstructor clips a corridor, an orange cross is drawn at the
+        entry face of the collision, showing exactly where the block occurs.
+
+        Named axis directions (+x, -x, +y, -y, +z) are labelled with their
+        min_clearance.  All previous debug items are cleared first.
+
+        Args:
+            centroid: (3,) corridor origin in world/base frame.
+            corridors: List of ApproachCorridor from ClearanceProfile.
+            line_width: PyBullet line width (1–3 works well).
+        """
+        if not PYBULLET_AVAILABLE or self._client is None:
+            return
+        from src.perception.clearance import CORRIDOR_LENGTH as _CL
+        cl = self._client
+
+        for corr in corridors:
+            d  = corr.direction
+            ga = corr.grasp_axis
+            ha = corr.height_axis
+            hl = _CL / 2.0
+            hw = corr.half_width
+            hh = corr.half_height
+            box_center = corr.corridor_start + d * hl
+            colour = [0.1, 0.8, 0.1] if corr.grasp_compatible else [0.85, 0.15, 0.1]
+
+            # 8 corners of the OBB
+            corners = np.array([
+                box_center + s0*d*hl + s1*ga*hw + s2*ha*hh
+                for s0 in (+1, -1)
+                for s1 in (+1, -1)
+                for s2 in (+1, -1)
+            ])  # (8, 3)
+
+            # 12 edges of the box (pairs of corner indices)
+            edges = [
+                (0,1),(2,3),(4,5),(6,7),   # along height
+                (0,2),(1,3),(4,6),(5,7),   # along grasp
+                (0,4),(1,5),(2,6),(3,7),   # along approach
+            ]
+            for i, j in edges:
+                p.addUserDebugLine(
+                    corners[i].tolist(), corners[j].tolist(),
+                    lineColorRGB=colour,
+                    lineWidth=line_width,
+                    physicsClientId=cl,
+                )
+
+            # Centre-line shaft
+            tip = corr.corridor_start + d * _CL
+            p.addUserDebugLine(
+                corr.corridor_start.tolist(), tip.tolist(),
+                lineColorRGB=colour,
+                lineWidth=line_width + 1,
+                physicsClientId=cl,
+            )
+
+            # ── Collision markers ──────────────────────────────────────────
+            # Project the obstructor AABB onto all three corridor axes to find:
+            #   - entry_t: how far along d the near AABB face enters the corridor
+            #   - the transverse offsets (along ga, ha) of the clipped cross-section
+            # All projections are *signed offsets from corridor_start* along d,
+            # and *signed offsets from box_center* along ga/ha.
+            col_colour = [1.0, 0.5, 0.0]
+            for nb_min, nb_max in corr.obstructor_aabbs:
+                nb_center_w = (nb_min + nb_max) * 0.5
+                nb_half_w   = (nb_max - nb_min) * 0.5
+
+                # Project AABB onto approach axis using support function,
+                # as signed offsets from corridor_start along d.
+                nb_proj_c = float((nb_center_w - corr.corridor_start) @ d)
+                nb_proj_r = float(np.sum(nb_half_w * np.abs(d)))
+                near_t = nb_proj_c - nb_proj_r
+                far_t  = nb_proj_c + nb_proj_r
+
+                # Skip if AABB is entirely outside the corridor along d
+                if far_t <= 0.0 or near_t >= _CL:
+                    continue
+
+                # Entry face: near AABB face clamped into [0, CL]
+                entry_t = float(np.clip(near_t, 0.0, _CL))
+                entry_centre = corr.corridor_start + d * entry_t
+
+                # Project AABB onto ga and ha as offsets from box_center
+                # using support function so sign is always correct.
+                bc_ga = float(box_center @ ga)
+                bc_ha = float(box_center @ ha)
+
+                nb_ga_c = float(nb_center_w @ ga) - bc_ga
+                nb_ha_c = float(nb_center_w @ ha) - bc_ha
+                nb_ga_r = float(np.sum(nb_half_w * np.abs(ga)))
+                nb_ha_r = float(np.sum(nb_half_w * np.abs(ha)))
+
+                nb_ga0 = nb_ga_c - nb_ga_r
+                nb_ga1 = nb_ga_c + nb_ga_r
+                nb_ha0 = nb_ha_c - nb_ha_r
+                nb_ha1 = nb_ha_c + nb_ha_r
+
+                # Clip to corridor half-extents
+                q_min_ga = max(min(nb_ga0, nb_ga1), -hw)
+                q_max_ga = min(max(nb_ga0, nb_ga1),  hw)
+                q_min_ha = max(min(nb_ha0, nb_ha1), -hh)
+                q_max_ha = min(max(nb_ha0, nb_ha1),  hh)
+
+                if q_max_ga <= q_min_ga or q_max_ha <= q_min_ha:
+                    continue
+
+                # Build world points: entry_centre + offset_ga * ga + offset_ha * ha
+                def _wp(og, oh, _ec=entry_centre, _ga=ga, _ha=ha):
+                    return _ec + og * _ga + oh * _ha
+
+                face_center = _wp((q_min_ga + q_max_ga) / 2.0,
+                                  (q_min_ha + q_max_ha) / 2.0)
+
+                # Cross arms through face centre
+                arm_ga = ga * (q_max_ga - q_min_ga) / 2.0
+                arm_ha = ha * (q_max_ha - q_min_ha) / 2.0
+                for arm in [arm_ga, arm_ha]:
+                    p.addUserDebugLine(
+                        (face_center - arm).tolist(),
+                        (face_center + arm).tolist(),
+                        lineColorRGB=col_colour,
+                        lineWidth=line_width + 2,
+                        physicsClientId=cl,
+                    )
+
+                # 4-edge rectangle bounding the clip cross-section
+                rect = [
+                    _wp(q_min_ga, q_min_ha),
+                    _wp(q_max_ga, q_min_ha),
+                    _wp(q_max_ga, q_max_ha),
+                    _wp(q_min_ga, q_max_ha),
+                ]
+                for k in range(4):
+                    p.addUserDebugLine(
+                        rect[k].tolist(), rect[(k + 1) % 4].tolist(),
+                        lineColorRGB=col_colour,
+                        lineWidth=line_width + 1,
+                        physicsClientId=cl,
+                    )
+
+        # Label 5 named directions
+        named = {
+            "+x fwd":   np.array([1., 0., 0.]),
+            "-x back":  np.array([-1., 0., 0.]),
+            "+y left":  np.array([0., 1., 0.]),
+            "-y right": np.array([0., -1., 0.]),
+            "+z top":   np.array([0., 0., 1.]),
+        }
+        corr_dirs = np.stack([c_.direction for c_ in corridors], axis=0)
+        for label, wd in named.items():
+            best_i = int(np.argmax(corr_dirs @ wd))
+            corr = corridors[best_i]
+            tip = corr.corridor_start + corr.direction * _CL
+            p.addUserDebugText(
+                f"{label} {corr.min_clearance*100:.0f}cm",
+                tip.tolist(),
+                textColorRGB=[0.1, 0.1, 0.8],
+                textSize=1.0,
+                physicsClientId=cl,
+            )
+
+    def draw_aabbs(
+        self,
+        aabbs: "list[tuple[np.ndarray, np.ndarray]]",
+        color: Tuple[float, float, float] = (0.9, 0.9, 0.1),
+        line_width: float = 1.5,
+    ) -> None:
+        """Draw axis-aligned bounding boxes as wireframe cubes.
+
+        Args:
+            aabbs: List of (min_corner, max_corner) pairs, each (3,).
+            color: RGB in [0, 1].
+            line_width: PyBullet line width.
+        """
+        if not PYBULLET_AVAILABLE or self._client is None:
+            return
+        cl = self._client
+        col = list(color)
+        for aabb_min, aabb_max in aabbs:
+            lo = np.asarray(aabb_min, dtype=float)
+            hi = np.asarray(aabb_max, dtype=float)
+            # 8 corners of the AABB
+            corners = np.array([
+                [lo[0], lo[1], lo[2]],
+                [hi[0], lo[1], lo[2]],
+                [hi[0], hi[1], lo[2]],
+                [lo[0], hi[1], lo[2]],
+                [lo[0], lo[1], hi[2]],
+                [hi[0], lo[1], hi[2]],
+                [hi[0], hi[1], hi[2]],
+                [lo[0], hi[1], hi[2]],
+            ])
+            # 12 edges + X diagonals on all 6 faces for visual density
+            edges = [
+                (0,1),(1,2),(2,3),(3,0),  # bottom
+                (4,5),(5,6),(6,7),(7,4),  # top
+                (0,4),(1,5),(2,6),(3,7),  # verticals
+                # face diagonals (2 per face × 6 faces)
+                (0,2),(1,3),  # bottom X
+                (4,6),(5,7),  # top X
+                (0,5),(1,4),  # front X
+                (2,7),(3,6),  # back X
+                (0,7),(3,4),  # left X
+                (1,6),(2,5),  # right X
+            ]
+            for i, j in edges:
+                p.addUserDebugLine(
+                    corners[i].tolist(), corners[j].tolist(),
+                    lineColorRGB=col, lineWidth=line_width,
+                    physicsClientId=cl,
+                )
+
+    def draw_point_cloud(
+        self,
+        points: np.ndarray,
+        color: Tuple[float, float, float] = (0.2, 0.8, 0.2),
+        dot_size: float = 0.004,
+        max_points: int = 500,
+    ) -> None:
+        """Draw a point cloud in the PyBullet viewport as small vertical stubs.
+
+        Each point is a single short Z-axis line segment (fast — one debug call
+        per point).  Previous debug items are NOT cleared so this can be layered
+        on top of corridor visualisations.
+
+        Args:
+            points: (N, 3) world/base-frame point cloud.
+            color: RGB tuple in [0, 1].
+            dot_size: Half-length of each stub in metres.
+            max_points: Subsample to this many points if the cloud is larger.
+        """
+        if not PYBULLET_AVAILABLE or self._client is None or len(points) == 0:
+            return
+        cl = self._client
+        pts = np.asarray(points, dtype=float)
+        if len(pts) > max_points:
+            idx = np.random.choice(len(pts), max_points, replace=False)
+            pts = pts[idx]
+        col = list(color)
+        arm = np.array([0.0, 0.0, dot_size])
+        for pt in pts:
+            p.addUserDebugLine(
+                (pt - arm).tolist(), (pt + arm).tolist(),
+                lineColorRGB=col, lineWidth=2,
+                physicsClientId=cl,
+            )
+
+    def set_scene_visibility(self, visible: bool) -> None:
+        """Show or hide all scene objects and the robot in the viewport.
+
+        Sets alpha=0 (invisible) or restores original RGBA for every visual
+        link of every scene body and the robot, so the point-cloud-only view
+        is uncluttered.  The ground plane is also hidden when invisible=True.
+        """
+        if not PYBULLET_AVAILABLE or self._client is None:
+            return
+        c = self._client
+        alpha = 1.0 if visible else 0.0
+
+        # Scene objects
+        for oid, body in self._obj_ids.items():
+            orig = self._object_colors.get(oid, [0.6, 0.6, 0.6, 1.0])
+            rgba = list(orig[:3]) + [alpha]
+            p.changeVisualShape(body, -1, rgbaColor=rgba, physicsClientId=c)
+
+        # Robot — one getVisualShapeData call covers all links
+        if self._robot_id is not None:
+            vis_data = p.getVisualShapeData(self._robot_id, physicsClientId=c)
+            for vd in vis_data:
+                link_idx = vd[1]   # -1 = base, 0..n = links
+                orig_rgba = vd[7]  # (r, g, b, a)
+                new_rgba = [orig_rgba[0], orig_rgba[1], orig_rgba[2], alpha]
+                p.changeVisualShape(self._robot_id, link_idx,
+                                    rgbaColor=new_rgba, physicsClientId=c)
+
+    def clear_debug_items(self) -> None:
+        """Remove all PyBullet debug lines and text from the viewport."""
+        if PYBULLET_AVAILABLE and self._client is not None:
+            p.removeAllUserDebugItems(physicsClientId=self._client)
 
     def get_robot_state(self) -> Dict:
         """Return JSON-serialisable robot state dict (matches duck-typed interface)."""
