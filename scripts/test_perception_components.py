@@ -60,20 +60,29 @@ log = logging.getLogger("perception_test")
 _DIVIDER = "=" * 70
 
 # ---------------------------------------------------------------------------
-# Scene layout
+# Scene layout — cluttered pile, green_block_1 is the grasp target
 # ---------------------------------------------------------------------------
 
-TABLE_POS   = [0.40,  0.00, 0.20]
-BLOCK_A_POS = [0.35, -0.08, 0.27]
-BLOCK_B_POS = [0.45,  0.05, 0.27]
-BLOCK_C_POS = [0.35, -0.08, 0.33]   # stacked on A
+TABLE_POS        = [0.40,  0.00, 0.20]
+GREEN_TARGET_POS = [0.38,  0.00, 0.27]   # target block, partially buried
+BLUE_STACK_POS   = [0.38,  0.00, 0.33]   # stacked directly on green target
+RED_BLOCK_POS    = [0.44, -0.05, 0.27]   # adjacent lateral blocker
+ORANGE_BLOCK_POS = [0.32,  0.05, 0.27]   # lateral blocker / partial occluder
+YELLOW_BLOCK_POS = [0.44,  0.06, 0.27]   # free block on table
 
 SCENE_OBJECTS = [
-    {"object_id": "table_1",    "object_type": "surface", "position_3d": TABLE_POS},
-    {"object_id": "red_block_1","object_type": "block",   "position_3d": BLOCK_A_POS},
-    {"object_id": "blue_block_1","object_type": "block",  "position_3d": BLOCK_B_POS},
-    {"object_id": "red_block_2","object_type": "block",   "position_3d": BLOCK_C_POS},
+    {"object_id": "table_1",        "object_type": "surface", "position_3d": TABLE_POS},
+    {"object_id": "green_block_1",  "object_type": "block",   "position_3d": GREEN_TARGET_POS},
+    {"object_id": "blue_block_1",   "object_type": "block",   "position_3d": BLUE_STACK_POS},
+    {"object_id": "red_block_1",    "object_type": "block",   "position_3d": RED_BLOCK_POS},
+    {"object_id": "orange_block_1", "object_type": "block",   "position_3d": ORANGE_BLOCK_POS},
+    {"object_id": "yellow_block_1", "object_type": "block",   "position_3d": YELLOW_BLOCK_POS},
 ]
+
+# Object to clear during TEST 5 post-manipulation update (stacked on the target)
+POSTMANIP_OBJECT  = "blue_block_1"
+POSTMANIP_SRC_POS = BLUE_STACK_POS
+POSTMANIP_DST_POS = [0.55, -0.15, 0.27]
 
 VIEWPOINT_1 = CAMERA_AIM_JOINTS
 VIEWPOINT_2 = [0.4, -1.2, -0.15, 1.5, 0.0, 1.8, -0.1]
@@ -81,10 +90,12 @@ VIEWPOINT_3 = [-0.3,-1.4, -0.10, 1.3, 0.0, 2.0, -0.1]
 
 # Per-object display colours (RGB 0-1)
 OBJ_COLORS = {
-    "table_1":    (0.55, 0.45, 0.30),
-    "red_block_1":(0.85, 0.15, 0.15),
-    "blue_block_1":(0.15, 0.35, 0.85),
-    "red_block_2":(0.85, 0.40, 0.15),
+    "table_1":        (0.55, 0.45, 0.30),
+    "green_block_1":  (0.15, 0.75, 0.15),
+    "blue_block_1":   (0.15, 0.35, 0.85),
+    "red_block_1":    (0.85, 0.15, 0.15),
+    "orange_block_1": (0.95, 0.50, 0.05),
+    "yellow_block_1": (0.90, 0.85, 0.05),
 }
 
 # ---------------------------------------------------------------------------
@@ -278,7 +289,10 @@ def _detect_masks(
     import asyncio
 
     # Force GroundingDINO to look for the actual objects in the scene
-    tracker.set_extra_tags(["red block", "blue block", "table", "surface"])
+    tracker.set_extra_tags([
+        "green block", "blue block", "red block",
+        "orange block", "yellow block", "table", "surface",
+    ])
 
     asyncio.run(tracker.detect_objects(
         color_frame=color,
@@ -364,7 +378,7 @@ def test_clearance(env, color, depth, masks, intrinsics, robot_state, gui) -> bo
     cam_quat = np.array(cam["quaternion_xyzw"]) if "quaternion_xyzw" in cam else None
     cam_pos = np.array(cam["position"]) if "position" in cam else None
 
-    block_ids = ["red_block_1", "blue_block_1", "red_block_2"]
+    block_ids = [oid for oid, m in masks.items() if m.any() and "table" not in oid and "surface" not in oid]
     profiles = {}
 
     for oid in block_ids:
@@ -775,10 +789,8 @@ def test_contact_graph(env, color, depth, masks, detected, intrinsics, gui) -> b
 
     edge_style = {
         "supporting": dict(color="green",  linewidth=2.5, linestyle="-"),
-        "stacked":    dict(color="blue",   linewidth=2.5, linestyle="-"),
-        "leaning":    dict(color="orange", linewidth=1.5, linestyle="--"),
-        "adjacent":   dict(color="grey",   linewidth=1.0, linestyle=":"),
         "nested":     dict(color="purple", linewidth=1.5, linestyle="-."),
+        "none":       dict(color="grey",   linewidth=0.8, linestyle=":"),
     }
 
     for edge in graph.edges:
@@ -1034,10 +1046,10 @@ def test_post_manipulation_update(env, scene_objects, intrinsics, tracker, gui) 
     n_before = len(graph_before.edges)
     _info(f"Before: {n_before} contact edges")
 
-    # Simulate pick
-    _info("Moving red_block_2 off the stack...")
-    env.set_status("T5: Simulating pick of red_block_2", color=[0.9, 0.7, 0.1])
-    env.move_object("red_block_2", [0.55, -0.15, 0.27])
+    # Simulate pick — move the stacked block off the target to clear it
+    _info(f"Moving {POSTMANIP_OBJECT} off the stack...")
+    env.set_status(f"T5: Simulating pick of {POSTMANIP_OBJECT}", color=[0.9, 0.7, 0.1])
+    env.move_object(POSTMANIP_OBJECT, POSTMANIP_DST_POS)
     time.sleep(0.4)
 
     # Post-manipulation snapshot
@@ -1045,8 +1057,8 @@ def test_post_manipulation_update(env, scene_objects, intrinsics, tracker, gui) 
     robot_state_after = env.get_robot_state()
     scene_after = [o.copy() for o in scene_objects]
     for o in scene_after:
-        if o["object_id"] == "red_block_2":
-            o["position_3d"] = [0.55, -0.15, 0.27]
+        if o["object_id"] == POSTMANIP_OBJECT:
+            o["position_3d"] = POSTMANIP_DST_POS
     masks_after = _detect_masks(tracker, color_after, depth_after, intrinsics, robot_state_after, scene_after)
     detected_after = _make_detected_objects(scene_after)
 
@@ -1089,7 +1101,7 @@ def test_post_manipulation_update(env, scene_objects, intrinsics, tracker, gui) 
     _show_and_wait(fig, gui, "Post-manipulation result shown — press Enter to finish.")
 
     # Restore
-    env.move_object("red_block_2", BLOCK_C_POS)
+    env.move_object(POSTMANIP_OBJECT, POSTMANIP_SRC_POS)
     _ok("Post-manipulation geometry update test complete")
     return True
 

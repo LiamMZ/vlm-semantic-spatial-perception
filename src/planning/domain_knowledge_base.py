@@ -1,6 +1,16 @@
 """
 Domain Knowledge Base (DKB)
 
+Pre-loaded domain modules
+-------------------------
+The clutter manipulation module is loaded automatically on ``load()`` via
+``load_clutter_module()``.  It installs the predicate library entries for:
+    access-clear, obstructs, displaceable, space-available,
+    supports, removal-safe, stable-on, visible, occluded-by
+These are available to L2 via ``get_predicate_hints()`` without any LLM call
+generating them from scratch.
+
+
 Lightweight JSON-based persistence for predicates, action schemas, and execution
 history that accumulates across tasks. Implements the DKB architecture described
 in gtamp-update-plan.md §V.
@@ -45,7 +55,7 @@ class DomainKnowledgeBase:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        """Load existing library files from disk. Creates directory if absent."""
+        """Load existing library files from disk, then pre-load domain modules."""
         self.dkb_dir.mkdir(parents=True, exist_ok=True)
 
         pred_path = self.dkb_dir / "predicate_library.json"
@@ -61,6 +71,10 @@ class DomainKnowledgeBase:
                 self._actions = json.loads(action_path.read_text(encoding="utf-8"))
             except Exception:
                 self._actions = {}
+
+        # Pre-load built-in domain modules (idempotent — preserves usage_count)
+        from .clutter_module import load_clutter_module
+        load_clutter_module(self)
 
     def save(self) -> None:
         """Persist predicate and action libraries to disk."""

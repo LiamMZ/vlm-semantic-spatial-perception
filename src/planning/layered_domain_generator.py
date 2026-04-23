@@ -291,6 +291,7 @@ class LayeredDomainGenerator:
         task: str,
         observed_objects: Optional[List[Dict]] = None,
         image: Optional[Any] = None,
+        registry: Optional[Any] = None,
     ) -> LayeredDomainArtifact:
         """
         Run the full L1→L5 pipeline and return a LayeredDomainArtifact.
@@ -352,7 +353,7 @@ class LayeredDomainGenerator:
                 print(f"  [L4] Warning: {w}")
 
         # L5 — Initial State Construction (algorithmic)
-        l5 = self._run_l5(l2, l3, scene_objects, l1)
+        l5 = self._run_l5(l2, l3, scene_objects, l1, registry=registry)
         print(f"  [L5] Initial true literals: {len(l5.true_literals)}, false: {len(l5.false_literals)}")
 
         artifact = LayeredDomainArtifact(
@@ -1388,6 +1389,7 @@ class LayeredDomainGenerator:
         l3: L3ActionArtifact,
         scene_objects: List[Dict],
         l1: L1GoalArtifact,
+        registry: Optional[Any] = None,
     ) -> L5InitialStateArtifact:
         """
         Construct initial PDDL state from scene observation.
@@ -1608,6 +1610,31 @@ class LayeredDomainGenerator:
                     completeness_repairs += 1
         if completeness_repairs > 0:
             print(f"  [L5-V1] Added {completeness_repairs} FALSE entries for completeness.")
+
+        # Clutter module: inject stable-on TRUE facts from contact graph (§3.3 exception).
+        # stable-on is an object_state predicate — grounded directly from Ψ, not sensed.
+        # Also handles the case where L2 generated "on" as a 2-arg synonym for stable-on.
+        if registry is not None:
+            _stable_candidates = [
+                name for name, arity in pred_arities.items()
+                if name in ("stable-on", "on", "resting-on", "placed-on") and arity == 2
+                and classifications.get(name, "object_state") in (
+                    "object_state", "derived", "robot_state", "action"
+                )
+                and name not in (checked_names | sensed_names)
+            ]
+            if _stable_candidates:
+                try:
+                    from .clutter_module import ClutterGrounder
+                    grounder = ClutterGrounder(registry)
+                    stable_facts = grounder.ground_stable_on()
+                    for inject_name in _stable_candidates:
+                        for _pred_name, args in stable_facts:
+                            if all(a in obj_ids for a in args):
+                                true_lits.append((inject_name, args))
+                                print(f"  [L5-clutter] {inject_name}: ({inject_name} {' '.join(args)})")
+                except Exception as _exc:
+                    print(f"  [L5-clutter] WARNING: stable-on grounding failed: {_exc}")
 
         # L5-V2 (AUTO-REPAIR): check every true_lit — if predicate is checked/sensed/external,
         # reset to FALSE and log.

@@ -22,11 +22,11 @@ Phase 2 — Narrow phase (point cloud distance):
   centroid, normal, area.
 
 Phase 3 — Contact classification:
-  Classify each confirmed contact into supporting / stacked / leaning /
-  adjacent / nested based on vertical relationship and footprint geometry.
+  Classify each confirmed contact into supporting / nested / none
+  based on vertical relationship and footprint geometry.
 
 Phase 4 — Support tree:
-  Map lower_id → [upper_ids] for "supporting" and "stacked" edges.
+  Map lower_id → [upper_ids] for "supporting" edges.
 
 Phase 5 — Removal consequences:
   For each object being removed, check directly supported objects; if any
@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # Data structures
 # ---------------------------------------------------------------------------
 
-ContactType = Literal["supporting", "stacked", "leaning", "adjacent", "nested"]
+ContactType = Literal["supporting", "nested", "none"]
 RemovalConsequence = Literal["stable", "unstable", "cascade"]
 
 # Voxel size used for point cloud downsampling before KD-tree narrow phase.
@@ -122,6 +122,7 @@ class ContactGraph:
     support_tree: Dict[str, List[str]] = field(default_factory=dict)
     stability_scores: Dict[str, float] = field(default_factory=dict)
     removal_consequences: Dict[str, RemovalConsequence] = field(default_factory=dict)
+    object_aabbs: Dict[str, Tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +170,40 @@ def _footprint_contains(min_outer: np.ndarray, max_outer: np.ndarray,
 
 
 def _nested(min_inner: np.ndarray, max_inner: np.ndarray,
-            min_outer: np.ndarray, max_outer: np.ndarray) -> bool:
-    """Check if inner AABB is fully contained within outer AABB (all 3 axes)."""
-    return bool(np.all(min_inner >= min_outer) and np.all(max_inner <= max_outer))
+            min_outer: np.ndarray, max_outer: np.ndarray,
+            use_world: bool = False) -> bool:
+    """Check if inner AABB is physically nested inside outer AABB.
+
+    Requires containment on horizontal axes AND vertical enclosure from both
+    sides (outer bounds inner both above and below on the vertical axis).
+    This prevents flat surfaces (tables) from being classified as nesting the
+    objects that rest on top of them.
+
+    Camera frame: vertical = Y (down), so inner_min_y >= outer_min_y and
+    inner_max_y <= outer_max_y.  World frame: vertical = Z (up), same logic.
+    """
+    ax = 2 if use_world else 1  # vertical axis index
+    horiz = [i for i in range(3) if i != ax]
+
+    # Horizontal containment: inner footprint must be inside outer on both horiz axes
+    for i in horiz:
+        if min_inner[i] < min_outer[i] or max_inner[i] > max_outer[i]:
+            return False
+
+    # Vertical enclosure from BOTH sides: outer must bound inner above AND below.
+    # A flat surface only bounds from below — that is supporting, not nested.
+    vert_margin = 0.01  # 1 cm — outer must extend at least this far past inner top
+    inner_top = max_inner[ax]
+    outer_top = max_outer[ax]
+    outer_bot = min_outer[ax]
+    inner_bot = min_inner[ax]
+
+    if use_world:
+        # world Z up: outer_top > inner_top + margin AND outer_bot < inner_bot
+        return bool(outer_top > inner_top + vert_margin and outer_bot < inner_bot)
+    else:
+        # camera Y down: outer_top (min_y) < inner_top - margin AND outer_bot (max_y) > inner_bot
+        return bool(outer_bot > inner_bot + vert_margin and outer_top < min_inner[ax])
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +301,7 @@ def _broad_phase_candidates(
     obj_aabbs: Dict[str, Tuple[np.ndarray, np.ndarray]],
     surface_ids: List[str],
     threshold: float,
+    use_world: bool = False,
 ) -> List[Tuple[str, str]]:
     """Return (id_a, id_b) pairs that are within threshold of each other.
 
@@ -297,25 +330,37 @@ def _broad_phase_candidates(
 
     for s_id in surface_ids:
         s_mn, s_mx = obj_aabbs[s_id]
-        # Bottom face of the surface AABB is a plane at Y = s_mn[1] (camera frame Y=down).
-        surface_plane_y = float(s_mn[1])  # top surface = smallest Y = highest in scene
+        if use_world:
+            # World frame Z-up: surface top face is at max Z.
+            surface_top = float(s_mx[2])
+        else:
+            # Camera frame Y-down: surface top face is at min Y (closest to camera top).
+            surface_top = float(s_mn[1])
 
         for obj_id in non_surface_ids:
             if obj_id == s_id:
                 continue
             o_mn, o_mx = obj_aabbs[obj_id]
-            # Point-to-plane: distance from object AABB bottom to surface top.
-            # In camera frame Y increases downward; surface top is s_mn[1].
-            # Object rests on surface when its bottom (max Y) is near s_mn[1].
-            obj_bottom_y = float(o_mx[1])
-            dist = abs(obj_bottom_y - surface_plane_y)
-            if dist <= threshold:
+            if use_world:
+                # Object bottom is at min Z; distance to surface top face.
+                obj_bottom = float(o_mn[2])
+            else:
+                # Camera frame Y-down: object bottom is at max Y.
+                obj_bottom = float(o_mx[1])
+            dist = abs(obj_bottom - surface_top)
+            # Use a generous threshold for surface proximity — noisy depth
+            # AABBs can have object bottoms sitting several cm above the
+            # percentile-clipped surface top.  The narrow phase will confirm.
+            if dist <= max(threshold, 0.15):
                 key = (min(obj_id, s_id), max(obj_id, s_id))
                 if key not in existing:
                     existing.add(key)
                     candidates.append((obj_id, s_id))
 
+    logger.debug("broad_phase: surface_ids=%s", surface_ids)
     logger.debug("broad_phase: %d candidate pairs from %d objects", len(candidates), n)
+    for a, b in candidates:
+        logger.debug("  candidate: %s — %s", a, b)
     return candidates
 
 
@@ -491,14 +536,11 @@ def would_tip_without(
     """
     remaining_pts: List[np.ndarray] = []
     for e in edges:
-        if e.contact_type not in ("supporting", "stacked", "leaning"):
+        if e.contact_type != "supporting":
             continue
         if e.obj_a == support_id or e.obj_b == support_id:
             continue
-        # A contact edge is a support for obj_id if obj_id is the upper member.
-        if e.obj_b == obj_id and e.contact_type in ("supporting", "stacked"):
-            remaining_pts.append(e.contact_region.point)
-        elif e.contact_type == "leaning" and (e.obj_a == obj_id or e.obj_b == obj_id):
+        if e.obj_b == obj_id:
             remaining_pts.append(e.contact_region.point)
 
     if not remaining_pts:
@@ -520,42 +562,53 @@ def _classify_contact_phase3(
     coms: Dict[str, np.ndarray],
     use_world: bool = False,
 ) -> ContactType:
-    """Full Phase-3 classification following the spec.
+    """Full Phase-3 classification.
 
     Convention: id_a is the lower object (higher Y in camera frame / lower Z
     in world frame).  The caller ensures this ordering.
+
+    Returns "supporting" when B rests on A, "nested" when B is enclosed inside
+    A, and "none" otherwise.
     """
-    # --- Nested check (full 3-D containment) ---
-    if _nested(min_b, max_b, min_a, max_a):
+    # --- Nested check: inner object physically enclosed by outer on all axes ---
+    if _nested(min_b, max_b, min_a, max_a, use_world=use_world):
         return "nested"
-    if _nested(min_a, max_a, min_b, max_b):
+    if _nested(min_a, max_a, min_b, max_b, use_world=use_world):
         return "nested"
 
-    vert_diff = _vertical_diff(com_a, com_b, use_world=use_world)
-    cn_z = _contact_normal_z(normal, use_world=use_world)
-    cn_h = _contact_normal_horizontal(normal, use_world=use_world)
+    ax = 2 if use_world else 1
 
-    if vert_diff < 0.01:
-        # --- Lateral contact ---
-        if cn_h > 0.8:
-            tips = would_tip_without(id_b, id_a, edges, coms, use_world=use_world)
-            return "leaning" if tips else "adjacent"
-        return "adjacent"
-
+    # Determine if this is a vertical (stacking) relationship by checking
+    # whether B's bottom surface is near A's top surface — i.e. B rests on A.
+    # This is more reliable than COM-to-COM distance, which conflates object
+    # heights with actual vertical separation, causing flat surfaces (tables)
+    # to appear laterally adjacent to objects sitting on them.
+    #
+    # Camera frame: Y is down, so "bottom of B" = max_b[1], "top of A" = min_a[1]
+    # World frame:  Z is up,   so "bottom of B" = min_b[2], "top of A" = max_a[2]
+    if use_world:
+        b_bottom = float(min_b[ax])
+        a_top    = float(max_a[ax])
     else:
-        # --- Vertical contact ---
-        if cn_z > 0.7:
-            com_projects = _com_projects_onto_footprint(com_b, min_a, max_a,
-                                                        use_world=use_world)
-            if com_projects:
-                h_cont = horizontal_containment(min_b, max_b, min_a, max_a,
-                                                use_world=use_world)
-                if h_cont > 0.8:
-                    return "stacked"
-                return "supporting"
-            return "leaning"
-        else:
-            return "leaning"
+        b_bottom = float(max_b[ax])   # camera Y: larger = lower
+        a_top    = float(min_a[ax])   # camera Y: smaller = higher (top surface)
+
+    # Gap between top of A and bottom of B (positive = B is above A's top face)
+    surface_gap = (b_bottom - a_top) if use_world else (a_top - b_bottom)
+    height_b = float(max_b[ax] - min_b[ax])
+    # "Resting on" if the gap is small relative to B's own height.
+    # Threshold: 40% of B's height to absorb depth noise and mask bleed.
+    vertical_contact = surface_gap > -0.02 and surface_gap < max(0.04, 0.4 * height_b)
+
+    if vertical_contact:
+        # Don't gate on contact normal — KD-tree normals are unreliable for
+        # noisy depth point clouds where mask boundaries cause the closest
+        # points to be at the sides rather than the top/bottom faces.
+        com_projects = _com_projects_onto_footprint(com_b, min_a, max_a,
+                                                    use_world=use_world)
+        if com_projects:
+            return "supporting"
+    return "none"
 
 
 # ---------------------------------------------------------------------------
@@ -624,16 +677,13 @@ def _support_polygon_pts(
 ) -> List[np.ndarray]:
     """Collect contact points that support obj_id (excluding exclude_id).
 
-    Returns a list of (3,) contact points from supporting/stacked edges where
-    obj_b == obj_id, plus leaning edges that involve obj_id.
+    Returns contact points from supporting/stacked edges where obj_b == obj_id.
     """
     pts: List[np.ndarray] = []
     for e in edges:
         if exclude_id and (e.obj_a == exclude_id or e.obj_b == exclude_id):
             continue
-        if e.contact_type in ("supporting", "stacked") and e.obj_b == obj_id:
-            pts.append(e.contact_region.point)
-        elif e.contact_type == "leaning" and (e.obj_a == obj_id or e.obj_b == obj_id):
+        if e.contact_type == "supporting" and e.obj_b == obj_id:
             pts.append(e.contact_region.point)
     return pts
 
@@ -662,7 +712,7 @@ def _compute_removal_consequences(
         # Directly supported objects.
         directly_supported = [
             e.obj_b for e in edges
-            if e.obj_a == removed_id and e.contact_type in ("supporting", "stacked")
+            if e.obj_a == removed_id and e.contact_type == "supporting"
         ]
         if not directly_supported:
             continue
@@ -686,7 +736,7 @@ def _compute_removal_consequences(
             secondary = [
                 e.obj_b for e in edges
                 if e.obj_a == newly_unstable
-                and e.contact_type in ("supporting", "stacked")
+                and e.contact_type == "supporting"
                 and e.obj_b not in unstable_set
                 and e.obj_b != removed_id
             ]
@@ -772,7 +822,7 @@ def _redundancy_score(
     """Fraction of support contacts removable while keeping obj_id stable."""
     support_edges = [
         e for e in edges
-        if e.contact_type in ("supporting", "stacked") and e.obj_b == obj_id
+        if e.contact_type == "supporting" and e.obj_b == obj_id
     ]
     if not support_edges:
         return 1.0
@@ -829,6 +879,12 @@ def compute_contact_graph(
     depth_frame: np.ndarray,
     camera_intrinsics,
     contact_threshold_m: float = 0.008,
+    camera_position: Optional[np.ndarray] = None,
+    camera_rotation=None,
+    color_image: Optional[np.ndarray] = None,
+    llm_client=None,
+    llm_mode: str = "nl",
+    llm_debug_image_out: Optional[List] = None,
 ) -> ContactGraph:
     """Compute the pairwise contact graph for a set of detected objects.
 
@@ -839,18 +895,20 @@ def compute_contact_graph(
         camera_intrinsics: Object with fx, fy, ppx/cx, ppy/cy attributes.
         contact_threshold_m: Max distance to consider objects in contact, metres.
             Default 0.008 m (8 mm).
+        camera_position: (3,) camera origin in robot base/world frame.  When
+            provided together with camera_rotation, all point clouds are
+            transformed to world frame (Z-up) before classification, giving
+            more reliable stacked/supporting results than camera-frame geometry.
+        camera_rotation: scipy.spatial.transform.Rotation for camera-to-world.
+        color_image: RGB uint8 (H, W, 3) scene image.  Required when llm_client
+            is provided — used to render the annotated image sent to the model.
+        llm_client: Optional LLMClient instance.  When provided, Phase-3
+            geometric classifications are replaced with LLM-inferred labels.
+            Requires camera_position, camera_rotation, and color_image.
 
     Returns:
         ContactGraph with edges, support_tree, stability_scores, and
         removal_consequences populated.
-
-    Example:
-        graph = compute_contact_graph(
-            objects=registry.get_all_objects(),
-            obj_masks=masks,
-            depth_frame=depth_m,
-            camera_intrinsics=intr,
-        )
     """
     if len(objects) < 2:
         return ContactGraph(
@@ -865,9 +923,12 @@ def compute_contact_graph(
     cx = float(getattr(camera_intrinsics, 'ppx', getattr(camera_intrinsics, 'cx', w / 2)))
     cy = float(getattr(camera_intrinsics, 'ppy', getattr(camera_intrinsics, 'cy', h / 2)))
 
-    # Camera frame: X=right, Y=down, Z=depth.
-    # Vertical axis is -Y (higher objects have smaller Y).
-    use_world = False  # operating in camera frame throughout
+    use_world = camera_position is not None and camera_rotation is not None
+
+    def _to_world(pts: np.ndarray) -> np.ndarray:
+        if not use_world or len(pts) == 0:
+            return pts
+        return camera_rotation.apply(pts) + camera_position
 
     # -----------------------------------------------------------------------
     # Build per-object AABBs, centroids, and point clouds
@@ -876,26 +937,32 @@ def compute_contact_graph(
     obj_coms: Dict[str, np.ndarray] = {}
     obj_clouds: Dict[str, Optional[np.ndarray]] = {}
 
-    # Identify surface objects (type == "surface").
-    surface_ids: List[str] = [
-        o.object_id for o in objects if o.object_type.lower() == "surface"
-    ]
+    _SURFACE_KEYWORDS = ("surface", "table", "shelf", "tray", "counter", "desk", "floor")
+
+    def _is_surface(obj: DetectedObject) -> bool:
+        t = obj.object_type.lower()
+        return any(kw in t for kw in _SURFACE_KEYWORDS)
+
+    surface_ids: List[str] = [o.object_id for o in objects if _is_surface(o)]
 
     for obj in objects:
         mask = obj_masks.get(obj.object_id)
         if mask is not None and mask.any():
             masked_depth = np.where(mask, depth_frame, 0.0)
-            pts = _depth_to_pointcloud(masked_depth, fx, fy, cx, cy)
+            pts = _to_world(_depth_to_pointcloud(masked_depth, fx, fy, cx, cy))
         else:
             pts = np.empty((0, 3), dtype=np.float32)
 
         if len(pts) > 0:
-            mn, mx = _aabb(pts)
+            # Use 5th–95th percentile extents to reject outlier depth pixels
+            # at mask boundaries that would otherwise inflate the AABB.
+            mn = np.percentile(pts, 5,  axis=0)
+            mx = np.percentile(pts, 95, axis=0)
             obj_aabbs[obj.object_id] = (mn, mx)
-            obj_coms[obj.object_id] = pts.mean(axis=0)
+            obj_coms[obj.object_id] = np.median(pts, axis=0)
             obj_clouds[obj.object_id] = pts
         elif obj.position_3d is not None:
-            # Synthetic 6 cm box from position_3d fallback.
+            # Use position_3d which is already in world frame if robot_interface was set.
             c = np.asarray(obj.position_3d, dtype=float)
             obj_aabbs[obj.object_id] = (c - 0.03, c + 0.03)
             obj_coms[obj.object_id] = c
@@ -920,7 +987,7 @@ def compute_contact_graph(
     # Phase 1 — Broad phase
     # -----------------------------------------------------------------------
     candidates = _broad_phase_candidates(
-        obj_ids, obj_aabbs, surface_ids, contact_threshold_m
+        obj_ids, obj_aabbs, surface_ids, contact_threshold_m, use_world=use_world
     )
 
     # -----------------------------------------------------------------------
@@ -956,8 +1023,12 @@ def compute_contact_graph(
         min_dist, contact_pt, normal, area = result
 
         # Order so that id_a is the lower object.
-        # In camera frame, lower = larger Y value.
-        if com_i[1] >= com_j[1]:
+        # Camera frame: lower = larger Y. World frame: lower = smaller Z.
+        if use_world:
+            i_is_lower = com_i[2] <= com_j[2]
+        else:
+            i_is_lower = com_i[1] >= com_j[1]
+        if i_is_lower:
             a_id, b_id = id_i, id_j
             min_a, max_a, com_a = mn_i, mx_i, com_i
             min_b, max_b, com_b = mn_j, mx_j, com_j
@@ -977,27 +1048,57 @@ def compute_contact_graph(
         edges.append(ContactEdge(
             obj_a=a_id,
             obj_b=b_id,
-            contact_type="adjacent",  # placeholder
+            contact_type="none",  # placeholder
             contact_region=ContactRegion(point=contact_pt, normal=normal, area=area),
             removal_consequence="stable",
         ))
 
     # Pass B: Phase-3 full classification.
-    for idx, (a_id, b_id, _, contact_pt, normal, area) in enumerate(raw_edges):
-        min_a, max_a = obj_aabbs[a_id]
-        min_b, max_b = obj_aabbs[b_id]
-        com_a = obj_coms[a_id]
-        com_b = obj_coms[b_id]
+    # Optionally replaced by LLM classifications when llm_client is provided.
+    llm_labels: Dict[Tuple[str, str], tuple] = {}  # sorted_key → (rel, directed_a, directed_b)
+    if llm_client is not None and color_image is not None and use_world:
+        try:
+            from .llm_contact_classifier import (
+                classify_contacts_with_llm,
+                classify_contacts_nl,
+            )
+            _classify_fn = classify_contacts_nl if llm_mode == "nl" else classify_contacts_with_llm
+            llm_labels = _classify_fn(
+                objects=objects,
+                object_aabbs=obj_aabbs,
+                color_img=color_image,
+                obj_masks=obj_masks,
+                llm_client=llm_client,
+                debug_image_out=llm_debug_image_out,
+            )
+            logger.info("LLM classification returned %d pair labels", len(llm_labels))
+        except Exception as exc:
+            logger.error("LLM contact classification error — falling back to geometric: %s", exc)
 
-        contact_type = _classify_contact_phase3(
-            a_id, b_id,
-            min_a, max_a, com_a,
-            min_b, max_b, com_b,
-            normal,
-            edges,
-            obj_coms,
-            use_world=use_world,
-        )
+    for idx, (a_id, b_id, _, contact_pt, normal, area) in enumerate(raw_edges):
+        # Use LLM label if available (key is sorted pair)
+        llm_key = (min(a_id, b_id), max(a_id, b_id))
+        if llm_key in llm_labels:
+            contact_type, llm_a, llm_b = llm_labels[llm_key]
+            # If LLM reversed the direction (llm_a is b_id), swap edge endpoints
+            # so obj_a is always the supporter/container.
+            if contact_type == "supporting" and llm_a == b_id and llm_b == a_id:
+                edges[idx].obj_a, edges[idx].obj_b = b_id, a_id
+        else:
+            min_a, max_a = obj_aabbs[a_id]
+            min_b, max_b = obj_aabbs[b_id]
+            com_a = obj_coms[a_id]
+            com_b = obj_coms[b_id]
+
+            contact_type = _classify_contact_phase3(
+                a_id, b_id,
+                min_a, max_a, com_a,
+                min_b, max_b, com_b,
+                normal,
+                edges,
+                obj_coms,
+                use_world=use_world,
+            )
         edges[idx].contact_type = contact_type
 
     # -----------------------------------------------------------------------
@@ -1005,7 +1106,7 @@ def compute_contact_graph(
     # -----------------------------------------------------------------------
     support_tree: Dict[str, List[str]] = {oid: [] for oid in obj_ids}
     for e in edges:
-        if e.contact_type in ("supporting", "stacked"):
+        if e.contact_type == "supporting":
             if e.obj_a in support_tree:
                 support_tree[e.obj_a].append(e.obj_b)
             else:
@@ -1030,12 +1131,14 @@ def compute_contact_graph(
     )
 
     logger.info(
-        "compute_contact_graph: %d objects, %d contact edges, "
-        "%d supporting/stacked, %d leaning",
+        "compute_contact_graph: %d objects, %d contact edges "
+        "(%d supporting, %d nested, %d none)%s",
         n,
         len(edges),
-        sum(1 for e in edges if e.contact_type in ("supporting", "stacked")),
-        sum(1 for e in edges if e.contact_type == "leaning"),
+        sum(1 for e in edges if e.contact_type == "supporting"),
+        sum(1 for e in edges if e.contact_type == "nested"),
+        sum(1 for e in edges if e.contact_type == "none"),
+        " [LLM]" if llm_labels else "",
     )
 
     return ContactGraph(
@@ -1043,4 +1146,5 @@ def compute_contact_graph(
         support_tree=support_tree,
         stability_scores=stability_scores,
         removal_consequences=removal_consequences,
+        object_aabbs=dict(obj_aabbs),
     )

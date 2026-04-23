@@ -144,6 +144,7 @@ class GSAM2ObjectTracker:
         occlusion_update_interval: int = 1,
         compute_surface_maps: bool = True,
         surface_map_resolution_m: float = 0.01,
+        robot_interface: Optional[Any] = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.logger = logger or get_structured_logger("GSAM2ObjectTracker")
@@ -159,6 +160,7 @@ class GSAM2ObjectTracker:
         self._occlusion_update_interval = occlusion_update_interval
         self._compute_surface_maps = compute_surface_maps
         self._surface_map_resolution_m = surface_map_resolution_m
+        self._robot_interface = robot_interface
         # Rolling window of ObservationRecords for multi-viewpoint occlusion analysis
         self._obs_history: Deque[ObservationRecord] = collections.deque(maxlen=occlusion_history_len)
         # Cache affordances by object type (safe_name) to avoid redundant LLM calls
@@ -197,6 +199,37 @@ class GSAM2ObjectTracker:
         """Store PDDL predicate signatures to evaluate per detected object."""
         self._pddl_predicates = list(predicates or [])
         self.logger.debug("GSAM2ObjectTracker: %d PDDL predicates configured", len(self._pddl_predicates))
+
+    def _get_camera_transform(self, robot_state: Optional[Dict[str, Any]]):
+        """Return (cam_position, cam_rotation) in world/base frame, or (None, None).
+
+        Prefers the robot_interface FK transform over robot_state dict so the
+        joint state is always current.  Falls back to robot_state["camera"] if
+        no robot_interface is set (e.g. headless / sim without live joints).
+        """
+        from scipy.spatial.transform import Rotation
+
+        # Prefer live FK from the robot interface
+        if self._robot_interface is not None:
+            try:
+                pos, rot = self._robot_interface.get_camera_transform()
+                if pos is not None and rot is not None:
+                    return np.asarray(pos, dtype=float), rot
+            except Exception as e:
+                self.logger.warning("robot_interface.get_camera_transform failed: %s", e)
+
+        # Fall back to robot_state dict (populated by sim or static transforms)
+        if robot_state is not None:
+            cam_tf = robot_state.get("camera")
+            if cam_tf is not None:
+                try:
+                    pos = np.array(cam_tf["position"], dtype=float)
+                    rot = Rotation.from_quat(cam_tf["quaternion_xyzw"])
+                    return pos, rot
+                except Exception as e:
+                    self.logger.warning("robot_state camera transform parse failed: %s", e)
+
+        return None, None
 
     def set_extra_tags(self, tags: List[str]) -> None:
         """Inject additional search terms (e.g. from task description) into the GroundingDINO prompt."""
@@ -377,6 +410,9 @@ class GSAM2ObjectTracker:
 
         self._last_masks = _obj_masks
 
+        # --- Camera transform for world-frame perception ---
+        cam_position, cam_rotation = self._get_camera_transform(robot_state)
+
         # --- Clearance profiles (depth-based, O(n·k)) ---
         # Runs after all objects are built so every object can serve as an
         # obstacle for every other object's ray-casting pass.
@@ -395,6 +431,8 @@ class GSAM2ObjectTracker:
                         camera_intrinsics=camera_intrinsics,
                         all_masks=other_masks,
                         gripper=self._gripper,
+                        cam_position=cam_position,
+                        camera_quaternion_xyzw=cam_rotation.as_quat() if cam_rotation is not None else None,
                     )
                     # Keep registry in sync with the updated object
                     self.registry.update_object(obj.object_id, obj)
@@ -414,6 +452,8 @@ class GSAM2ObjectTracker:
                     depth_frame=depth_frame,
                     camera_intrinsics=camera_intrinsics,
                     contact_threshold_m=self._contact_threshold_m,
+                    camera_position=cam_position,
+                    camera_rotation=cam_rotation,
                 )
             except Exception as e:
                 self.logger.warning("Contact graph computation failed: %s", e)
@@ -671,6 +711,8 @@ class GSAM2ObjectTracker:
         if not objects:
             return
 
+        cam_position, cam_rotation = self._get_camera_transform(robot_state)
+
         # Clearance — per-object, optionally restricted to affected_ids
         if self._compute_clearances:
             target_objs = [o for o in objects if affected_ids is None or o.object_id in affected_ids]
@@ -686,6 +728,8 @@ class GSAM2ObjectTracker:
                         camera_intrinsics=camera_intrinsics,
                         all_masks=other_masks,
                         gripper=self._gripper,
+                        cam_position=cam_position,
+                        camera_quaternion_xyzw=cam_rotation.as_quat() if cam_rotation is not None else None,
                     )
                     self.registry.update_object(obj.object_id, obj)
                 except Exception as e:
@@ -700,6 +744,8 @@ class GSAM2ObjectTracker:
                     depth_frame=depth_frame,
                     camera_intrinsics=camera_intrinsics,
                     contact_threshold_m=self._contact_threshold_m,
+                    camera_position=cam_position,
+                    camera_rotation=cam_rotation,
                 )
             except Exception as e:
                 self.logger.warning("Contact graph recompute failed: %s", e)

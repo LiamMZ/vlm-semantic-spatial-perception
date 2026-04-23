@@ -1,0 +1,14 @@
+name: unitree-py39
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - numpy
+  - pip:
+    - python-dotenv
+    - scipy
+    - requests
+    - pybullet
+    - xarm-python-sdk

@@ -36,6 +36,7 @@ class GenerateConfig:
     response_mime_type: Optional[str] = None
     response_json_schema: Optional[dict] = None
     thinking_budget: Optional[int] = None  # None = omit ThinkingConfig entirely
+    system_instruction: Optional[str] = None
 
 
 @dataclass
