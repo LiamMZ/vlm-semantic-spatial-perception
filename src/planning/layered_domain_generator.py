@@ -13,7 +13,13 @@ Layers:
   L5: Initial State            — algorithmic state construction from scene (no LLM)
 
 Usage:
-    generator = LayeredDomainGenerator(api_key=os.getenv("GEMINI_API_KEY"))
+    # Default: OpenAI (reads OPENAI_API_KEY env var)
+    generator = LayeredDomainGenerator()
+
+    # Explicit client:
+    from src.llm_interface import OpenAIClient
+    generator = LayeredDomainGenerator(llm_client=OpenAIClient(model="gpt-4o"))
+
     artifact = await generator.generate_domain(
         "Put the red block on the blue block",
         observed_objects=[
@@ -34,8 +40,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import yaml
-from google import genai
-from google.genai import types
+
+try:
+    from google import genai as _genai
+    from google.genai import types as _genai_types
+    _GENAI_AVAILABLE = True
+except ImportError:
+    _genai = None  # type: ignore
+    _genai_types = None  # type: ignore
+    _GENAI_AVAILABLE = False
 
 from ..utils.prompt_utils import render_prompt_template
 from .utils.task_types import (
@@ -50,6 +63,33 @@ from .utils.task_types import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _parse_pddl_param_string(params: str) -> List[str]:
+    """
+    Convert a raw PDDL parameter string to a list of ``?var - type`` tokens.
+
+    e.g. ``"(?obj - object ?from - surface ?to - surface)"``
+         → ``["?obj - object", "?from - surface", "?to - surface"]``
+    """
+    # Strip outer parens if present
+    s = params.strip().lstrip("(").rstrip(")")
+    # Split on whitespace; reassemble "?var - type" triples
+    tokens = s.split()
+    result: List[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("?"):
+            if i + 2 < len(tokens) and tokens[i + 1] == "-":
+                result.append(f"{tok} - {tokens[i + 2]}")
+                i += 3
+            else:
+                result.append(tok)
+                i += 1
+        else:
+            i += 1
+    return result
+
 
 def _extract_json(text: str) -> Any:
     """
@@ -90,6 +130,22 @@ VALID_PDDL_TYPES: Set[str] = {
 
 # Uniqueness constraints: predicate_name -> (constrained_arg_index, varying_arg_index)
 # If the constrained arg maps to more than one value of the varying arg, it's a contradiction.
+_SURFACE_TYPE_KEYWORDS: frozenset = frozenset({
+    "table", "counter", "shelf", "desk", "tray", "bench", "surface", "floor"
+})
+
+
+def _scene_obj_is_surface(o: dict) -> bool:
+    """Return True if scene-object dict *o* represents a support surface."""
+    affs = set(o.get("affordances", []))
+    if "support_surface" in affs:
+        return True
+    if "graspable" not in affs and ("placeable_on" in affs or "fixed" in affs):
+        return True
+    obj_type = o.get("object_type", "").lower()
+    return any(kw in obj_type for kw in _SURFACE_TYPE_KEYWORDS)
+
+
 UNIQUENESS_CONSTRAINTS: Dict[str, Tuple[int, int]] = {
     "on": (0, 1),
     "object-at": (0, 1),
@@ -103,6 +159,13 @@ VALID_TYPE_CLASSIFICATIONS: Set[str] = {
 
 # Pattern for lowercase-hyphenated PDDL names
 _PDDL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+
+# Predicate names that mean "holding an object" — normalized to "holding" at L1 output
+# so that L2/L3/goal all use the same canonical name.
+_HOLDING_SYNONYMS: frozenset = frozenset({
+    "grasped", "gripped", "in-hand", "grabbed", "in-gripper",
+    "in_gripper", "grasped-by", "grasped_by", "held",
+})
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (pure functions, reusable in tests)
@@ -270,9 +333,18 @@ class LayeredDomainGenerator:
         robot_description: Optional[str] = None,
         llm_client: Optional[Any] = None,  # src.llm_interface.LLMClient
     ) -> None:
-        self._llm_client = llm_client
-        if llm_client is None:
-            self.client = genai.Client(api_key=api_key)
+        if llm_client is not None:
+            self._llm_client = llm_client
+        elif api_key and _GENAI_AVAILABLE:
+            # Explicit Gemini key provided — keep legacy Gemini path
+            self._llm_client = None
+            self._genai_client = _genai.Client(api_key=api_key)
+        else:
+            # Default: OpenAI via env var
+            import os as _os
+            from src.llm_interface.openai_client import OpenAIClient
+            _model = _os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            self._llm_client = OpenAIClient(model=_model)
         self.model_name = model_name
         self.max_layer_retries = max_layer_retries
         self.dkb = dkb
@@ -318,6 +390,7 @@ class LayeredDomainGenerator:
             validate_fn=lambda art: self._validate_l1(art, scene_objects),
             repair_fn=None,
         )
+        l1 = self._normalize_l1_goal_synonyms(l1)
         print(f"  [L1] Goals: {l1.goal_predicates}")
 
         # L2 — Predicate Vocabulary
@@ -327,6 +400,9 @@ class LayeredDomainGenerator:
             validate_fn=lambda art: self._validate_l2(art, l1),
             repair_fn=lambda art: self._repair_l2_auto(art),
         )
+        # Inject domain-module predicates (clutter etc.) unconditionally — LLM output
+        # may omit them for simple tasks, but the planner always needs the full vocabulary.
+        l2 = self._inject_domain_module_predicates(l2)
         # Always ensure checked-* variants are generated before L3 sees the vocab.
         # _repair_l2_auto is idempotent — safe to call even when L2 passed cleanly.
         l2 = self._repair_l2_auto(l2)
@@ -341,13 +417,22 @@ class LayeredDomainGenerator:
             validate_fn=lambda art: self._validate_l3(art, l2, l1),
             repair_fn=lambda art: self._repair_l3_auto(art, l2),
         )
+        # Inject domain-module actions unconditionally.
+        l3 = self._inject_domain_module_actions(l3)
+        # Re-run L3 auto-repair so that checked-* predicates required by the
+        # injected module actions (displace, push-aside, etc.) get their
+        # check-* sensing actions generated.  _repair_l3_auto is idempotent —
+        # existing sensing actions are skipped.
+        l3 = self._repair_l3_auto(l3, l2)
         print(f"  [L3] Actions: {[a.get('name') for a in l3.actions]}")
+        if l3.sensing_actions:
+            print(f"  [L3] Sensing actions: {[a.get('name') for a in l3.sensing_actions]}")
 
         # L2-V5 (deferred): remove predicates unused by any action or goal
         l2 = self._prune_unused_predicates(l2, l3, l1)
 
         # L4 — Grounding Pre-check (algorithmic)
-        l4 = self._run_l4_precheck(l1, l3, scene_objects)
+        l4 = self._run_l4_precheck(l1, l3, scene_objects, registry=registry)
         if l4.warnings:
             for w in l4.warnings:
                 print(f"  [L4] Warning: {w}")
@@ -432,11 +517,13 @@ class LayeredDomainGenerator:
         scene_objects: List[Dict],
         validation_errors: Optional[List[str]] = None,
     ) -> L1GoalArtifact:
+        dkb_hints = self._get_dkb_predicate_hints(task)
         template = self._prompts.get("l1_goal_spec_prompt", "")
         prompt = render_prompt_template(template, {
             "TASK": task,
             "ROBOT_DESCRIPTION": self.robot_description,
             "OBJECTS_JSON": json.dumps(scene_objects, indent=2),
+            "AVAILABLE_PREDICATES": dkb_hints,
             "VALIDATION_ERRORS": self._format_errors(validation_errors),
         })
         text = ""
@@ -565,6 +652,28 @@ class LayeredDomainGenerator:
                         )
 
         return errors
+
+    def _normalize_l1_goal_synonyms(self, l1: "L1GoalArtifact") -> "L1GoalArtifact":
+        """
+        Rewrite goal predicate names that are synonyms of 'holding' to the canonical
+        name 'holding', so L2, L3, and the problem goal all use the same predicate.
+
+        E.g. '(grasped rubber_duck_8)' → '(holding rubber_duck_8)'
+        """
+        normalized: List[str] = []
+        changed = False
+        for gp in l1.goal_predicates:
+            name = extract_predicate_name_from_literal(gp)
+            if name and name in _HOLDING_SYNONYMS:
+                rewritten = gp.replace(name, "holding", 1)
+                print(f"  [L1] Normalizing synonym '{name}' → 'holding': {gp!r} → {rewritten!r}")
+                normalized.append(rewritten)
+                changed = True
+            else:
+                normalized.append(gp)
+        if changed:
+            l1.goal_predicates = normalized
+        return l1
 
     # ------------------------------------------------------------------
     # L2: Predicate Vocabulary
@@ -1042,10 +1151,12 @@ class LayeredDomainGenerator:
             if pname:
                 initial_fact_layer.add(pname)
         # Zero-param predicates in vocabulary with no parameters (e.g. hand-empty)
+        # Exclude runtime-only effect flags that start FALSE.
+        _RUNTIME_EFFECT_FLAGS: Set[str] = {"spatial-change-occurred"}
         for sig in l2.predicate_signatures:
             if "?" not in sig:
                 pname = extract_predicate_name_from_literal(sig)
-                if pname and not pname.startswith("checked-"):
+                if pname and not pname.startswith("checked-") and pname not in _RUNTIME_EFFECT_FLAGS:
                     cls = classifications.get(pname, "")
                     if cls not in ("sensed", "external", "checked"):
                         initial_fact_layer.add(pname)
@@ -1097,6 +1208,32 @@ class LayeredDomainGenerator:
 
         return errors
 
+    # Predicates that must never appear in any non-sensing action precondition.
+    _CONTINGENCY_ONLY_CHECKED: frozenset = frozenset({
+        "checked-improved-clearance",
+        "improved-clearance",
+    })
+
+    # Predicates that must not appear in pick/grasp action preconditions specifically.
+    # Displacement actions legitimately need these; pick actions do not.
+    _PICK_FORBIDDEN_CHECKED: frozenset = frozenset({
+        "checked-displaceable",
+        "checked-space-available",
+        "checked-visible",
+        "checked-obstructs",
+        "checked-occluded-by",
+        "checked-supports",
+        "displaceable",
+        "visible",
+        "space-available",
+        "object-at",
+        "stable-on",
+    })
+
+    _PICK_ACTION_KEYWORDS: frozenset = frozenset({
+        "pick", "grasp", "grab", "take", "get",
+    })
+
     def _repair_l3_auto(
         self, artifact: L3ActionArtifact, l2: L2PredicateArtifact
     ) -> L3ActionArtifact:
@@ -1106,7 +1243,53 @@ class LayeredDomainGenerator:
           1. checked-* in preconditions with no producing action
           2. sensed predicates in l2.sensed_predicates with no check-X action
         Also fixes existing check-X actions whose effect sets X instead of checked-X.
+        Also strips contingency-only predicates from non-sensing action preconditions.
         """
+        # Strip contingency-only predicates from every non-sensing action precondition.
+        for action in artifact.actions:
+            pre = action.get("precondition", "")
+            for pred in self._CONTINGENCY_ONLY_CHECKED:
+                pre = re.sub(r"\(" + re.escape(pred) + r"\s+[^)]*\)\s*", "", pre)
+            action["precondition"] = pre.strip()
+
+        # Strip checked-* atoms from all primary action preconditions.
+        # Perception grounds sensed predicates at init time so the base value is
+        # already known; requiring checked-* forces unnecessary sensing steps and
+        # makes many plans unsolvable.  checked-* only appear in sensing action effects.
+        for action in artifact.actions:
+            pre = action.get("precondition", "")
+            if "checked-" in pre:
+                pre = re.sub(r"\(checked-[a-zA-Z][a-zA-Z0-9_-]*(?:\s+\?[a-zA-Z][a-zA-Z0-9_-]*)*\)\s*", "", pre)
+                pre = pre.strip() or "(and)"
+                action["precondition"] = pre
+
+        # Strip pick-forbidden predicates from pick/grasp actions only.
+        for action in artifact.actions:
+            aname = action.get("name", "").lower()
+            if any(kw in aname for kw in self._PICK_ACTION_KEYWORDS):
+                pre = action.get("precondition", "")
+                for pred in self._PICK_FORBIDDEN_CHECKED:
+                    pre = re.sub(r"\(" + re.escape(pred) + r"\s+[^)]*\)\s*", "", pre)
+                action["precondition"] = pre.strip()
+
+                # Strip object-at / stable-on from the effect too (they reference ?surface).
+                eff = action.get("effect", "")
+                for pred in ("object-at", "stable-on"):
+                    eff = re.sub(r"\(not\s+\(" + re.escape(pred) + r"\s+[^)]*\)\s*\)\s*", "", eff)
+                    eff = re.sub(r"\(" + re.escape(pred) + r"\s+[^)]*\)\s*", "", eff)
+                action["effect"] = eff.strip()
+
+                # Drop parameters that are no longer referenced in precondition or effect.
+                params = action.get("parameters", [])
+                if params:
+                    body = (action["precondition"] + " " + action["effect"]).lower()
+                    kept = []
+                    for p in params:
+                        pvar = p.strip().split()[0].lower()  # e.g. "?surface"
+                        if pvar in body:
+                            kept.append(p)
+                    action["parameters"] = kept
+
         vocab_names: Set[str] = {
             extract_predicate_name_from_literal(sig) or "" for sig in l2.predicate_signatures
         }
@@ -1114,32 +1297,44 @@ class LayeredDomainGenerator:
             a.get("name", "") for a in artifact.actions + artifact.sensing_actions
         }
 
-        # Fix broken check-X actions: effect must set checked-X, not X
+        # Fix broken check-X actions: effect must set checked-X (not X),
+        # precondition must be empty (sensing can always be called regardless of
+        # whether the base predicate is currently true — that is the point of sensing).
         for action in artifact.sensing_actions:
             aname = action.get("name", "")
             if aname.startswith("check-"):
                 base = aname[len("check-"):]
                 checked_pred = f"checked-{base}"
+                # Find base sig for params
+                base_sig = next(
+                    (s for s in l2.predicate_signatures
+                     if (extract_predicate_name_from_literal(s) or "") == base),
+                    None
+                )
+                params = re.findall(r"\?[a-zA-Z][a-zA-Z0-9_-]*", base_sig) if base_sig else ["?obj"]
+                param_str = " ".join(params)
+                # Fix effect: must set checked-X, not X
                 eff = action.get("effect", "")
                 effect_preds = extract_predicates_from_formula(eff)
                 if checked_pred not in effect_preds:
-                    # Find arity from vocab
-                    base_sig = next(
-                        (s for s in l2.predicate_signatures
-                         if (extract_predicate_name_from_literal(s) or "") == base),
-                        None
-                    )
-                    params = re.findall(r"\?[a-zA-Z][a-zA-Z0-9_-]*", base_sig) if base_sig else ["?obj"]
-                    param_str = " ".join(params)
                     action["effect"] = f"({checked_pred} {param_str})" if params else f"({checked_pred})"
                     print(f"  [L3-repair] Fixed '{aname}' effect to set '{checked_pred}' (was: {eff!r})")
+                # Fix precondition: must be empty — sensing is unconditional
+                pre = action.get("precondition", "(and)")
+                if pre.strip() not in ("", "(and)", "(and )"):
+                    action["precondition"] = "(and)"
+                    print(f"  [L3-repair] Cleared '{aname}' precondition (was: {pre!r}) — sensing is unconditional")
+
 
         all_actions = artifact.actions + artifact.sensing_actions
         produced: Set[str] = set()
         for action in all_actions:
             produced |= extract_predicates_from_formula(action.get("effect", ""))
 
-        # Collect all checked-* predicates that need coverage
+        # Collect all checked-* predicates that need coverage.
+        # Contingency-only predicates are excluded — check-improved-clearance is
+        # never auto-generated here (it would be missing its base predicate in L2
+        # and its presence as a universal precondition would make plans unsolvable).
         needs_coverage: Set[str] = set()
         # From sensed_predicates list
         for sname in (l2.sensed_predicates or []):
@@ -1153,6 +1348,8 @@ class LayeredDomainGenerator:
             for pred in extract_predicates_from_formula(action.get("precondition", "")):
                 if pred.startswith("checked-"):
                     needs_coverage.add(pred)
+        # Never auto-generate sensing actions for contingency-only predicates
+        needs_coverage -= self._CONTINGENCY_ONLY_CHECKED
 
         for checked_pred in needs_coverage:
             if checked_pred in produced:
@@ -1188,6 +1385,10 @@ class LayeredDomainGenerator:
             )
             param_names = [p.split("-")[0].strip() if "-" in p else p.strip() for p in typed_params]
             param_str = " ".join(param_names)
+            # Sensing precondition: require the base predicate to be true.
+            # This ensures check-X only succeeds when X is actually in the world state,
+            # so the planner cannot trivially grant checked-X by calling check-X on
+            # objects that don't satisfy X (e.g. occluded objects, blocked approach).
             sensing = {
                 "name": action_name,
                 "parameters": typed_params,
@@ -1209,6 +1410,15 @@ class LayeredDomainGenerator:
                     l2.checked_variants.append(checked_sig)
                 print(f"  [L3-repair] Added '{checked_pred}' to L2 vocabulary: {checked_sig}")
             print(f"  [L3-repair] Auto-generated sensing action '{action_name}' with effect '({checked_pred} {param_str})'")
+
+        # Strip single-letter or clearly-bogus predicate atoms (LLM hallucinations like `(x ?obj)`).
+        _bogus_re = re.compile(r"\([a-zA-Z]\s+\?[^)]*\)\s*|\([a-zA-Z]\)\s*")
+        for action in artifact.actions + artifact.sensing_actions:
+            for field in ("precondition", "effect"):
+                val = action.get(field, "")
+                if val and _bogus_re.search(val):
+                    action[field] = _bogus_re.sub("", val).strip() or "(and)"
+
         return artifact
 
     def _prune_unused_predicates(
@@ -1270,6 +1480,7 @@ class LayeredDomainGenerator:
         l1: L1GoalArtifact,
         l3: L3ActionArtifact,
         scene_objects: List[Dict],
+        registry: Optional[Any] = None,
     ) -> L4GroundingArtifact:
         """
         Algorithmic feasibility checks (non-blocking — produces warnings, not errors).
@@ -1278,6 +1489,9 @@ class LayeredDomainGenerator:
                object in the scene (by affordance mapping).
         L4-V2: the scene contains at least one element for each type required by the domain.
         L4-V3: every entity in goal_objects exists in the scene.
+        L4-V4: every goal object with a clearance profile has at least one viable
+               approach corridor (grasp_compatible=True). Zero viable corridors means
+               the interaction point is physically unreachable — reject before planning.
         """
         warnings: List[str] = []
         bindings: Dict[str, str] = {}
@@ -1310,11 +1524,7 @@ class LayeredDomainGenerator:
             if dtype == "robot":
                 return True  # robot is always present
             if dtype == "surface":
-                return any(
-                    o.get("object_type", "") == "surface" or
-                    "support_surface" in o.get("affordances", [])
-                    for o in objects
-                )
+                return any(_scene_obj_is_surface(o) for o in objects)
             if dtype == "region":
                 return any("region" in o.get("object_type", "").lower() for o in objects)
             # Fallback: check object_type substring or affordance match
@@ -1352,8 +1562,7 @@ class LayeredDomainGenerator:
                 "Trigger a perception update and retry."
             )
         if "surfaces" in required_categories and not any(
-            o.get("object_type") == "surface" or "support_surface" in o.get("affordances", [])
-            for o in scene_objects
+            _scene_obj_is_surface(o) for o in scene_objects
         ):
             warnings.append(
                 "L4-V2: Domain uses 'surface' type but no surface objects detected in scene. "
@@ -1376,6 +1585,30 @@ class LayeredDomainGenerator:
                     f"Exploration may be required to locate this object. "
                     f"Known objects: {sorted(obj_ids)}"
                 )
+
+        # L4-V4: clearance feasibility gate — reject interaction points with zero
+        # viable corridors before motion planning (spec §1.1 downstream roles).
+        if registry is not None:
+            for goal_obj in l1.goal_objects:
+                reg_obj = registry.get_object(goal_obj)
+                if reg_obj is None:
+                    continue
+                profile = getattr(reg_obj, "clearance_profile", None)
+                if profile is None:
+                    continue
+                if not profile.has_viable_approach:
+                    n_blocked = len(profile.approach_corridors)
+                    blockers: List[str] = []
+                    for c in profile.approach_corridors:
+                        blockers.extend(c.obstructing_objects)
+                    unique_blockers = sorted(set(blockers))
+                    warnings.append(
+                        f"L4-V4: Goal object '{goal_obj}' has ZERO viable approach corridors "
+                        f"({n_blocked} directions evaluated, all blocked). "
+                        f"Obstructing objects: {unique_blockers}. "
+                        f"The interaction point is physically unreachable — "
+                        f"clutter clearance is required before any pick action can be planned."
+                    )
 
         return L4GroundingArtifact(object_bindings=bindings, warnings=warnings)
 
@@ -1471,10 +1704,17 @@ class LayeredDomainGenerator:
                     if oid and arity == 1:
                         false_lits.append((sname, [oid]))
 
+        # Runtime-only zero-arg flags that must always start FALSE regardless of
+        # classification (they are set exclusively by action effects at runtime).
+        _RUNTIME_FALSE_ZERO_ARG: Set[str] = {"spatial-change-occurred"}
+
         # Add zero-parameter global predicates as TRUE
         for gp in l1.global_predicates:
             gp_clean = gp.strip("() ")
-            true_lits.append((gp_clean, []))
+            if gp_clean in _RUNTIME_FALSE_ZERO_ARG:
+                false_lits.append((gp_clean, []))
+            else:
+                true_lits.append((gp_clean, []))
 
         # Add graspable / object-graspable (obj) for graspable objects.
         # These are sensed predicates so they appear as FALSE in L5-V2 reset,
@@ -1489,14 +1729,7 @@ class LayeredDomainGenerator:
         # Surface detection: an object is treated as a support surface if it has
         # "support_surface" OR if it has "placeable_on"/"fixed" without "graspable"
         # (the LLM often tags tables as placeable_on but omits support_surface).
-        def _is_surface(o: dict) -> bool:
-            affs = set(o.get("affordances", []))
-            if "support_surface" in affs:
-                return True
-            # Non-graspable objects with placeable_on or fixed are support surfaces
-            if "graspable" not in affs and ("placeable_on" in affs or "fixed" in affs):
-                return True
-            return False
+        _is_surface = _scene_obj_is_surface
 
         if "on" in pred_arities and pred_arities["on"] == 2:
             surfaces = [o for o in scene_objects if _is_surface(o)]
@@ -1539,13 +1772,19 @@ class LayeredDomainGenerator:
                         if oid not in objects_with_on:
                             true_lits.append(("on", [oid, surf.get("object_id", "")]))
                             objects_with_on.add(oid)
+                            break  # one support surface per object
 
             # Add on(obj1, obj2) for clearly stacked objects (tight thresholds to avoid
             # false positives from noisy depth perception).
             # Require: obj1 is strictly above obj2 (dz > 0.03m), within 0.04m horizontally.
-            non_surfaces = [o for o in scene_objects if "support_surface" not in o.get("affordances", [])]
-            for obj1 in non_surfaces:
-                for obj2 in non_surfaces:
+            # Only consider non-surface objects (use _is_surface, same as manipulables check).
+            # Skip objects that already have an 'on' fact from the surface-match pass above.
+            stacking_candidates = [o for o in scene_objects if not _is_surface(o)]
+            for obj1 in stacking_candidates:
+                oid1 = obj1.get("object_id", "")
+                if not oid1 or oid1 in objects_with_on:
+                    continue
+                for obj2 in stacking_candidates:
                     if obj1 is obj2:
                         continue
                     pos1 = obj1.get("position_3d")
@@ -1556,9 +1795,9 @@ class LayeredDomainGenerator:
                     dx = abs(pos1[0] - pos2[0])
                     dy = abs(pos1[1] - pos2[1]) if len(pos1) > 1 else 0
                     if 0.03 < dz <= 0.12 and dx < 0.04 and dy < 0.04:
-                        oid1 = obj1.get("object_id", "")
                         true_lits.append(("on", [oid1, obj2.get("object_id", "")]))
                         objects_with_on.add(oid1)
+                        break  # one support per object
 
             # Fallback: if a graspable object still has no 'on' fact, it must be
             # resting on the table/floor. Find the lowest-z object as the default
@@ -1611,40 +1850,103 @@ class LayeredDomainGenerator:
         if completeness_repairs > 0:
             print(f"  [L5-V1] Added {completeness_repairs} FALSE entries for completeness.")
 
-        # Clutter module: inject stable-on TRUE facts from contact graph (§3.3 exception).
-        # stable-on is an object_state predicate — grounded directly from Ψ, not sensed.
-        # Also handles the case where L2 generated "on" as a 2-arg synonym for stable-on.
+        # Clutter module: ground all clutter predicates from live perception (Ψ).
+        # - object_state predicates (stable-on): always TRUE in :init
+        # - sensed predicates: evaluate now from registry; inject TRUE ones into :init
+        #   and exempt them from V2 reset so the planner sees the real world state.
+        #   Sensed predicates that evaluate FALSE stay FALSE — the planner must handle them.
+        _perception_grounded: Set[Tuple[str, Tuple[str, ...]]] = set()  # exempt from V2
         if registry is not None:
-            _stable_candidates = [
-                name for name, arity in pred_arities.items()
-                if name in ("stable-on", "on", "resting-on", "placed-on") and arity == 2
-                and classifications.get(name, "object_state") in (
-                    "object_state", "derived", "robot_state", "action"
-                )
-                and name not in (checked_names | sensed_names)
-            ]
-            if _stable_candidates:
-                try:
-                    from .clutter_module import ClutterGrounder
-                    grounder = ClutterGrounder(registry)
-                    stable_facts = grounder.ground_stable_on()
-                    for inject_name in _stable_candidates:
-                        for _pred_name, args in stable_facts:
-                            if all(a in obj_ids for a in args):
-                                true_lits.append((inject_name, args))
-                                print(f"  [L5-clutter] {inject_name}: ({inject_name} {' '.join(args)})")
-                except Exception as _exc:
-                    print(f"  [L5-clutter] WARNING: stable-on grounding failed: {_exc}")
+            try:
+                from .clutter_module import ClutterGrounder
+                grounder = ClutterGrounder(registry)
+
+                # stable-on (object_state) — inject unconditionally
+                _stable_candidates = [
+                    name for name, arity in pred_arities.items()
+                    if name in ("stable-on", "on", "resting-on", "placed-on") and arity == 2
+                    and classifications.get(name, "object_state") in (
+                        "object_state", "derived", "robot_state", "action"
+                    )
+                    and name not in (checked_names | sensed_names)
+                ]
+                for inject_name in _stable_candidates:
+                    for _pred_name, args in grounder.ground_stable_on():
+                        if all(a in obj_ids for a in args):
+                            true_lits.append((inject_name, args))
+                            print(f"  [L5-clutter] {inject_name}: ({inject_name} {' '.join(args)})")
+
+                # sensed predicates — evaluate now; TRUE ones go into :init
+                # Build a mapping: pddl_pred_name → (evaluator, arity)
+                _CLUTTER_EVAL = {
+                    "access-clear":      (lambda oid: grounder.evaluate_access_clear(oid),        1),
+                    "displaceable":      (lambda oid: grounder.evaluate_displaceable(oid),        1),
+                    "removal-safe":      (lambda oid: grounder.evaluate_removal_safe(oid),        1),
+                    "visible":           (lambda oid: grounder.evaluate_visible(oid),             1),
+                    "improved-clearance":(lambda oid: grounder.evaluate_improved_clearance(oid),  1),
+                    "obstructs":         (lambda a, b: grounder.evaluate_obstructs(a, b),         2),
+                    "occluded-by":       (lambda a, b: grounder.evaluate_occluded_by(a, b),       2),
+                    "space-available":   (lambda s, o: grounder.evaluate_space_available(s, o),   2),
+                    "supports":          (lambda a, b: grounder.evaluate_supports(a, b),          2),
+                }
+                _SURFACE_KWS = ("surface", "table", "shelf", "tray", "counter", "desk", "floor", "ground")
+                surface_ids = [
+                    o.get("object_id") for o in scene_objects
+                    if any(kw in o.get("object_type", "").lower() for kw in _SURFACE_KWS)
+                ]
+
+                for pred_name, (eval_fn, arity) in _CLUTTER_EVAL.items():
+                    if pred_name not in pred_arities:
+                        continue  # not in vocabulary — skip
+                    if pred_name in checked_names:
+                        continue  # checked-* variant — skip
+                    if arity == 1:
+                        for oid in obj_ids:
+                            try:
+                                result = eval_fn(oid)
+                            except Exception:
+                                result = False
+                            key = (pred_name, (oid,))
+                            if result:
+                                true_lits.append((pred_name, [oid]))
+                                _perception_grounded.add(key)
+                                print(f"  [L5-clutter] TRUE  ({pred_name} {oid})")
+                            # FALSE entries already added above; leave them
+                    elif arity == 2:
+                        # Use appropriate arg pairs per predicate semantics
+                        if pred_name in ("obstructs", "occluded-by", "supports"):
+                            pairs = [(a, b) for a in obj_ids for b in obj_ids if a != b]
+                        elif pred_name == "space-available":
+                            pairs = [(s, o) for s in surface_ids for o in obj_ids if s != o]
+                        else:
+                            pairs = [(a, b) for a in obj_ids for b in obj_ids if a != b]
+                        for arg1, arg2 in pairs:
+                            try:
+                                result = eval_fn(arg1, arg2)
+                            except Exception:
+                                result = False
+                            key = (pred_name, (arg1, arg2))
+                            if result:
+                                true_lits.append((pred_name, [arg1, arg2]))
+                                _perception_grounded.add(key)
+                                print(f"  [L5-clutter] TRUE  ({pred_name} {arg1} {arg2})")
+
+            except Exception as _exc:
+                print(f"  [L5-clutter] WARNING: grounding failed: {_exc}")
 
         # L5-V2 (AUTO-REPAIR): check every true_lit — if predicate is checked/sensed/external,
-        # reset to FALSE and log.
-        must_be_false: Set[str] = checked_names | sensed_names
+        # reset to FALSE UNLESS it was just grounded TRUE from live perception above.
+        must_be_false: Set[str] = checked_names | sensed_names | _RUNTIME_FALSE_ZERO_ARG
         # Also include predicates classified as external
         for pname, cls in classifications.items():
             if cls in ("sensed", "external", "checked"):
                 must_be_false.add(pname)
 
-        v2_violations = [(pname, args) for pname, args in true_lits if pname in must_be_false]
+        v2_violations = [
+            (pname, args) for pname, args in true_lits
+            if pname in must_be_false
+            and (pname, tuple(args)) not in _perception_grounded  # exempt registry-grounded facts
+        ]
         if v2_violations:
             for pname, args in v2_violations:
                 print(
@@ -1742,13 +2044,13 @@ class LayeredDomainGenerator:
             response = await self._llm_client.generate_async(prompt, config=cfg)
             return response.text
 
-        config = types.GenerateContentConfig(
+        config = _genai_types.GenerateContentConfig(
             temperature=temperature,
             top_p=0.9,
             max_output_tokens=8192,
             response_mime_type=response_mime_type,
         )
-        response = self.client.models.generate_content(
+        response = self._genai_client.models.generate_content(
             model=self.model_name,
             contents=[prompt],
             config=config,
@@ -1771,6 +2073,110 @@ class LayeredDomainGenerator:
             f"\n**PREVIOUS ATTEMPT ERRORS (fix all of these):**\n{lines}\n"
             f"\nFix every error listed above before responding.\n"
         )
+
+    def _inject_domain_module_predicates(self, l2: "L2PredicateArtifact") -> "L2PredicateArtifact":
+        """
+        Merge domain-module predicates (e.g. clutter) into L2 after LLM generation.
+
+        Existing LLM-generated predicates are kept unchanged. Domain-module entries are
+        added only when the predicate name is not already present, so the LLM's own
+        formulations are never overwritten.
+        """
+        if self.dkb is None:
+            return l2
+
+        hints = self.dkb.get_predicate_hints("")  # "" → all domain-module entries
+        if not hints:
+            return l2
+
+        existing_names: Set[str] = set()
+        for sig in l2.predicate_signatures:
+            name = extract_predicate_name_from_literal(sig)
+            if name:
+                existing_names.add(name)
+
+        added = 0
+        for hint in hints:
+            sig = hint.get("signature", "")
+            name = extract_predicate_name_from_literal(sig)
+            if not name or name in existing_names:
+                continue
+            l2.predicate_signatures.append(sig)
+            cls = hint.get("type_classification", "object_state")
+            l2.type_classifications[name] = cls
+            if cls in ("sensed", "external") and name not in l2.sensed_predicates:
+                l2.sensed_predicates.append(name)
+            existing_names.add(name)
+            added += 1
+
+        if added:
+            print(f"  [L2-inject] Added {added} domain-module predicates (clutter etc.)")
+        return l2
+
+    def _inject_domain_module_actions(self, l3: "L3ActionArtifact") -> "L3ActionArtifact":
+        """
+        Merge domain-module actions (e.g. clutter displace/push-aside) into L3 after LLM generation.
+
+        Existing LLM-generated actions are kept; module actions are added only when their
+        name is not already present.  Parameter strings are normalised from raw PDDL
+        ``(?obj - object ?from - surface)`` form into the list-of-tokens format that
+        PDDLDomainMaintainer._normalize_action_parameters expects.
+        """
+        if self.dkb is None:
+            return l3
+
+        hints = self.dkb.get_action_hints("")  # "" → all domain-module entries
+        if not hints:
+            return l3
+
+        existing_names: Set[str] = {a.get("name", "") for a in l3.actions + l3.sensing_actions}
+
+        # check-improved-clearance is a contingency-only sensing action; injecting it
+        # causes the LLM to add (checked-improved-clearance) as a universal pick
+        # precondition, which can never be satisfied in a simple pick plan.
+        _SKIP_INJECT = frozenset({"check-improved-clearance"})
+
+        added = 0
+        for schema in hints:
+            name = schema.get("name", "")
+            if not name or name in _SKIP_INJECT:
+                continue
+            is_module = bool(schema.get("domain_module"))
+            action = dict(schema)  # preserve domain_module flag for maintainer stash
+            # Normalise parameters: raw PDDL string → list of "?var - type" tokens
+            params = action.get("parameters", [])
+            if isinstance(params, str):
+                action["parameters"] = _parse_pddl_param_string(params)
+
+            if is_module:
+                # Remove ALL existing LLM actions whose name starts with this module
+                # action's name (e.g. canonical "pick" removes "pick-rubber-duck",
+                # "pick-from-table", etc.) and replace with the canonical definition.
+                prefixed = [a for a in l3.actions if a.get("name", "").startswith(name)]
+                if prefixed or name in existing_names:
+                    removed = [a.get("name") for a in prefixed]
+                    if name in existing_names and name not in removed:
+                        removed.append(name)
+                    l3.actions = [a for a in l3.actions if not a.get("name", "").startswith(name)]
+                    l3.sensing_actions = [a for a in l3.sensing_actions if a.get("name") != name]
+                    existing_names -= set(removed)
+                    if removed:
+                        print(f"  [L3-inject] Replaced {removed} with canonical module action '{name}'")
+            elif name in existing_names:
+                continue  # LLM version is fine for non-module actions
+
+            # Route check-* sensing actions to sensing_actions list so they are
+            # handled correctly by the L3 validator and action compiler.
+            if name.startswith("check-"):
+                l3.sensing_actions.append(action)
+            else:
+                l3.actions.append(action)
+            existing_names.add(name)
+            added += 1
+
+        if added:
+            print(f"  [L3-inject] Added {added} domain-module actions (clutter etc.)")
+        return l3
 
     def _get_dkb_predicate_hints(self, task: str) -> str:
         if self.dkb is None:

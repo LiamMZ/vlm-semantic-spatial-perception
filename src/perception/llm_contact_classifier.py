@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -32,17 +33,29 @@ LLMLabel = Tuple[ContactType, str, str]  # (relationship, directed_a, directed_b
 
 _VALID_TYPES = {"supporting", "nested", "none"}
 
+
+@dataclass
+class LLMContactResult:
+    """Return value from LLM contact classifiers."""
+    labels: Dict[Tuple[str, str], LLMLabel] = field(default_factory=dict)
+    room_available: Dict[str, bool] = field(default_factory=dict)
+
 _SYSTEM_PROMPT = """\
 You are a spatial reasoning assistant for a robot manipulation system.
 You will be shown an RGB scene image with coloured mask overlays. \
 Each detected object is labelled with its exact ID string.
 
-You will be given a list of object IDs. Return ONLY the relationships \
-that actually exist — omit pairs with no meaningful relationship.
+You will be given a list of object IDs and a list of surface IDs. \
+Return ONLY the relationships that actually exist — omit pairs with no \
+meaningful relationship.
 
 Relationship types:
   supporting  — A is the immediate surface directly beneath B (B rests on A).
   nested      — B is enclosed inside A (e.g. object inside a bowl or box).
+
+Also assess each surface in surface_ids: does it have visible free space \
+where a small object (~15 cm diameter) could be placed? \
+Set room_available to true if yes, false if the surface appears fully occupied.
 
 CRITICAL RULES:
 - Use object IDs EXACTLY as given — do not rephrase, rename, or invent IDs.
@@ -52,7 +65,8 @@ table supports cup.
 - Only include pairs where a real supporting or nested relationship exists.
 - Respond with ONLY valid JSON. No markdown, no prose.
 
-{"relationships": [{"a": "<id>", "b": "<id>", "relationship": "<label>"}, ...]}
+{"relationships": [{"a": "<id>", "b": "<id>", "relationship": "<label>"}, ...], \
+"room_available": {"<surface_id>": true/false, ...}}
 """
 
 
@@ -115,46 +129,48 @@ def classify_contacts_with_llm(
     color_img: np.ndarray,
     obj_masks: Dict[str, np.ndarray],
     llm_client,
+    surface_ids: Optional[List[str]] = None,
     debug_image_out: Optional[List[bytes]] = None,
-) -> Dict[Tuple[str, str], LLMLabel]:
+) -> LLMContactResult:
     """Classify all pairwise contact relationships using a vision LLM.
 
-    Sends one annotated scene image and asks the model to label every pair.
+    Also asks the model whether each surface has room to receive a displaced
+    object (room_available), replacing the geometric surface-map computation.
 
     Args:
         objects: Detected objects in the scene.
         object_aabbs: Per-object world-frame AABB (min, max) tuples.
         color_img: RGB uint8 (H, W, 3) scene image.
-        obj_masks: {object_id: bool ndarray (H, W)} segmentation masks used to
-            render colored overlays with labels on the scene image.
+        obj_masks: {object_id: bool ndarray (H, W)} segmentation masks.
         llm_client: Any LLMClient instance (must support multimodal generate).
-        debug_image_out: If provided, the rendered PNG bytes sent to the LLM
-            are appended to this list so the caller can display them.
+        surface_ids: IDs of surface objects to assess for room_available.
+        debug_image_out: If provided, the rendered PNG bytes are appended.
 
     Returns:
-        Dict mapping (min_id, max_id) → (relationship, directed_a, directed_b).
-        The directed_a/directed_b preserve the LLM's intended direction so the
-        caller can reorder edge endpoints accordingly.
+        LLMContactResult with labels and room_available dicts.
         Missing pairs fall back to geometric classification downstream.
     """
     from src.llm_interface.base import ImagePart, GenerateConfig
 
     obj_ids = [o.object_id for o in objects if o.object_id in object_aabbs]
     if len(obj_ids) < 2:
-        return {}
+        return LLMContactResult()
 
     png_bytes = _render_annotated_image(color_img, obj_masks)
 
     if debug_image_out is not None:
         debug_image_out.append(png_bytes)
 
+    surf_ids = surface_ids or []
     user_text = (
-        f"Object IDs (use exactly as written): {json.dumps(obj_ids)}\n\n"
-        f"List every supporting or nested relationship you can see in the image."
+        f"Object IDs (use exactly as written): {json.dumps(obj_ids)}\n"
+        f"Surface IDs (assess room_available for each): {json.dumps(surf_ids)}\n\n"
+        f"List every supporting or nested relationship you can see in the image, "
+        f"and for each surface ID indicate whether it has free space for a displaced object."
     )
 
-    # Token budget: ~25 tokens per expected relationship (typically sparse)
-    max_tokens = max(512, len(obj_ids) * 25)
+    # Token budget: ~25 tokens per relationship + ~15 per surface
+    max_tokens = max(512, len(obj_ids) * 25 + len(surf_ids) * 15)
 
     config = GenerateConfig(
         temperature=0.0,
@@ -170,23 +186,26 @@ def classify_contacts_with_llm(
         )
     except Exception as exc:
         logger.error("LLM contact classification failed: %s", exc)
-        return {}
+        return LLMContactResult()
 
     logger.info("LLM raw response:\n%s", response.text)
-    return _parse_response(response.text, obj_ids)
+    return _parse_response(response.text, obj_ids, surf_ids)
 
 
 def _parse_response(
     text: str,
     valid_ids: List[str],
-) -> Dict[Tuple[str, str], LLMLabel]:
-    """Parse the LLM JSON response into a sorted-key → (rel, a, b) dict.
+    surface_ids: Optional[List[str]] = None,
+) -> LLMContactResult:
+    """Parse the LLM JSON response into a LLMContactResult.
 
-    Only retains entries where both IDs appear in valid_ids.
-    Pairs not returned by the LLM default to "none" at the call site.
+    Only retains relationship entries where both IDs appear in valid_ids.
+    room_available defaults to True for surfaces not mentioned.
     """
-    result: Dict[Tuple[str, str], LLMLabel] = {}
+    labels: Dict[Tuple[str, str], LLMLabel] = {}
+    room_available: Dict[str, bool] = {}
     valid_set = set(valid_ids)
+    surf_set = set(surface_ids or [])
 
     try:
         raw = text.strip()
@@ -194,9 +213,10 @@ def _parse_response(
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
         data = json.loads(raw)
         relationships = data.get("relationships", [])
+        llm_room = data.get("room_available", {})
     except (json.JSONDecodeError, AttributeError) as exc:
         logger.warning("LLM response JSON parse error: %s\nRaw: %s", exc, text[:500])
-        return {}
+        return LLMContactResult()
 
     for item in relationships:
         a = str(item.get("a", ""))
@@ -208,13 +228,23 @@ def _parse_response(
             continue
 
         if rel not in _VALID_TYPES or rel == "none":
-            continue  # none is the default — no need to store it
+            continue
 
         key = (min(a, b), max(a, b))
-        result[key] = (rel, a, b)
+        labels[key] = (rel, a, b)
 
-    logger.info("LLM contact classifier: %d relationships found", len(result))
-    return result
+    # Parse room_available; default True for surfaces not mentioned by LLM.
+    for sid in surf_set:
+        if sid in llm_room:
+            room_available[sid] = bool(llm_room[sid])
+        else:
+            room_available[sid] = True  # conservative default
+
+    logger.info(
+        "LLM contact classifier: %d relationships, %d surface room assessments",
+        len(labels), len(room_available),
+    )
+    return LLMContactResult(labels=labels, room_available=room_available)
 
 
 # ---------------------------------------------------------------------------
@@ -249,18 +279,20 @@ def classify_contacts_nl(
     color_img: np.ndarray,
     obj_masks: Dict[str, np.ndarray],
     llm_client,
+    surface_ids: Optional[List[str]] = None,
     debug_image_out: Optional[List[bytes]] = None,
-) -> Dict[Tuple[str, str], LLMLabel]:
+) -> LLMContactResult:
     """Natural-language variant of classify_contacts_with_llm.
 
     Asks the model to produce one plain-text line per relationship rather than
     JSON, then parses those lines.  Fewer tokens, less truncation risk.
+    room_available defaults to True for all surfaces (NL prompt doesn't assess it).
     """
     from src.llm_interface.base import ImagePart, GenerateConfig
 
     obj_ids = [o.object_id for o in objects if o.object_id in object_aabbs]
     if len(obj_ids) < 2:
-        return {}
+        return LLMContactResult()
 
     png_bytes = _render_annotated_image(color_img, obj_masks)
     if debug_image_out is not None:
@@ -284,16 +316,19 @@ def classify_contacts_nl(
         )
     except Exception as exc:
         logger.error("LLM NL contact classification failed: %s", exc)
-        return {}
+        return LLMContactResult()
 
     logger.info("LLM NL raw response:\n%s", response.text)
-    return _parse_nl_response(response.text, obj_ids)
+    labels = _parse_nl_response(response.text, obj_ids)
+    # NL prompt doesn't assess room_available — default True for all surfaces.
+    room_avail = {sid: True for sid in (surface_ids or [])}
+    return LLMContactResult(labels=labels, room_available=room_avail)
 
 
 def _parse_nl_response(
     text: str,
     valid_ids: List[str],
-) -> Dict[Tuple[str, str], LLMLabel]:
+) -> Dict[Tuple[str, str], LLMLabel]:  # returns raw labels dict (room_available added by caller)
     """Parse natural-language relationship lines into a sorted-key → (rel, a, b) dict.
 
     Accepted line formats (case-insensitive):

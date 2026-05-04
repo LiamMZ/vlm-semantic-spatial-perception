@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from .clearance import ClearanceProfile
     from .contact_graph import ContactGraph
     from .occlusion import OcclusionMap
-    from .surface_map import SurfaceMap
 
 
 @dataclass
@@ -26,6 +25,8 @@ class InteractionPoint:
     position_2d: List[int]  # [y, x] in 0-1000 normalized scale
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters (if depth available)
     alternative_points: List[Dict[str, any]] = field(default_factory=list)
+    approach_orientation: Optional[str] = None  # "top_down", "side", or a 3-element list encoded as str
+    approach_vector: Optional[np.ndarray] = None  # raw unit vector from best_approach_dirs()[0] if available
 
 
 @dataclass
@@ -52,7 +53,6 @@ class DetectedObject:
     bounding_box_2d: Optional[List[int]] = None  # [y1, x1, y2, x2]
     timestamp: float = field(default_factory=time.time)
     clearance_profile: Optional["ClearanceProfile"] = None
-    surface_map: Optional["SurfaceMap"] = None  # populated for surface/table objects
 
 
 class DetectedObjectRegistry:

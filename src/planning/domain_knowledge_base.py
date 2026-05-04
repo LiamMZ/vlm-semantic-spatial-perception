@@ -19,6 +19,7 @@ Files written:
     <dkb_dir>/predicate_library.json     — known predicate signatures by name
     <dkb_dir>/action_schema_library.json — known action schemas by name
     <dkb_dir>/execution_history.jsonl    — append-only log of all pipeline runs
+    <dkb_dir>/domain_errors.jsonl        — append-only log of domain generation failures
 
 Usage:
     dkb = DomainKnowledgeBase(Path("outputs/dkb"))
@@ -90,38 +91,61 @@ class DomainKnowledgeBase:
     # Queries
     # ------------------------------------------------------------------
 
-    def get_predicate_hints(self, task: str) -> List[str]:
+    def get_predicate_hints(self, task: str) -> List[Dict]:
         """
-        Return predicate signatures from the library that may be relevant to `task`.
+        Return predicate hint dicts from the library that may be relevant to `task`.
 
-        Simple heuristic: return signatures whose name appears as a word in the task,
-        plus any with high usage_count. Returns at most 20 entries.
+        Entries from a built-in domain module (e.g. clutter) are always included —
+        they are infrastructure predicates, not task-specific. Task-word matches and
+        usage_count boost ordering for remaining entries.
+        Returns at most 20 entries.
         """
         task_lower = task.lower()
         scored: List[tuple] = []
         for name, entry in self._predicates.items():
             score = entry.get("usage_count", 0)
+            # Always include domain-module entries (clutter infrastructure etc.)
+            if entry.get("domain_module"):
+                score += 100
             if any(word in task_lower for word in name.replace("-", " ").split()):
                 score += 10
-            scored.append((score, entry.get("signature", f"({name})")))
+            scored.append((score, {
+                "signature": entry.get("signature", f"({name})"),
+                "type_classification": entry.get("type_classification", ""),
+                "grounding_rule": entry.get("grounding_rule", ""),
+            }))
 
-        scored.sort(reverse=True)
-        return [sig for _, sig in scored[:20]]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [hint for _, hint in scored[:20]]
 
     def get_action_hints(self, task: str) -> List[Dict]:
         """
         Return action schemas from the library relevant to `task`.
+        Domain-module actions (e.g. clutter) are always included.
         Returns at most 10 entries.
         """
+        import re as _re
         task_lower = task.lower()
         scored: List[tuple] = []
         for name, entry in self._actions.items():
             score = entry.get("usage_count", 0)
+            if entry.get("domain_module"):
+                score += 100
             if any(word in task_lower for word in name.replace("-", " ").split()):
                 score += 10
-            scored.append((score, {k: v for k, v in entry.items() if k != "usage_count"}))
+            schema = {k: v for k, v in entry.items() if k != "usage_count"}
+            schema["name"] = name
+            # Strip stale precondition atoms that should never appear in primary actions:
+            # (checked-improved-clearance ...) — contingency only, not a universal pick gate
+            # (spatial-change-occurred) — runtime effect flag, never a precondition
+            if "precondition" in schema:
+                precond = schema["precondition"]
+                precond = _re.sub(r"\(checked-improved-clearance\s+[^)]*\)\s*", "", precond)
+                precond = _re.sub(r"\(spatial-change-occurred\)\s*", "", precond)
+                schema["precondition"] = precond.strip()
+            scored.append((score, schema))
 
-        scored.sort(reverse=True)
+        scored.sort(key=lambda x: x[0], reverse=True)
         return [schema for _, schema in scored[:10]]
 
     # ------------------------------------------------------------------
@@ -158,14 +182,19 @@ class DomainKnowledgeBase:
 
         # Update action schema library
         try:
+            import re as _re
             for action in getattr(artifact.l3, "actions", []) + getattr(artifact.l3, "sensing_actions", []):
                 name = action.get("name", "")
                 if name:
+                    precond = action.get("precondition", "")
+                    # Strip atoms that should never persist in primary action preconditions
+                    precond = _re.sub(r"\(checked-improved-clearance\s+[^)]*\)\s*", "", precond)
+                    precond = _re.sub(r"\(spatial-change-occurred\)\s*", "", precond)
                     entry = self._actions.get(name, {})
                     entry.update({
                         "name": name,
                         "parameters": action.get("parameters", []),
-                        "precondition": action.get("precondition", ""),
+                        "precondition": precond.strip(),
                         "effect": action.get("effect", ""),
                         "usage_count": entry.get("usage_count", 0) + 1,
                         "last_task": task,
@@ -201,6 +230,116 @@ class DomainKnowledgeBase:
 
         with open(history_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+
+        # Mirror validation errors and L4 warnings into domain_errors.jsonl
+        try:
+            for layer, attr in (("L1", "l1"), ("L2", "l2"), ("L3", "l3")):
+                errs = entry.get(f"{attr}_validation_errors") or []
+                for err in errs:
+                    if err:
+                        self.record_domain_error(
+                            error_type=f"validation_{layer.lower()}",
+                            message=str(err),
+                            task=task,
+                            layer=layer,
+                        )
+            l4_warnings = getattr(getattr(artifact, "l4", None), "warnings", None) or []
+            for w in l4_warnings:
+                if w:
+                    self.record_domain_error(
+                        error_type="l4_warning",
+                        message=str(w),
+                        task=task,
+                        layer="L4",
+                    )
+        except Exception:
+            pass
+
+    def record_domain_error(
+        self,
+        error_type: str,
+        message: str,
+        task: Optional[str] = None,
+        layer: Optional[str] = None,
+        run_id: Optional[str] = None,
+        refinement_attempt: Optional[int] = None,
+        pddl_snippet: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Append a domain-generation failure to domain_errors.jsonl.
+
+        Args:
+            error_type:          Short classifier: "solver_no_plan", "solver_parse_error",
+                                 "validation_l1" … "validation_l5", "refinement_limit",
+                                 "l4_warning", "hybrid_planner_failed", etc.
+            message:             Full error/warning message string.
+            task:                Natural-language task description (optional).
+            layer:               Pipeline layer where failure occurred, e.g. "L3", "solver".
+            run_id:              Run identifier (timestamp string or UUID).
+            refinement_attempt:  Which refinement iteration produced this error (0-based).
+            pddl_snippet:        Relevant excerpt from domain/problem PDDL (optional, ≤2 KB).
+            extra:               Any additional key-value context.
+        """
+        self.dkb_dir.mkdir(parents=True, exist_ok=True)
+        error_path = self.dkb_dir / "domain_errors.jsonl"
+        record: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error_type": error_type,
+            "message": message,
+        }
+        if run_id is not None:
+            record["run_id"] = run_id
+        if task is not None:
+            record["task"] = task
+        if layer is not None:
+            record["layer"] = layer
+        if refinement_attempt is not None:
+            record["refinement_attempt"] = refinement_attempt
+        if pddl_snippet is not None:
+            # Truncate very long snippets to keep the log readable
+            record["pddl_snippet"] = pddl_snippet[:2048]
+        if extra:
+            record.update({k: v for k, v in extra.items() if k not in record})
+        with open(error_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+
+    def get_domain_errors(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent *limit* records from domain_errors.jsonl."""
+        error_path = self.dkb_dir / "domain_errors.jsonl"
+        if not error_path.exists():
+            return []
+        records = []
+        try:
+            with open(error_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except OSError:
+            pass
+        return records[-limit:]
+
+    def error_summary(self) -> Dict[str, Any]:
+        """
+        Return a compact summary of all errors in domain_errors.jsonl:
+        total count, counts by error_type, and the 5 most recent messages.
+        """
+        records = self.get_domain_errors(limit=1000)
+        if not records:
+            return {"total": 0, "by_type": {}, "recent": []}
+        by_type: Dict[str, int] = {}
+        for r in records:
+            by_type[r.get("error_type", "unknown")] = by_type.get(r.get("error_type", "unknown"), 0) + 1
+        recent = [
+            {"timestamp": r.get("timestamp", ""), "type": r.get("error_type", ""), "message": r.get("message", "")[:120]}
+            for r in records[-5:]
+        ]
+        return {"total": len(records), "by_type": by_type, "recent": recent}
 
 
 # ---------------------------------------------------------------------------

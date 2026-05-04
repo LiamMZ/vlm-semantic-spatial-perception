@@ -26,6 +26,10 @@ l1_goal_spec_prompt: |
   Observed objects in the scene (use EXACTLY these object_ids as arguments):
   <<OBJECTS_JSON>>
 
+  Available predicates from the domain knowledge base (prefer these names when they
+  fit — reusing known predicates keeps the vocabulary consistent across tasks):
+  <<AVAILABLE_PREDICATES>>
+
   **Rules:**
   1. Goal predicates must be **grounded literals** — use actual object_id values
      from the scene, NOT variables like ?obj. Example: `(on red_block_1 table_1)`.
@@ -72,7 +76,8 @@ l2_predicate_vocab_prompt: |
   Observed objects:
   <<OBJECTS_JSON>>
 
-  Previously known predicates (DKB hints — reuse where applicable):
+  Pre-loaded domain predicates (already available in the domain — do NOT redefine them,
+  but you MAY reference them in your action preconditions/effects):
   <<DKB_HINTS>>
 
   ---
@@ -196,7 +201,8 @@ l3_action_schema_prompt: |
   Sensed predicates (type=sensed or external — always FALSE in init, require sensing):
   <<SENSED_PREDICATES_JSON>>
 
-  Previously known action schemas (DKB hints — reuse where applicable):
+  Pre-loaded domain actions (already available in the domain — do NOT redefine them,
+  but you SHOULD reference their predicates when designing new actions):
   <<DKB_HINTS>>
 
   ---
@@ -236,32 +242,55 @@ l3_action_schema_prompt: |
   7. **Goal achievability**: At least one action's effects must produce each goal
      predicate name. Trace the full chain from initial state to goal.
 
-  8. **Sensing actions** (CRITICAL):
+  8. **Sensing actions**:
      For every predicate in sensed_predicates, you MUST provide a sensing action
      in the `sensing_actions` array. Rules:
      - Action name: `check-<predicate-name>` (e.g. for `object-graspable` → `check-object-graspable`)
      - Parameters: same types as the base sensed predicate
-     - Precondition: `"(and)"` — sensing actions have NO preconditions (they can always run)
+     - Precondition: `"(and)"` — sensing actions have NO preconditions; they can always
+       be called to observe the current world state regardless of what is true.
+       NEVER put the base predicate in the precondition — that would make it impossible
+       to call the check when the property is false, which defeats the purpose.
      - Effect: `(checked-<predicate-name> ?var)` — sets the CHECKED variant, NOT the base
      - WRONG effect: `(object-graspable ?obj)` ← sets the base predicate (never do this)
      - CORRECT effect: `(checked-object-graspable ?obj)` ← sets the checked variant ✓
-     Regular (non-sensing) actions that need to verify a sensed property must require
-     `(checked-<name> ?var)` in their precondition, NOT the base `(<name> ?var)`.
+     Regular (non-sensing) actions use ONLY the **base** predicate in their precondition —
+     NOT `checked-*`. Perception grounds sensed predicates at init time, so the base value
+     is already known. Requiring `checked-*` as a precondition forces unnecessary sensing
+     steps before every action and makes many plans unsolvable.
+     - CORRECT: `(object-graspable ?obj)` as a precondition ✓
+     - WRONG:   `(checked-object-graspable ?obj)` as a precondition ✗
      Only sensing actions may set `checked-*` predicates in their effects.
+     `checked-*` predicates are used ONLY in sensing action effects, never in primary
+     action preconditions.
 
   9. **clear predicate** (if present): If the vocabulary includes `(clear ?obj)`,
      ensure pick sets `(clear ?surface)` in its effect (the surface becomes clear
      after the object is removed) and place requires `(clear ?surface)` in its
      precondition (can only place on a clear surface).
 
+  10. **improved-clearance (contingency only)**: If the vocabulary includes
+      `improved-clearance`, do NOT add `(checked-improved-clearance ?obj)` as a
+      precondition for pick or any other primary action. This predicate signals a
+      marginal-accessibility state used exclusively by recovery/push-aside branches.
+      The `check-improved-clearance` sensing action and its `checked-` variant must
+      be defined, but no primary action should require them.
+
+  11. **spatial-change-occurred (runtime effect flag)**: This is a zero-argument
+      predicate that is set by `displace`/`push-aside` effects at runtime. It is
+      **always FALSE in the initial state** — do NOT treat it as a global predicate
+      that starts TRUE. Do NOT include it in any action's preconditions.
+
   ---
   ## Verification checklist (complete mentally before responding):
   a) Every predicate in pre/effects appears in the vocabulary
   b) Every ?var in pre/effects is declared in parameters
-  c) Sensing action for each sensed predicate: name=check-X, effect=(checked-X ?var)
-  d) Regular actions requiring sensing use checked-X in preconditions, not X
+  c) Sensing action for each sensed predicate: name=check-X, precondition=(and), effect=(checked-X ?var)
+  d) No primary action has a checked-* predicate in its precondition
   e) No regular action sets a checked-* predicate in its effects
   f) Goal predicates are all reachable via the action chain
+  g) No primary action requires (checked-improved-clearance ?obj)
+  h) spatial-change-occurred does not appear in any precondition
 
   ---
   <<VALIDATION_ERRORS>>
@@ -272,8 +301,8 @@ l3_action_schema_prompt: |
       {
         "name": "pick",
         "parameters": ["?obj - object", "?surface - object"],
-        "precondition": "(and (hand-empty) (on ?obj ?surface) (checked-object-graspable ?obj))",
-        "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)) (clear ?surface))"
+        "precondition": "(and (hand-empty) (on ?obj ?surface) (object-graspable ?obj))",
+        "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)) (clear ?surface) (spatial-change-occurred))"
       },
       {
         "name": "place",

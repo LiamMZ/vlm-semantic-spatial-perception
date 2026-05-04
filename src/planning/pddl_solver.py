@@ -10,6 +10,7 @@ Integrates seamlessly with the async task orchestrator.
 """
 
 import os
+import re
 import asyncio
 import subprocess
 import shutil
@@ -138,11 +139,16 @@ class PDDLSolver:
         return available
 
     def _select_best_backend(self) -> SolverBackend:
-        """Select best available backend (preference order)."""
+        """Select best available backend (preference order).
+
+        Fast Downward is preferred over pyperplan because it supports full ADL
+        including :conditional-effects (forall/when).  Pyperplan only implements
+        STRIPS and will error on any domain that uses conditional effects.
+        """
         preference_order = [
-            SolverBackend.PYPERPLAN,                # Pure Python, no permissions needed
             SolverBackend.FAST_DOWNWARD_APPTAINER,  # Fastest, no overhead
             SolverBackend.FAST_DOWNWARD_DOCKER,     # Fast, some overhead
+            SolverBackend.PYPERPLAN,                # STRIPS only — no conditional effects
         ]
 
         for backend in preference_order:
@@ -236,26 +242,33 @@ class PDDLSolver:
         working_dir: Optional[str]
     ) -> SolverResult:
         """Solve using Fast Downward Docker image."""
-        if working_dir is None:
-            working_dir = tempfile.mkdtemp(prefix="pddl_solver_")
-        working_dir = Path(working_dir).resolve()
-        working_dir.mkdir(parents=True, exist_ok=True)
-
         # Docker requires absolute paths
         domain_abs = domain_path.absolute()
         problem_abs = problem_path.absolute()
         mount_dir = domain_abs.parent.absolute()
 
-        # Build Docker command
+        # Default working_dir to the PDDL files directory so Docker can write
+        # sas_plan back to a path it can bind-mount (tempfile dirs under /tmp
+        # are often not bind-mountable in rootless Docker setups).
+        if working_dir is None:
+            working_dir = mount_dir
+        working_dir = Path(working_dir).resolve()
+        working_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build Docker command.
+        # Mount PDDL files under /pddl (not /workspace — that's the container's
+        # own Fast Downward installation directory).
         cmd = [
             "docker", "run", "--rm",
-            "-v", f"{mount_dir}:/workspace",
+            "-v", f"{mount_dir}:/pddl",
             "-v", f"{working_dir}:/output",
             "-w", "/output",
             self.docker_image,
+            "--log-level", "debug",
             "--alias", str(algorithm),
-            f"/workspace/{domain_abs.name}",
-            f"/workspace/{problem_abs.name}",
+            f"/pddl/{domain_abs.name}",
+            f"/pddl/{problem_abs.name}",
+            
         ]
 
         if self.verbose:
@@ -289,6 +302,11 @@ class PDDLSolver:
             )
 
         except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             return SolverResult(
                 success=False,
                 plan=[],
@@ -299,6 +317,11 @@ class PDDLSolver:
                 error_message=f"Solver timeout after {timeout}s"
             )
         except Exception as e:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             return SolverResult(
                 success=False,
                 plan=[],
@@ -335,7 +358,7 @@ class PDDLSolver:
             )
 
         if working_dir is None:
-            working_dir = tempfile.mkdtemp(prefix="pddl_solver_")
+            working_dir = domain_path.parent
         working_dir = Path(working_dir).resolve()
         working_dir.mkdir(parents=True, exist_ok=True)
 
@@ -379,6 +402,11 @@ class PDDLSolver:
             )
 
         except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             return SolverResult(
                 success=False,
                 plan=[],
@@ -389,6 +417,11 @@ class PDDLSolver:
                 error_message=f"Solver timeout after {timeout}s"
             )
         except Exception as e:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             return SolverResult(
                 success=False,
                 plan=[],
@@ -510,13 +543,34 @@ class PDDLSolver:
         """Parse Fast Downward output and extract plan."""
         # Check for solution
         if "Solution found!" not in output:
-            # Check for common failure messages
-            if "unsolvable" in output.lower():
+            # Check for common failure messages — ordered most-specific first so the
+            # most actionable message is surfaced to the LLM refinement loop.
+            if "arity" in output.lower() or "used with" in output.lower():
+                # Extract the first arity error line for a human-readable message.
+                import re as _re
+                _arity_match = _re.search(
+                    r"Predicate '[^']+' of arity \d+ used with \d+ arguments\.", output
+                )
+                error_msg = (
+                    f"PDDL arity error: {_arity_match.group(0)}"
+                    if _arity_match
+                    else "PDDL predicate arity mismatch"
+                )
+            elif "unsolvable" in output.lower():
                 error_msg = "Problem is unsolvable"
             elif "parse error" in output.lower():
                 error_msg = "PDDL parse error"
             elif "no" in output.lower() and "found" in output.lower():
                 error_msg = "No solution found"
+            elif "translate exit code" in output.lower():
+                # Translator failed but we didn't catch the specific error above.
+                # Pull the first non-empty line that looks like an error.
+                import re as _re
+                _err_lines = [
+                    ln.strip() for ln in output.splitlines()
+                    if ln.strip() and not ln.strip().startswith(("DEBUG", "INFO", "->"))
+                ]
+                error_msg = f"PDDL translation error: {_err_lines[0]}" if _err_lines else "PDDL translation error"
             else:
                 error_msg = "Solver failed (see raw output)"
 
@@ -557,28 +611,47 @@ class PDDLSolver:
         plan = []
         sas_plan_path = working_dir / "sas_plan"
 
+        # FD sas_plan lines: "(action-name arg1 arg2)" — PDDL style with parens
+        def _parse_sas_plan_line(line: str) -> str | None:
+            s = line.strip()
+            if not s or s.startswith(';'):
+                return None
+            if s.startswith('(') and s.endswith(')'):
+                return s[1:-1].strip()
+            return None
+
+        # FD stdout plan lines: "action-name arg1 arg2 (cost)" — no outer parens
+        # e.g. "check-access-clear rubber_duck_6 (1)"
+        _stdout_plan_re = re.compile(r'^([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z0-9_-]+)*)\s+\(\d+\)\s*$')
+
+        def _parse_stdout_plan_line(line: str) -> str | None:
+            s = line.strip()
+            m = _stdout_plan_re.match(s)
+            return m.group(1).strip() if m else None
+
         if sas_plan_path.exists():
             with open(sas_plan_path, 'r') as f:
                 for line in f:
-                    line = line.strip()
-                    if line and not line.startswith(';'):
-                        # Extract action name (remove parameters)
-                        action = line.strip('()')
-                        plan.append(action)
-        else:
-            # Try to parse plan from output
+                    parsed = _parse_sas_plan_line(line)
+                    if parsed is not None:
+                        plan.append(parsed)
+
+        if not plan:
+            # sas_plan missing or empty — fall back to stdout.
+            # FD writes plan lines to stdout between "Solution found!" and
+            # the next [t=...] timing line.  Parse stdout only (not stderr)
+            # to avoid ordering issues from concatenation.
+            stdout_only = output
             in_plan = False
-            for line in output.split('\n'):
-                if "Solution found!" in line or "Plan:" in line:
+            for line in stdout_only.split('\n'):
+                if "Solution found!" in line:
                     in_plan = True
                     continue
-
                 if in_plan:
-                    line = line.strip()
-                    if line and not line.startswith(';') and '(' in line:
-                        action = line.strip('()')
-                        plan.append(action)
-                    elif line == "":
+                    parsed = _parse_stdout_plan_line(line)
+                    if parsed is not None:
+                        plan.append(parsed)
+                    elif line.strip().startswith('[t=') or line.strip().startswith('Solution found'):
                         break
 
         return SolverResult(

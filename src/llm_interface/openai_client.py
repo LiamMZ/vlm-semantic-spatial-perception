@@ -90,7 +90,10 @@ class OpenAIClient(LLMClient):
             messages=messages,
             **kwargs,
         )
-        text = response.choices[0].message.content or ""
+        msg = response.choices[0].message
+        if getattr(msg, "refusal", None):
+            logger.warning("OpenAI refusal: %s", msg.refusal)
+        text = msg.content or ""
         return LLMResponse(
             text=text,
             model=self._model,
@@ -110,7 +113,10 @@ class OpenAIClient(LLMClient):
             messages=messages,
             **kwargs,
         )
-        text = response.choices[0].message.content or ""
+        msg = response.choices[0].message
+        if getattr(msg, "refusal", None):
+            logger.warning("OpenAI refusal: %s", msg.refusal)
+        text = msg.content or ""
         return LLMResponse(
             text=text,
             model=self._model,
@@ -193,13 +199,31 @@ class OpenAIClient(LLMClient):
         kwargs: dict = {}
         if config is None:
             return kwargs
-        kwargs["temperature"] = config.temperature
-        kwargs["max_tokens"] = config.max_output_tokens
-        if config.top_p != 0.95:  # only pass if non-default to avoid overriding model defaults
-            kwargs["top_p"] = config.top_p
-        if config.response_mime_type == "application/json" or config.response_json_schema:
+        # o1/o3 reasoning models don't support temperature or top_p
+        if not self._model.lower().startswith(("o1", "o3", "o4")):
+            kwargs["temperature"] = config.temperature
+            if config.top_p != 0.95:
+                kwargs["top_p"] = config.top_p
+        # newer models use max_completion_tokens; older models use max_tokens
+        tokens_key = "max_completion_tokens" if self._uses_completion_tokens() else "max_tokens"
+        kwargs[tokens_key] = config.max_output_tokens
+        if config.response_json_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": config.response_json_schema,
+                    "strict": False,
+                },
+            }
+        elif config.response_mime_type == "application/json":
             kwargs["response_format"] = {"type": "json_object"}
         return kwargs
+
+    def _uses_completion_tokens(self) -> bool:
+        """Return True if this model requires max_completion_tokens instead of max_tokens."""
+        m = self._model.lower()
+        return m.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6"))
 
     @staticmethod
     def _extract_usage(response: Any) -> Optional[dict]:

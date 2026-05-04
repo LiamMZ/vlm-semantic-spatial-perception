@@ -18,8 +18,10 @@ from .object_registry import (
 )
 try:
     from .gsam2_object_tracker import GSAM2ObjectTracker, GSAM2ContinuousObjectTracker
+    from .molmo_point_detector import MolmoPointDetector
+    MolmoInteractionPointDetector = MolmoPointDetector  # backward-compat alias
 except ImportError:
-    pass  # optional heavy deps (supervision, torch, SAM2) not installed
+    pass  # optional heavy deps (supervision, torch, SAM2, transformers) not installed
 
 try:
     from .clearance import GripperGeometry, ClearanceProfile
@@ -38,6 +40,9 @@ __all__ = [
     # GSAM2-based tracking (RAM+ + GroundingDINO + SAM2)
     "GSAM2ObjectTracker",
     "GSAM2ContinuousObjectTracker",
+    # Molmo-based interaction point detection
+    "MolmoPointDetector",
+    "MolmoInteractionPointDetector",  # backward-compat alias
     # Clearance / gripper geometry
     "GripperGeometry",
     "ClearanceProfile",

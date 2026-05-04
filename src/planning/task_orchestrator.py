@@ -15,7 +15,9 @@ This class is optimized for actual execution and provides:
 import os
 import io
 import asyncio
+import shutil
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 from enum import Enum
@@ -43,6 +45,18 @@ config_path = Path(__file__).parent.parent.parent / "config"
 if str(config_path) not in sys.path:
     sys.path.insert(0, str(config_path))
 from orchestrator_config import OrchestratorConfig
+
+
+@dataclass
+class TaskExecutionResult:
+    """Return value from TaskOrchestrator.execute_task()."""
+    success: bool
+    task: str
+    plan: List[str] = field(default_factory=list)
+    steps: List[Any] = field(default_factory=list)   # List[StepResult]
+    replan_count: int = 0
+    error: Optional[str] = None
+    timings: Dict[str, float] = field(default_factory=dict)
 
 
 class OrchestratorState(Enum):
@@ -127,6 +141,13 @@ class TaskOrchestrator:
 
         # Layered domain generator (optional gated/guardrailed pipeline)
         self._layered_generator: Optional[Any] = None
+        self._last_layered_artifact: Optional[Any] = None
+
+        # Domain Knowledge Base (shared across planning sessions for error logging)
+        self._dkb: Optional[Any] = None
+
+        # Hybrid planner (deterministic / probabilistic mode selection)
+        self._hybrid_planner: Optional[Any] = None
 
         # Task state
         self.current_task: Optional[str] = None
@@ -232,6 +253,7 @@ class TaskOrchestrator:
                     dkb.load()
                 except Exception as e:
                     self.logger.warning("  • DKB load failed (%s), proceeding without DKB", e)
+            self._dkb = dkb
             self._layered_generator = LayeredDomainGenerator(
                 api_key=self.config.api_key,
                 model_name=self.config.model_name,
@@ -239,6 +261,19 @@ class TaskOrchestrator:
                 llm_client=_llm_client,
             )
             self.logger.info("  • Layered domain generator initialized (use_layered_generation=True)")
+
+        # Initialize hybrid planner (always available when a solver exists)
+        try:
+            from .hybrid_planner import HybridPlanner
+            dkb_dir = getattr(self.config, "dkb_dir", None)
+            self._hybrid_planner = HybridPlanner(
+                dkb_dir=Path(dkb_dir) if dkb_dir else None,
+                solver=self.solver,
+                logger=self.logger,
+            )
+            self.logger.info("  • Hybrid planner initialized (det/prob mode selection)")
+        except Exception as e:
+            self.logger.warning("  • Hybrid planner init failed (%s), planning will use direct solver", e)
 
         # Attach default robot provider if none supplied — use PyBullet sim interface
         if getattr(self.config, "robot", None) is None:
@@ -375,11 +410,14 @@ class TaskOrchestrator:
                 }
                 for obj in detected
             ]
+            registry = getattr(self.tracker, "registry", None) if self.tracker else None
             artifact = await self._layered_generator.generate_domain(
                 task_description,
                 observed_objects=observed_objects,
                 image=environment_image,
+                registry=registry,
             )
+            self._last_layered_artifact = artifact
             self.task_analysis = await self.maintainer.initialize_from_layered_artifact(artifact)
         else:
             # Legacy monolithic path
@@ -892,6 +930,112 @@ class TaskOrchestrator:
 
             return snapshot_dir
 
+    def capture_fresh_snapshot_sync(self, reason: str = "pre-execution") -> Optional[str]:
+        """
+        Synchronous snapshot capture for use inside synchronous execution callbacks.
+
+        Captures a fresh RGB+depth frame from the camera, writes it to the perception
+        pool, updates the pool index, and returns the new snapshot_id.  Returns None
+        if the camera is unavailable or capture fails.
+
+        This is intentionally sync (no asyncio lock) because it is only called from
+        the synchronous execute_fn between primitive executions, where no other async
+        snapshot writers are active.
+        """
+        color, depth, intrinsics, robot_state = self._get_camera_frames()
+        if color is None or intrinsics is None:
+            self.logger.warning("[capture_fresh_snapshot_sync] Camera unavailable — skipping fresh capture")
+            return None
+
+        try:
+            from PIL import Image
+            import numpy as np
+            from datetime import datetime, timezone
+
+            self._ensure_pool_dirs()
+            pool_dir = self._get_perception_pool_dir()
+            snapshot_id = self._generate_snapshot_id()
+            snapshot_dir = pool_dir / "snapshots" / snapshot_id
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+            # Color
+            color_path = snapshot_dir / "color.png"
+            color_img = Image.fromarray(color) if isinstance(color, np.ndarray) else color
+            color_img.save(str(color_path), format="PNG")
+
+            # Depth
+            depth_path = None
+            if depth is not None:
+                depth_path = snapshot_dir / "depth.npz"
+                np.savez_compressed(depth_path, depth_m=np.asarray(depth, dtype=np.float32))
+
+            # Intrinsics
+            intr_path = snapshot_dir / "intrinsics.json"
+            try:
+                intr_dict = intrinsics.to_dict()
+            except Exception:
+                intr_dict = dict(intrinsics) if isinstance(intrinsics, dict) else {}
+            with open(intr_path, "w") as f:
+                json.dump(intr_dict, f, indent=2)
+
+            # Robot state
+            robot_state_path = None
+            if robot_state is not None:
+                robot_state_path = snapshot_dir / "robot_state.json"
+                with open(robot_state_path, "w") as f:
+                    json.dump(robot_state, f, indent=2)
+
+            # Empty detections placeholder (objects not re-detected at this point)
+            det_path = snapshot_dir / "detections.json"
+            with open(det_path, "w") as f:
+                json.dump({"objects": [], "snapshot_id": snapshot_id}, f)
+
+            # Manifest
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            manifest = {
+                "snapshot_id": snapshot_id,
+                "captured_at": now,
+                "recorded_at": now,
+                "reason": reason,
+                "files": {
+                    "color": "color.png",
+                    "depth_npz": "depth.npz" if depth_path else None,
+                    "intrinsics": "intrinsics.json",
+                    "detections": "detections.json",
+                    "robot_state": "robot_state.json" if robot_state_path else None,
+                },
+            }
+            with open(snapshot_dir / "manifest.json", "w") as f:
+                json.dump(manifest, f, indent=2)
+
+            # Update index
+            index = self._read_pool_index()
+            rel_base = Path("snapshots") / snapshot_id
+            index.setdefault("snapshots", {})[snapshot_id] = {
+                "captured_at": now,
+                "recorded_at": now,
+                "objects": [],
+                "files": {
+                    "color": str(rel_base / "color.png"),
+                    "depth_npz": str(rel_base / "depth.npz") if depth_path else None,
+                    "intrinsics": str(rel_base / "intrinsics.json"),
+                    "detections": str(rel_base / "detections.json"),
+                    "robot_state": str(rel_base / "robot_state.json") if robot_state_path else None,
+                },
+                "reason": reason,
+            }
+            index["last_snapshot_id"] = snapshot_id
+            self._enforce_snapshot_retention(index)
+            self._write_pool_index(index)
+            self.last_snapshot_id = snapshot_id
+
+            self.logger.info("[capture_fresh_snapshot_sync] Captured snapshot %s", snapshot_id)
+            return snapshot_id
+
+        except Exception as exc:
+            self.logger.warning("[capture_fresh_snapshot_sync] Failed: %s", exc)
+            return None
+
     async def _on_detection_callback(self, object_count: int):
         """
         Called after each detection cycle.
@@ -1144,10 +1288,18 @@ class TaskOrchestrator:
                 print("  • Verify the camera is providing valid frames")
 
             # Add objects to PDDL problem
+            _SURFACE_KEYWORDS = frozenset({
+                "table", "counter", "shelf", "desk", "tray", "bench", "surface", "floor"
+            })
             for obj in all_objects:
                 # Add object instance if not already present
                 if obj.object_id not in self.pddl.object_instances:
                     obj_type = obj.object_type
+                    # Normalise surface-like objects to the PDDL "surface" type so that
+                    # actions with typed (?surface - surface) parameters can be grounded.
+                    raw_type_lower = obj_type.lower()
+                    if any(kw in raw_type_lower for kw in _SURFACE_KEYWORDS):
+                        obj_type = "surface"
                     # Auto-register unknown types as children of 'object'
                     if obj_type not in self.pddl.object_types:
                         await self.pddl.add_object_type_async(obj_type, parent="object")
@@ -1159,11 +1311,16 @@ class TaskOrchestrator:
                     self.logger.info(f"      Added: {obj.object_id} ({obj_type})")
 
             # Add global predicates to initial state
+            # Exclude runtime-effect flags that are set by actions at runtime and must start FALSE.
+            _RUNTIME_FALSE_PREDICATES: frozenset = frozenset({"spatial-change-occurred"})
             if self.maintainer:
                 global_predicates = self.maintainer.get_global_predicates()
                 if global_predicates:
                     self.logger.info(f"  • Adding {len(global_predicates)} global predicates to initial state...")
                     for pred_name in global_predicates:
+                        if pred_name in _RUNTIME_FALSE_PREDICATES:
+                            self.logger.info(f"      Skipping runtime-effect flag '{pred_name}' (starts FALSE)")
+                            continue
                         # Global predicates typically have no parameters
                         try:
                             await self.pddl.add_initial_literal_async(pred_name, [], negated=False)
@@ -1187,9 +1344,54 @@ class TaskOrchestrator:
                             except ValueError:
                                 pass
 
+                domain_predicates = set(self.pddl.predicates.keys())
+
+                # Mirror `on` facts as `object-at` when that predicate exists in the domain.
+                # LLM-generated actions often use `object-at` for placement tracking, but L5
+                # only grounds `on`/`stable-on`.  Without this, displace/push-aside are unusable.
+                if "object-at" in domain_predicates and l5 and l5.true_literals:
+                    _ON_SYNONYMS = frozenset({"on", "stable-on", "resting-on", "placed-on"})
+                    for pred_name, args in l5.true_literals:
+                        if pred_name in _ON_SYNONYMS and len(args) == 2:
+                            if all(a in self.pddl.object_instances for a in args):
+                                key = ("object-at", tuple(args))
+                                if key not in added_initial:
+                                    try:
+                                        await self.pddl.add_initial_literal_async("object-at", list(args), negated=False)
+                                        added_initial.add(key)
+                                    except ValueError:
+                                        pass
+
+                # Inject `space-available` for every surface × non-surface pair when
+                # the predicate is in the domain.  space-available now defaults True
+                # (LLM room_available flag); without this injection displace is unusable
+                # whenever the LLM didn't include space-available in the vocabulary.
+                if "space-available" in domain_predicates:
+                    _SURFACE_KWS = frozenset({
+                        "table", "counter", "shelf", "desk", "tray", "bench", "surface", "floor"
+                    })
+                    _surface_ids = {
+                        obj.object_id for obj in all_objects
+                        if any(kw in obj.object_type.lower() for kw in _SURFACE_KWS)
+                    }
+                    _non_surface_ids = [
+                        obj.object_id for obj in all_objects
+                        if obj.object_id not in _surface_ids
+                    ]
+                    for sid in _surface_ids:
+                        for oid in _non_surface_ids:
+                            key = ("space-available", (sid, oid))
+                            if key not in added_initial:
+                                try:
+                                    await self.pddl.add_initial_literal_async(
+                                        "space-available", [sid, oid], negated=False
+                                    )
+                                    added_initial.add(key)
+                                except ValueError:
+                                    pass
+
                 # Derive `clear` facts: an object is clear if nothing is `on` it.
                 # This handles blocksworld-style domains where `clear` is added by refinement.
-                domain_predicates = set(self.pddl.predicates.keys())
                 if "clear" in domain_predicates:
                     occupied: set = set()
                     for pred_name, args in l5.true_literals if (l5 and l5.true_literals) else []:
@@ -1362,7 +1564,7 @@ class TaskOrchestrator:
             algorithm=algorithm,
             timeout=timeout
         )
-
+        print("result done.")
         # Store result
         self.current_plan = result
 
@@ -1387,7 +1589,8 @@ class TaskOrchestrator:
     async def refine_domain_from_failure(
         self,
         error_message: str,
-        pddl_files: Optional[Dict[str, str]] = None
+        pddl_files: Optional[Dict[str, str]] = None,
+        raw_solver_output: Optional[str] = None,
     ) -> bool:
         """
         Refine the PDDL domain based on a planning failure.
@@ -1470,12 +1673,13 @@ class TaskOrchestrator:
                     "problem_path": pddl_files.get("problem_path") if pddl_files else None,
                     "current_domain_pddl": domain_content,
                     "current_problem_pddl": problem_content,
+                    "raw_solver_output": (raw_solver_output or "")[-3000:] or None,
                 },
                 layer=layer,
             )
             print(f"  ✓ Layer repair complete (valid={repair_record['validation']['valid']})")
 
-            if self.tracker:
+            if self.tracker and self._detection_running:
                 print("  • Updating ObjectTracker with repaired predicates/actions...")
                 await self.maintainer.update_object_tracker_from_domain(self.tracker)
                 self.tracker.set_task_context(
@@ -1554,6 +1758,12 @@ class TaskOrchestrator:
                         },
                     )
                     if not refined:
+                        self._log_domain_error(
+                            error_type="validation_presolve",
+                            message="Representation validation failed before solving and could not be repaired",
+                            layer=suggested or "unknown",
+                            extra={"issues": [i.get("message", "") for i in issues]},
+                        )
                         result = SolverResult(
                             success=False,
                             plan=[],
@@ -1576,6 +1786,30 @@ class TaskOrchestrator:
                 max_wait_seconds=max_wait_seconds
             )
 
+            # Snapshot PDDL files for post-run review
+            _pddl_base = Path(output_dir) if output_dir else self.config.state_dir / "pddl"
+            _snap_dir = _pddl_base / f"attempt_{self.refinement_attempts}"
+            _snap_dir.mkdir(parents=True, exist_ok=True)
+            for _pddl_file in _pddl_base.glob("*.pddl"):
+                shutil.copy2(_pddl_file, _snap_dir / _pddl_file.name)
+
+            # Write failure log (or success note) for this attempt
+            _failure_log = _snap_dir / "result.txt"
+            with open(_failure_log, "w") as _f:
+                _f.write(f"attempt: {self.refinement_attempts}\n")
+                _f.write(f"timestamp: {datetime.now(timezone.utc).isoformat()}\n")
+                if result.success:
+                    _f.write("status: SUCCESS\n")
+                    if result.plan:
+                        _f.write(f"\nplan ({len(result.plan)} steps):\n")
+                        for _step in result.plan:
+                            _f.write(f"  {_step}\n")
+                else:
+                    _f.write("status: FAILURE\n")
+                    _f.write(f"error: {result.error_message or 'unknown'}\n")
+                if result.raw_output:
+                    _f.write(f"\nsolver output:\n{result.raw_output}\n")
+
             # Success - return result
             if result.success:
                 if self.refinement_attempts > 0:
@@ -1583,13 +1817,41 @@ class TaskOrchestrator:
                 return result
 
             if not self.config.auto_refine_on_failure:
+                self._log_domain_error(
+                    error_type="solver_failure",
+                    message=result.error_message or "No plan found",
+                    layer="solver",
+                    refinement_attempt=self.refinement_attempts,
+                    extra={"raw_output": (result.raw_output or "")[-2000:]},
+                )
                 print(f"\n⚠ Auto-refinement disabled. Use refine_domain_from_failure() manually.")
+                if result.raw_output:
+                    print(f"\n--- Solver raw output ---\n{result.raw_output[-3000:]}\n---")
                 return result
 
-            if not self._is_refinable_error(result.error_message):
+            # Also check raw_output for refinable signals when error_message is generic.
+            _refinable = self._is_refinable_error(result.error_message) or (
+                result.raw_output and self._is_refinable_error(result.raw_output)
+            )
+            if not _refinable:
+                self._log_domain_error(
+                    error_type="solver_non_refinable",
+                    message=result.error_message or "No plan found",
+                    layer="solver",
+                    refinement_attempt=self.refinement_attempts,
+                    extra={"raw_output": (result.raw_output or "")[-2000:]},
+                )
                 print(f"\n✗ Planning failed with non-refinable error")
+                if result.raw_output:
+                    print(f"\n--- Solver raw output ---\n{result.raw_output[-3000:]}\n---")
                 return result
 
+            self._log_domain_error(
+                error_type="solver_failure",
+                message=result.error_message or "No plan found",
+                layer="solver",
+                refinement_attempt=self.refinement_attempts,
+            )
             print(f"\n🔧 Planning failed; attempting targeted layer repair: {result.error_message}...")
 
             # Get PDDL file paths
@@ -1600,17 +1862,106 @@ class TaskOrchestrator:
 
             refined = await self.refine_domain_from_failure(
                 error_message=result.error_message,
-                pddl_files=pddl_files
+                pddl_files=pddl_files,
+                raw_solver_output=result.raw_output,
             )
 
             if not refined:
+                # Append refinement failure note to the existing log
+                with open(_failure_log, "a") as _f:
+                    _f.write("\nrefinement: FAILED (no improvement possible)\n")
+                self._log_domain_error(
+                    error_type="refinement_failed",
+                    message=f"Refinement attempt {self.refinement_attempts} produced no improvement",
+                    layer="solver",
+                    refinement_attempt=self.refinement_attempts,
+                )
                 print(f"\n✗ Could not refine domain further")
                 return result
 
             # Loop will retry with repaired representation
 
+        self._log_domain_error(
+            error_type="refinement_limit",
+            message=f"Max refinement attempts ({self.config.max_refinement_attempts}) reached without a valid plan",
+            layer="solver",
+            refinement_attempt=self.refinement_attempts,
+            extra={"last_error": self.last_planning_error},
+        )
         print(f"\n✗ Max refinement attempts reached")
+
+        # Escalate to hybrid planner (probabilistic / hindsight) when all
+        # deterministic refinement attempts are exhausted (spec §5.3).
+        if self._hybrid_planner is not None:
+            registry = getattr(getattr(self, "tracker", None), "registry", None)
+            if registry is not None:
+                pddl_dir = Path(output_dir or (self.config.state_dir / "pddl"))
+                domain_path = pddl_dir / f"{self.pddl.domain_name}_domain.pddl"
+                problem_path = pddl_dir / f"{self.pddl.domain_name}_problem.pddl"
+                if domain_path.exists() and problem_path.exists():
+                    print("\n🔀 Escalating to hybrid probabilistic planner...")
+                    try:
+                        hybrid_result = await self._hybrid_planner.plan(
+                            domain_path=domain_path,
+                            problem_path=problem_path,
+                            registry=registry,
+                        )
+                        if hybrid_result.success:
+                            print(
+                                f"✓ Hybrid planner succeeded (mode={hybrid_result.mode}, "
+                                f"plan_length={len(hybrid_result.plan)})"
+                            )
+                            return SolverResult(
+                                success=True,
+                                plan=hybrid_result.plan,
+                                plan_length=len(hybrid_result.plan),
+                                plan_cost=None,
+                                search_time=None,
+                                nodes_expanded=None,
+                                error_message=None,
+                            )
+                        else:
+                            self._log_domain_error(
+                                error_type="hybrid_planner_failed",
+                                message=hybrid_result.error or "Hybrid planner returned no plan",
+                                layer="hybrid",
+                                extra={"mode": hybrid_result.mode},
+                            )
+                            print(f"✗ Hybrid planner also failed: {hybrid_result.error}")
+                    except Exception as exc:
+                        self._log_domain_error(
+                            error_type="hybrid_planner_exception",
+                            message=str(exc),
+                            layer="hybrid",
+                        )
+                        self.logger.warning("Hybrid planner escalation failed: %s", exc)
+
         return result
+
+    def _log_domain_error(
+        self,
+        error_type: str,
+        message: str,
+        layer: Optional[str] = None,
+        refinement_attempt: Optional[int] = None,
+        pddl_snippet: Optional[str] = None,
+        extra: Optional[dict] = None,
+    ) -> None:
+        """Write one record to domain_errors.jsonl via the DKB (no-op if DKB unavailable)."""
+        if self._dkb is None:
+            return
+        import re as _re
+        run_id = _re.search(r"(\d{8}_\d{6})", str(getattr(self.config, "state_dir", "")))
+        self._dkb.record_domain_error(
+            error_type=error_type,
+            message=message,
+            task=self.current_task,
+            layer=layer,
+            run_id=run_id.group(1) if run_id else None,
+            refinement_attempt=refinement_attempt,
+            pddl_snippet=pddl_snippet,
+            extra=extra,
+        )
 
     def _is_refinable_error(self, error_message: Optional[str]) -> bool:
         """
@@ -1705,6 +2056,304 @@ class TaskOrchestrator:
             "detection_timestamp": datetime.now().isoformat(),
             "objects": objects_data
         }
+
+    # ========================================================================
+    # Full-pipeline execution
+    # ========================================================================
+
+    async def execute_task(
+        self,
+        task_description: str,
+        output_dir: Optional[Path] = None,
+        detection_timeout: float = 120.0,
+        primitives: Optional[Any] = None,
+    ) -> "TaskExecutionResult":
+        """Drive the complete perception → planning → execution pipeline.
+
+        This is the top-level entry point for task execution.  It orchestrates:
+
+        1. **Perception** — starts GSAM2 detection, waits for at least one
+           detection cycle with objects, then stops the camera.
+        2. **Task analysis + domain generation** — runs the L1→L5 layered
+           domain generator against the detected scene.
+        3. **PDDL solving** — calls ``solve_and_plan_with_refinement`` with
+           automatic domain repair on failure and hybrid-planner escalation.
+        4. **Skill decomposition + execution** — for each symbolic action,
+           ``SkillDecomposer`` breaks it into primitives; ``PrimitiveExecutor``
+           translates coordinates and runs them on *primitives*.  If no
+           ``primitives`` interface is supplied the step runs as a dry-run.
+        5. **Conditional branching** — ``ConditionalTaskExecutor`` evaluates
+           check-* predicates at runtime against the live registry and
+           triggers replanning when they fail.
+
+        Args:
+            task_description: Natural-language task (e.g. "pick up the red cup").
+            output_dir: Directory for PDDL files and run artefacts.  Defaults
+                to ``config.state_dir / "pddl"``.
+            detection_timeout: Seconds to wait for at least one detection before
+                giving up (default 120 s).
+            primitives: Robot primitives interface (e.g. ``XArmPybulletPrimitives``
+                or ``XArmPybulletPlannedPrimitives``).  When *None* each primitive
+                step is executed as a dry-run and logged rather than sent to a robot.
+
+        Returns:
+            ``TaskExecutionResult`` with success flag, plan, execution trace, and
+            timing breakdown.
+        """
+        from src.primitives.skill_decomposer import SkillDecomposer
+        from src.primitives.primitive_executor import PrimitiveExecutor
+        from src.planning.conditional_task_executor import (
+            ConditionalTaskExecutor,
+            ConditionalExecutionResult,
+        )
+        from src.planning.clutter_module import PostDisplacementHook
+
+        if output_dir is None:
+            output_dir = self.config.state_dir / "pddl"
+        output_dir = Path(output_dir)
+
+        timings: Dict[str, float] = {}
+        _llm_client = getattr(self.config, "llm_client", None)
+
+        def _tick() -> float:
+            return time.monotonic()
+
+        def _tock(label: str, t0: float) -> None:
+            timings[label] = time.monotonic() - t0
+
+        # ── 1. Perception ────────────────────────────────────────────────
+        self.logger.info("[execute_task] Phase 1: perception")
+        t0 = _tick()
+        self.current_task = task_description
+        if self.tracker:
+            self.tracker.set_task_context(task_description=task_description)
+
+        await self.start_detection()
+        deadline = time.monotonic() + detection_timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            if self.detection_count >= 1 and self.get_detected_objects():
+                break
+            self.logger.debug(
+                "[execute_task] waiting for detection (%d cycles)", self.detection_count
+            )
+        await self.stop_detection()
+
+        registry = self.tracker.registry if self.tracker else None
+        detected = self.get_detected_objects()
+        _tock("perception", t0)
+        self.logger.info(
+            "[execute_task] Perception complete: %d objects in %.1fs",
+            len(detected), timings["perception"],
+        )
+
+        if not detected:
+            self.logger.error("[execute_task] No objects detected — aborting")
+            return TaskExecutionResult(
+                success=False,
+                task=task_description,
+                error="No objects detected after perception pass",
+                timings=timings,
+            )
+
+        # Capture masks for depth collider (if a depth collider is attached to
+        # the robot interface via config.robot)
+        _masks: Dict[str, Any] = dict(
+            getattr(getattr(self.tracker, "_last_masks", None), "__self__", {})
+            if False else
+            getattr(self.tracker, "_last_masks", {})
+        )
+
+        # ── 2. Task analysis + domain generation ─────────────────────────
+        self.logger.info("[execute_task] Phase 2: task analysis + domain generation")
+        t0 = _tick()
+        last_frame = getattr(self.tracker, "last_color_frame", None)
+        await self.process_task_request(task_description, environment_image=last_frame)
+        _tock("domain_generation", t0)
+        self.logger.info(
+            "[execute_task] Domain generation complete in %.1fs",
+            timings["domain_generation"],
+        )
+
+        # ── 3. PDDL solving ──────────────────────────────────────────────
+        self.logger.info("[execute_task] Phase 3: PDDL solving")
+        t0 = _tick()
+        solver_result = await self.solve_and_plan_with_refinement(
+            output_dir=output_dir,
+            wait_for_objects=False,
+        )
+        _tock("solving", t0)
+        self.logger.info(
+            "[execute_task] Solving complete in %.1fs — success=%s plan_length=%d",
+            timings["solving"], solver_result.success,
+            solver_result.plan_length if solver_result else 0,
+        )
+
+        if not solver_result or not solver_result.success or not solver_result.plan:
+            err = (solver_result.error_message if solver_result else None) or "no plan found"
+            self.logger.error("[execute_task] Planning failed: %s", err)
+            return TaskExecutionResult(
+                success=False,
+                task=task_description,
+                plan=solver_result.plan if solver_result else [],
+                error=err,
+                timings=timings,
+            )
+
+        # ── 4. Skill decomposition + execution ───────────────────────────
+        self.logger.info("[execute_task] Phase 4: skill decomposition + execution")
+        t0 = _tick()
+
+        # Build skill decomposer (requires LLM client)
+        decomposer: Optional[SkillDecomposer] = None
+        prim_executor: Optional[PrimitiveExecutor] = None
+        if _llm_client is not None:
+            decomposer = SkillDecomposer(
+                llm_client=_llm_client, orchestrator=self
+            )
+            prim_executor = PrimitiveExecutor(
+                primitives=primitives,
+                perception_pool_dir=self._get_perception_pool_dir(),
+                logger=self.logger.getChild("PrimitiveExecutor"),
+                orchestrator=self,
+            )
+        else:
+            self.logger.warning(
+                "[execute_task] No LLM client — skill decomposition will be skipped"
+            )
+
+        # Camera pose for PostDisplacementHook
+        cam_pos = cam_rot = None
+        robot = getattr(self.config, "robot", None)
+        if robot is not None:
+            try:
+                cam_pos, cam_rot = robot.get_camera_transform()
+            except Exception:
+                pass
+
+        post_hook = PostDisplacementHook(
+            registry=registry,
+            camera_intrinsics=None,
+            cam_position=cam_pos,
+            cam_rotation=cam_rot,
+            logger=self.logger.getChild("PostDisplacementHook"),
+        )
+
+        async def _replan() -> List[str]:
+            self.logger.info("[execute_task] Replanning after contingency...")
+            lf = getattr(self.tracker, "last_color_frame", None)
+            await self.process_task_request(task_description, environment_image=lf)
+            r = await self.solve_and_plan_with_refinement(
+                output_dir=output_dir, wait_for_objects=False
+            )
+            return r.plan if r and r.success else []
+
+        def _execute_action(action_str: str) -> bool:
+            tokens = action_str.strip("() ").split()
+            action_name = tokens[0] if tokens else action_str
+            param_ids = tokens[1:] if len(tokens) > 1 else []
+            params = {"objects": param_ids, "action_str": action_str}
+
+            self.logger.info("[execute_task] execute: %s", action_str)
+            if decomposer is None or prim_executor is None:
+                self.logger.info(
+                    "[execute_task] skill decomposition skipped (no LLM client)"
+                )
+                return True
+
+            try:
+                skill_plan = decomposer.plan(action_name, params)
+                self.logger.info(
+                    "[execute_task] decomposed → %s",
+                    [p.name for p in skill_plan.primitives],
+                )
+                for w in (skill_plan.diagnostics.warnings or []):
+                    self.logger.warning("[execute_task] %s", w)
+
+                snapshot_id = self.capture_fresh_snapshot_sync(
+                    reason=f"pre-execution:{action_name}"
+                )
+                world_state = {"state_dir": str(self.config.state_dir)}
+                if snapshot_id:
+                    world_state["last_snapshot_id"] = snapshot_id
+
+                dry_run = primitives is None
+                exec_result = prim_executor.execute_plan(
+                    skill_plan, world_state=world_state, dry_run=dry_run
+                )
+
+                if dry_run:
+                    self.logger.info("[execute_task] dry-run OK for %s", action_name)
+                    return True
+
+                self.logger.info(
+                    "[execute_task] executed %d primitive(s) for %s",
+                    len(exec_result.primitive_results), action_name,
+                )
+                succeeded = all(
+                    r.get("success", True) if isinstance(r, dict) else True
+                    for r in exec_result.primitive_results
+                )
+
+                # Calibrate hybrid planner
+                if self._hybrid_planner is not None and action_name in (
+                    "displace", "push-aside"
+                ):
+                    outcome = "full_success" if succeeded else "no_change"
+                    self._hybrid_planner.record_execution_outcome(
+                        action_name, outcome, succeeded
+                    )
+
+                return succeeded
+
+            except Exception as exc:
+                self.logger.error(
+                    "[execute_task] action '%s' failed: %s", action_name, exc
+                )
+                return False
+
+        cond_executor = ConditionalTaskExecutor(
+            registry=registry,
+            execute_action=_execute_action,
+            replan_fn=_replan,
+            max_replan=getattr(self.config, "max_refinement_attempts", 2),
+            post_displacement_hook=post_hook,
+            logger=self.logger.getChild("ConditionalExecutor"),
+        )
+
+        self.logger.info(
+            "[execute_task] Executing plan (%d steps): %s",
+            solver_result.plan_length, solver_result.plan,
+        )
+        self._set_state(OrchestratorState.EXECUTING_PLAN)
+        cond_result: ConditionalExecutionResult = await cond_executor.execute(
+            solver_result.plan
+        )
+        _tock("execution", t0)
+
+        if cond_result.success:
+            self._set_state(OrchestratorState.TASK_COMPLETE)
+            self.logger.info(
+                "[execute_task] Task complete in %.1fs (%d steps, %d replan(s))",
+                timings["execution"],
+                len(cond_result.steps),
+                cond_result.replan_count,
+            )
+        else:
+            self._set_state(OrchestratorState.ERROR)
+            self.logger.error(
+                "[execute_task] Task failed: %s", cond_result.error
+            )
+
+        return TaskExecutionResult(
+            success=cond_result.success,
+            task=task_description,
+            plan=solver_result.plan,
+            steps=cond_result.steps,
+            replan_count=cond_result.replan_count,
+            error=cond_result.error,
+            timings=timings,
+        )
 
     async def save_state(self, path: Optional[Path] = None) -> Path:
         """

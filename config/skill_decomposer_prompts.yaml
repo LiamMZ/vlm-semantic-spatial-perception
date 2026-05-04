@@ -1,39 +1,72 @@
 template: |
   You are an assistive planner that converts symbolic robot actions into executable AMP
   (Atomic Manipulation Primitive) calls. Use ONLY the primitives listed in the catalog below.
-  The latest RGB snapshot (when available) is attached — express every spatial reference as
-  normalized [y, x] coordinates in the 0-1000 range (top-left origin).
+  The latest RGB snapshot (when available) is attached for visual context — use it to write
+  precise pointing_guidance descriptions, but do NOT output pixel coordinates directly.
 
   Primitive catalog:
   {primitive_catalog}
 
   Action intent:
   - name: {action_name}
+  - description: {action_description}
   - parameters: {parameters}
 
   Relevant world state:
   {object_section}
   Latest snapshot id: {last_snapshot_id}
   Perception context: {perception_context}
-  Existing interaction points above include normalized [y, x] coordinates when available.
 
   Translation rules:
   1. Use ONLY primitive names that appear in the catalog. Any other name will fail validation.
-  2. For `move_gripper_to_pose`: provide `target_pixel_yx` ([y,x] normalized 0-1000) when a
-     snapshot exists, or `point_label` (object_id string) as fallback. Always set
-     `preset_orientation` to `"top_down"` or `"side"`. Set `is_place: true` when placing.
-  3. For `push_pull`: `surface_label` is required (use the target object_id). Set `is_button`,
+  2. For `move_gripper_to_pose`: set `point_label` to the target object_id. Do NOT provide
+     `target_pixel_yx` or `preset_orientation` — these are grounded from perception at
+     execution time. Instead, output `pointing_guidance` in the primitive's `metadata` field.
+     `pointing_guidance` must describe the exact gripper contact point needed to complete the
+     action — i.e. where the gripper fingers should close, not just a region of the object.
+     Think: if a person reached out and closed their hand to perform this action, where would
+     their fingertips land? Examples by action type:
+       pick:        "the body of the cup just below the rim where fingers can close around it"
+       displace:    "the widest stable part of the cardboard box where a pinch grip can lift it"
+       push-aside:  "the side face of the rubber duck facing the robot, at mid-height, where the gripper can press and slide it aside" (NOT the top — push contacts a face, not a grasp point)
+       place:       "the flat open area on the table surface 10 cm to the left of the blue cup"
+       open drawer: "the drawer handle grip bar at its midpoint"
+     Also output `approach_direction` in `metadata`: "top_down" for open surfaces, flat tops,
+     and items reachable from above; "side" for handles, knobs, vertical faces, and items
+     with overhead obstructions. The executor will verify the chosen direction against the
+     object's clearance corridors and automatically fall back to the next clearest viable
+     direction if the preferred one is blocked — so always set your semantic preference.
+     Set `is_place: true` when placing.
+  3. `pointing_guidance` must describe the contact point for the SPECIFIC action being performed
+     — not a generic grasp point. The downstream visual model (Molmo2) receives this text
+     verbatim and points to exactly that location, so it must identify a sub-region whose
+     geometry matches what the action physically requires:
+       pick / displace:  a region where fingers can CLOSE AROUND the object to lift it.
+                         "the cylindrical body of the red cup, midway between base and rim,
+                          where two fingers can wrap around it"
+       push-aside:       the FACE or EDGE the gripper will contact to PUSH laterally —
+                         NOT a grasp point. "the flat left side face of the rubber duck,
+                          at mid-height, where the gripper can press and slide it right"
+       place:            the TARGET SURFACE location to set the object down onto.
+                         "the flat open area on the table 10 cm left of the blue cup"
+       open/close:       the HANDLE or MECHANISM the fingers grip to operate it.
+                         "the drawer handle grip bar at its midpoint"
+     Bad: "the cup" (whole object). Bad: "pick up the cup" (action verb, not contact geometry).
+     Bad (push-aside): "the top of the duck" — that is a pick point, not a push face.
+  4. For `push_pull`: `surface_label` is required (use the target object_id). Set `is_button`,
      `has_pivot`, and `hinge_location` only when the action semantics require them.
-  4. For `open_gripper`, `close_gripper`, `retract_gripper`, `twist`: pass an empty `parameters`
+  5. For `open_gripper`, `close_gripper`, `retract_gripper`, `twist`: pass an empty `parameters`
      object `{}` unless you have a specific reason to override defaults.
-  5. Set `references.object_id` to the target object_id for any primitive that acts on an object.
-  6. Only add new entries to `interaction_points` when no existing interaction point is suitable.
+  6. Set `references.object_id` to the target object_id for any primitive that acts on an object.
+  7. Only add new entries to `interaction_points` when no existing interaction point is suitable.
      New points must include normalized [y, x] coordinates so the executor can back-project them.
-  7. If perception data is stale (>90s old), note it in `diagnostics.freshness_notes`.
-  8. CRITICAL — parameter ownership: each parameter belongs to EXACTLY ONE primitive.
+  8. If perception data is stale (>90s old), note it in `diagnostics.freshness_notes`.
+  9. CRITICAL — parameter ownership: each parameter belongs to EXACTLY ONE primitive.
      NEVER pass a parameter to a primitive it does not own. Hard mapping:
-       move_gripper_to_pose  → target_pixel_yx, point_label, preset_orientation, is_place,
-                               is_top_down_grasp, is_side_grasp, pivot_point
+       move_gripper_to_pose  → point_label, is_place, is_top_down_grasp, is_side_grasp,
+                               pivot_point
+                               (target_pixel_yx and preset_orientation are set by the executor
+                               from perception — do NOT output them from the LLM)
        push_pull             → surface_label, force_direction, is_button, has_pivot, hinge_location
        open_gripper          → wait, timeout
        close_gripper         → wait, timeout, simple_close
@@ -46,7 +79,6 @@ template: |
        ✗ move_gripper_to_pose  with  is_button  (is_button belongs to push_pull)
        ✗ move_gripper_to_pose  with  has_pivot  (has_pivot belongs to push_pull)
        ✗ move_gripper_to_pose  with  rotation_angle_deg  (belongs to twist)
-       ✗ move_gripper_to_pose  with  speed_factor        (belongs to retract_gripper/twist)
        ✗ move_gripper_to_pose  with  wait / simple_close (belongs to open/close_gripper)
 
   Validation reminder: The executor checks every primitive name and parameter name against the
@@ -87,18 +119,9 @@ response_schema:
             additionalProperties: true
             properties:
               # move_gripper_to_pose parameters
-              target_pixel_yx:
-                type: array
-                items:
-                  type: number
-                description: "Normalized [y, x] pixel (0-1000) for back-projection. move_gripper_to_pose only."
               point_label:
                 type: string
-                description: "Object ID fallback when no depth snapshot is available. move_gripper_to_pose only."
-              preset_orientation:
-                type: string
-                enum: ["top_down", "side"]
-                description: "Gripper orientation. move_gripper_to_pose only."
+                description: "Target object_id. move_gripper_to_pose only. Do NOT set target_pixel_yx or preset_orientation — the executor resolves those from perception."
               is_place:
                 type: boolean
                 description: "True when placing — adds z-clearance. move_gripper_to_pose only."
@@ -157,6 +180,23 @@ response_schema:
           metadata:
             type: object
             additionalProperties: true
+            properties:
+              pointing_guidance:
+                type: string
+                description: >
+                  Natural-language description of exactly where on the object Molmo should
+                  point (e.g. "the upper rim of the cup on the side facing the robot").
+                  Required for move_gripper_to_pose. Be specific and spatial — describe a
+                  sub-region, not the action itself.
+              approach_direction:
+                type: string
+                enum: ["top_down", "side"]
+                description: >
+                  Preferred gripper approach direction. "top_down" for open surfaces and
+                  flat tops reachable from above; "side" for handles, knobs, vertical faces,
+                  or items with overhead obstructions. The executor validates this preference
+                  against the object's clearance corridors and falls back to the next clearest
+                  viable direction if the preferred corridor is blocked.
     assumptions:
       type: array
       items:

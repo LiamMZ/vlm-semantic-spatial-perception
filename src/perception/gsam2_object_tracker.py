@@ -22,11 +22,11 @@ from pathlib import Path
 from .clearance import ClearanceProfile, GripperGeometry, compute_clearance_profile
 from .contact_graph import compute_contact_graph
 from .occlusion import CameraPose, ObservationRecord, compute_occlusion_map
-from .surface_map import compute_surface_maps
 from .gsam2 import IncrementalObjectTracker, OpenAITagger
 from .object_registry import DetectedObject, DetectedObjectRegistry, InteractionPoint
 from .object_tracker import ContinuousObjectTracker, ObjectTracker, TrackingStats, save_debug_frame
 from .utils.coordinates import compute_3d_position, pixel_to_normalized
+from .molmo_point_detector import MolmoPointDetector, DEFAULT_ACTIONS as _MOLMO_DEFAULT_ACTIONS
 from ..utils.logging_utils import get_structured_logger
 
 import re
@@ -124,7 +124,7 @@ class GSAM2ObjectTracker:
 
     def __init__(
         self,
-        sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+        sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_b+.yaml",
         sam2_ckpt_path: str = "./checkpoints/sam2.1_hiera_large.pt",
         grounding_model_id: str = "IDEA-Research/grounding-dino-tiny",
         openai_api_key: Optional[str] = None,
@@ -135,6 +135,7 @@ class GSAM2ObjectTracker:
         device: str = "cuda",
         tag_interval: int = 1,
         llm_client: Optional[Any] = None,
+        llm_mode: str = "nl",
         compute_clearances: bool = True,
         gripper: Optional[GripperGeometry] = None,
         compute_contacts: bool = True,
@@ -142,24 +143,31 @@ class GSAM2ObjectTracker:
         compute_occlusion: bool = True,
         occlusion_history_len: int = 10,
         occlusion_update_interval: int = 1,
-        compute_surface_maps: bool = True,
-        surface_map_resolution_m: float = 0.01,
         robot_interface: Optional[Any] = None,
+        use_molmo: bool = True,
+        molmo_checkpoint: str = "allenai/Molmo2-4B",
         logger: Optional[logging.Logger] = None,
     ):
         self.logger = logger or get_structured_logger("GSAM2ObjectTracker")
         self.device = device
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.debug("CUDA cache cleared before model load.")
+        except Exception:
+            pass
         self.tag_interval = tag_interval
         self.registry = DetectedObjectRegistry()
         self._llm_client = llm_client
+        self._llm_mode = llm_mode
         self._compute_clearances = compute_clearances
         self._gripper = gripper or GripperGeometry()
         self._compute_contacts = compute_contacts
         self._contact_threshold_m = contact_threshold_m
+        self.llm_debug_images: List[bytes] = []  # PNG bytes from LLM contact classifier
         self._compute_occlusion = compute_occlusion
         self._occlusion_update_interval = occlusion_update_interval
-        self._compute_surface_maps = compute_surface_maps
-        self._surface_map_resolution_m = surface_map_resolution_m
         self._robot_interface = robot_interface
         # Rolling window of ObservationRecords for multi-viewpoint occlusion analysis
         self._obs_history: Deque[ObservationRecord] = collections.deque(maxlen=occlusion_history_len)
@@ -167,6 +175,12 @@ class GSAM2ObjectTracker:
         self._affordance_cache: Dict[str, Set[str]] = {}
         # PDDL predicates to evaluate per object (set via set_pddl_predicates)
         self._pddl_predicates: List[str] = []
+        # Optional Molmo-based interaction point detector
+        self._molmo: Optional[MolmoPointDetector] = (
+            MolmoPointDetector(checkpoint=molmo_checkpoint, logger=self.logger)
+            if use_molmo
+            else None
+        )
         self._last_masks: Dict[str, np.ndarray] = {}  # populated after each detect_objects call
 
         self.logger.info("Loading GroundingDINO (%s) + SAM2 (%s) on %s…",
@@ -190,6 +204,15 @@ class GSAM2ObjectTracker:
         self._current_prompt: str = "object."
         self._frame_count: int = 0
         self._extra_tags: List[str] = []
+
+        # Per-component timing accumulators (seconds)
+        self._timing_gsam2_s: float = 0.0
+        self._timing_clearance_s: float = 0.0
+        self._timing_contact_graph_s: float = 0.0
+        self._timing_occlusion_s: float = 0.0
+        self._timing_calls: Dict[str, int] = {
+            "gsam2": 0, "clearance": 0, "contact_graph": 0, "occlusion": 0,
+        }
 
     def set_tagger(self, tagger_callable):
         """Override the default tagger with any BaseTagger or callable tag(rgb_np) -> (prompt, raw)."""
@@ -294,7 +317,11 @@ class GSAM2ObjectTracker:
         def _run_gsam2():
             return self._gsam2.add_image(rgb_np)
 
+        _t0_gsam2 = time.perf_counter()
         await loop.run_in_executor(None, _run_gsam2)
+        _elapsed_gsam2 = time.perf_counter() - _t0_gsam2
+        self._timing_gsam2_s += _elapsed_gsam2
+        self._timing_calls["gsam2"] += 1
 
         self._frame_count += 1
 
@@ -371,7 +398,7 @@ class GSAM2ObjectTracker:
                     if position_3d is None:
                         position_3d = cam_pos  # fallback: keep camera-frame if no transform
 
-            interaction_point = InteractionPoint(
+            centroid_ip = InteractionPoint(
                 position_2d=position_2d,
                 position_3d=position_3d,
             )
@@ -387,11 +414,16 @@ class GSAM2ObjectTracker:
             else:
                 affordances = self._affordance_cache.get(safe_name, {"graspable"})
 
+            # Interaction points are seeded with the mask centroid at detection time.
+            # Molmo-based grounding is deferred to PrimitiveExecutor.prepare_plan so
+            # it runs against the freshest snapshot at execution time.
+            interaction_points = {"pick": centroid_ip}
+
             obj = DetectedObject(
                 object_type=safe_name,
                 object_id=object_id,
                 affordances=affordances,
-                interaction_points={"grasp": interaction_point},
+                interaction_points=interaction_points,
                 position_2d=position_2d,
                 position_3d=position_3d,
                 bounding_box_2d=bbox_2d,
@@ -417,13 +449,13 @@ class GSAM2ObjectTracker:
         # Runs after all objects are built so every object can serve as an
         # obstacle for every other object's ray-casting pass.
         if self._compute_clearances and depth_frame is not None and camera_intrinsics is not None:
-            import time as _time
-            _t0 = _time.perf_counter()
+            _t0 = time.perf_counter()
             for obj in detected:
                 target_mask_bool = _obj_masks.get(obj.object_id)
                 if target_mask_bool is None:
                     continue
                 other_masks = {oid: m for oid, m in _obj_masks.items() if oid != obj.object_id}
+                _obj_types = {o.object_id: o.object_type for o in detected}
                 try:
                     obj.clearance_profile = compute_clearance_profile(
                         target_mask=target_mask_bool,
@@ -433,18 +465,21 @@ class GSAM2ObjectTracker:
                         gripper=self._gripper,
                         cam_position=cam_position,
                         camera_quaternion_xyzw=cam_rotation.as_quat() if cam_rotation is not None else None,
+                        object_types=_obj_types,
                     )
                     # Keep registry in sync with the updated object
                     self.registry.update_object(obj.object_id, obj)
                 except Exception as e:
                     self.logger.warning("Clearance computation failed for '%s': %s", obj.object_id, e)
-            _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            self.logger.debug("Clearance profiles computed for %d objects in %.1f ms", len(detected), _elapsed_ms)
+            _elapsed = time.perf_counter() - _t0
+            self._timing_clearance_s += _elapsed
+            self._timing_calls["clearance"] += 1
+            self.logger.info("Clearance profiles: %d objects in %.1f ms", len(detected), _elapsed * 1000)
+
 
         # --- Contact graph (pairwise O(n²) + stability analysis) ---
         if self._compute_contacts and depth_frame is not None and camera_intrinsics is not None and len(detected) >= 2:
-            import time as _time
-            _t0 = _time.perf_counter()
+            _t0 = time.perf_counter()
             try:
                 self.registry.contact_graph = compute_contact_graph(
                     objects=detected,
@@ -454,34 +489,17 @@ class GSAM2ObjectTracker:
                     contact_threshold_m=self._contact_threshold_m,
                     camera_position=cam_position,
                     camera_rotation=cam_rotation,
+                    color_image=rgb_np,
+                    llm_client=self._llm_client,
+                    llm_mode=self._llm_mode,
+                    llm_debug_image_out=self.llm_debug_images,
                 )
             except Exception as e:
                 self.logger.warning("Contact graph computation failed: %s", e)
-            _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            self.logger.debug("Contact graph computed in %.1f ms", _elapsed_ms)
-
-        # --- Surface free-space maps (requires contact graph for surface ID resolution) ---
-        if self._compute_surface_maps and depth_frame is not None and camera_intrinsics is not None:
-            import time as _time
-            _t0 = _time.perf_counter()
-            try:
-                surface_maps = compute_surface_maps(
-                    objects=detected,
-                    obj_masks=_obj_masks,
-                    depth_frame=depth_frame,
-                    camera_intrinsics=camera_intrinsics,
-                    contact_graph=self.registry.contact_graph,
-                    resolution_m=self._surface_map_resolution_m,
-                )
-                for surface_id, smap in surface_maps.items():
-                    obj = self.registry.get_object(surface_id)
-                    if obj is not None:
-                        obj.surface_map = smap
-                        self.registry.update_object(surface_id, obj)
-            except Exception as e:
-                self.logger.warning("Surface map computation failed: %s", e)
-            _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            self.logger.debug("Surface maps computed in %.1f ms", _elapsed_ms)
+            _elapsed = time.perf_counter() - _t0
+            self._timing_contact_graph_s += _elapsed
+            self._timing_calls["contact_graph"] += 1
+            self.logger.info("Contact graph: %d objects in %.1f ms", len(detected), _elapsed * 1000)
 
         # --- Occlusion map (rolling history, depth-image-based) ---
         if self._compute_occlusion and depth_frame is not None and camera_intrinsics is not None:
@@ -494,8 +512,7 @@ class GSAM2ObjectTracker:
             ))
             # Recompute map at the configured interval
             if self._frame_count % self._occlusion_update_interval == 0:
-                import time as _time
-                _t0 = _time.perf_counter()
+                _t0 = time.perf_counter()
                 try:
                     self.registry.occlusion_map = compute_occlusion_map(
                         observations=list(self._obs_history),
@@ -503,8 +520,10 @@ class GSAM2ObjectTracker:
                     )
                 except Exception as e:
                     self.logger.warning("Occlusion map computation failed: %s", e)
-                _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-                self.logger.debug("Occlusion map computed in %.1f ms", _elapsed_ms)
+                _elapsed = time.perf_counter() - _t0
+                self._timing_occlusion_s += _elapsed
+                self._timing_calls["occlusion"] += 1
+                self.logger.info("Occlusion map: %.1f ms", _elapsed * 1000)
 
         # Infer PDDL predicates for all detected objects now that the full
         # detected list is built (binary predicates like "on obj1 obj2" need
@@ -579,6 +598,7 @@ class GSAM2ObjectTracker:
             config = GenerateConfig(
                 temperature=0.2,
                 max_output_tokens=256,
+                response_mime_type="application/json",
             )
 
             response = await self._llm_client.generate_async(
@@ -651,6 +671,7 @@ class GSAM2ObjectTracker:
             config = GenerateConfig(
                 temperature=0.1,
                 max_output_tokens=512,
+                response_mime_type="application/json",
             )
 
             response = await self._llm_client.generate_async(
@@ -691,6 +712,7 @@ class GSAM2ObjectTracker:
         robot_state: Optional[Dict[str, Any]] = None,
         affected_ids: Optional[List[str]] = None,
         force_occlusion: bool = False,
+        color_frame: Optional[np.ndarray] = None,
     ) -> None:
         """Recompute all geometry representations for a given depth snapshot.
 
@@ -721,6 +743,7 @@ class GSAM2ObjectTracker:
                 if mask is None:
                     continue
                 other_masks = {oid: m for oid, m in obj_masks.items() if oid != obj.object_id}
+                _obj_types = {o.object_id: o.object_type for o in objects}
                 try:
                     obj.clearance_profile = compute_clearance_profile(
                         target_mask=mask,
@@ -730,6 +753,7 @@ class GSAM2ObjectTracker:
                         gripper=self._gripper,
                         cam_position=cam_position,
                         camera_quaternion_xyzw=cam_rotation.as_quat() if cam_rotation is not None else None,
+                        object_types=_obj_types,
                     )
                     self.registry.update_object(obj.object_id, obj)
                 except Exception as e:
@@ -746,28 +770,13 @@ class GSAM2ObjectTracker:
                     contact_threshold_m=self._contact_threshold_m,
                     camera_position=cam_position,
                     camera_rotation=cam_rotation,
+                    color_image=color_frame,
+                    llm_client=self._llm_client,
+                    llm_mode=self._llm_mode,
+                    llm_debug_image_out=self.llm_debug_images,
                 )
             except Exception as e:
                 self.logger.warning("Contact graph recompute failed: %s", e)
-
-        # Surface maps — after contact graph update
-        if self._compute_surface_maps:
-            try:
-                surface_maps = compute_surface_maps(
-                    objects=objects,
-                    obj_masks=obj_masks,
-                    depth_frame=depth_frame,
-                    camera_intrinsics=camera_intrinsics,
-                    contact_graph=self.registry.contact_graph,
-                    resolution_m=self._surface_map_resolution_m,
-                )
-                for surface_id, smap in surface_maps.items():
-                    obj = self.registry.get_object(surface_id)
-                    if obj is not None:
-                        obj.surface_map = smap
-                        self.registry.update_object(surface_id, obj)
-            except Exception as e:
-                self.logger.warning("Surface map recompute failed: %s", e)
 
         # Occlusion — append new observation and force recompute
         if self._compute_occlusion and force_occlusion:
@@ -795,7 +804,7 @@ class GSAM2ContinuousObjectTracker:
 
     def __init__(
         self,
-        sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+        sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_b+.yaml",
         sam2_ckpt_path: str = "./checkpoints/sam2.1_hiera_large.pt",
         grounding_model_id: str = "IDEA-Research/grounding-dino-tiny",
         openai_api_key: Optional[str] = None,
@@ -808,6 +817,8 @@ class GSAM2ContinuousObjectTracker:
         update_interval: float = 0.0,
         on_detection_complete: Optional[Callable[[int], None]] = None,
         llm_client: Optional[Any] = None,
+        llm_mode: str = "nl",
+        robot_interface: Optional[Any] = None,
         compute_clearances: bool = True,
         gripper: Optional[GripperGeometry] = None,
         compute_contacts: bool = True,
@@ -815,11 +826,12 @@ class GSAM2ContinuousObjectTracker:
         compute_occlusion: bool = True,
         occlusion_history_len: int = 10,
         occlusion_update_interval: int = 1,
-        compute_surface_maps: bool = True,
-        surface_map_resolution_m: float = 0.01,
         t1_budget_s: float = 2.0,
         logger: Optional[logging.Logger] = None,
         debug_save_dir: Optional[Union[str, Path]] = None,
+        robot: Optional[Any] = None,  # alias for robot_interface (orchestrator compat)
+        use_molmo: bool = True,
+        molmo_checkpoint: str = "allenai/Molmo2-4B",
     ):
         self._tracker = GSAM2ObjectTracker(
             sam2_model_cfg=sam2_model_cfg,
@@ -833,6 +845,8 @@ class GSAM2ContinuousObjectTracker:
             device=device,
             tag_interval=tag_interval,
             llm_client=llm_client,
+            llm_mode=llm_mode,
+            robot_interface=robot_interface or robot,
             compute_clearances=compute_clearances,
             gripper=gripper,
             compute_contacts=compute_contacts,
@@ -840,11 +854,12 @@ class GSAM2ContinuousObjectTracker:
             compute_occlusion=compute_occlusion,
             occlusion_history_len=occlusion_history_len,
             occlusion_update_interval=occlusion_update_interval,
-            compute_surface_maps=compute_surface_maps,
-            surface_map_resolution_m=surface_map_resolution_m,
+            use_molmo=use_molmo,
+            molmo_checkpoint=molmo_checkpoint,
             logger=logger,
         )
         self.registry = self._tracker.registry
+        self._last_color_frame: Optional[np.ndarray] = None
         self.update_interval = update_interval
         self.on_detection_complete = on_detection_complete
         self.logger = logger or get_structured_logger("GSAM2ContinuousObjectTracker")
@@ -864,6 +879,18 @@ class GSAM2ContinuousObjectTracker:
         self._debug_save_dir: Optional[Path] = Path(debug_save_dir) if debug_save_dir else None
         self._debug_frame_index: int = 0
         self._debug_lock = threading.Lock()
+
+    @property
+    def last_color_frame(self) -> Optional[np.ndarray]:
+        return self._last_color_frame
+
+    @property
+    def _last_masks(self) -> Dict[str, np.ndarray]:
+        return self._tracker._last_masks
+
+    @property
+    def llm_debug_images(self) -> List[bytes]:
+        return self._tracker.llm_debug_images
 
     def set_tagger(self, tagger_callable):
         self._tracker.set_tagger(tagger_callable)
@@ -927,6 +954,11 @@ class GSAM2ContinuousObjectTracker:
                 else:
                     color_frame, depth_frame, intrinsics = provided
                     robot_state = None
+
+                if isinstance(color_frame, np.ndarray):
+                    self._last_color_frame = color_frame
+                elif hasattr(color_frame, "__array__"):
+                    self._last_color_frame = np.array(color_frame)
 
                 detection_start = time.time()
                 detected = await self._tracker.detect_objects(
@@ -1015,6 +1047,37 @@ class GSAM2ContinuousObjectTracker:
             is_running=self.stats.is_running,
         )
 
+    def get_component_timings(self) -> Dict[str, Dict[str, float]]:
+        """Return per-component timing totals and per-call averages (seconds)."""
+        t = self._tracker
+
+        def _avg(total: float, key: str) -> float:
+            n = t._timing_calls.get(key, 0)
+            return total / n if n > 0 else 0.0
+
+        return {
+            "gsam2": {
+                "total_s": t._timing_gsam2_s,
+                "calls": t._timing_calls["gsam2"],
+                "avg_s": _avg(t._timing_gsam2_s, "gsam2"),
+            },
+            "clearance": {
+                "total_s": t._timing_clearance_s,
+                "calls": t._timing_calls["clearance"],
+                "avg_s": _avg(t._timing_clearance_s, "clearance"),
+            },
+            "contact_graph": {
+                "total_s": t._timing_contact_graph_s,
+                "calls": t._timing_calls["contact_graph"],
+                "avg_s": _avg(t._timing_contact_graph_s, "contact_graph"),
+            },
+            "occlusion": {
+                "total_s": t._timing_occlusion_s,
+                "calls": t._timing_calls["occlusion"],
+                "avg_s": _avg(t._timing_occlusion_s, "occlusion"),
+            },
+        }
+
     def get_all_objects(self) -> List[DetectedObject]:
         return self.registry.get_all_objects()
 
@@ -1036,7 +1099,7 @@ class GSAM2ContinuousObjectTracker:
 
         Args:
             affected_ids: Restrict clearance recompute to these object IDs.
-                Contact graph and surface maps always use all objects.
+                Contact graph always uses all objects.
             force_occlusion: If True, also update the occlusion history and map.
         """
         with self._last_bundle_lock:

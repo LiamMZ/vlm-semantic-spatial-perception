@@ -85,9 +85,10 @@ class PDDLRepresentation:
         # Thread safety with asyncio Lock for true parallel access
         self._lock = asyncio.Lock()
 
-        # Requirements (use STRIPS only, no typing)
         self.requirements: Set[PDDLRequirements] = set(requirements or [
-            PDDLRequirements.STRIPS
+            PDDLRequirements.STRIPS,
+            PDDLRequirements.TYPING,
+            PDDLRequirements.CONDITIONAL_EFFECTS,
         ])
 
         # Domain components
@@ -565,6 +566,92 @@ class PDDLRepresentation:
     # PDDL File Generation
     # =====================================================================
 
+    @staticmethod
+    def _strip_forall_when_from_domain_text(domain_text: str) -> str:
+        """
+        Strip (forall ...) and (when ...) from every :effect block in a raw PDDL
+        domain string.  Used when the domain comes from the LLM text cache.
+        """
+        # Operate character by character to handle balanced parens correctly.
+        result = []
+        text = domain_text
+        i = 0
+        n = len(text)
+        while i < n:
+            # Look for ':effect'
+            if text[i:i+7].lower() == ':effect':
+                result.append(text[i:i+7])
+                i += 7
+                # Skip whitespace
+                while i < n and text[i] in ' \t\n\r':
+                    result.append(text[i])
+                    i += 1
+                # Now collect the effect value (may start with '(' or be a simple atom)
+                if i < n and text[i] == '(':
+                    depth = 0
+                    start = i
+                    while i < n:
+                        if text[i] == '(':
+                            depth += 1
+                        elif text[i] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                i += 1
+                                break
+                        i += 1
+                    effect_expr = text[start:i]
+                    result.append(PDDLRepresentation._strip_forall_when(effect_expr))
+                else:
+                    result.append(text[i])
+                    i += 1
+            else:
+                result.append(text[i])
+                i += 1
+        return ''.join(result)
+
+    @staticmethod
+    def _strip_forall_when(effect: str) -> str:
+        """
+        Remove (forall ...) and (when ...) sub-expressions from an effect string.
+
+        These require :conditional-effects which pyperplan (STRIPS) doesn't support.
+        The PostDisplacementHook handles these semantics at runtime, so the planner
+        only needs the simple non-conditional part of each effect.
+        """
+        result = []
+        i = 0
+        n = len(effect)
+        while i < n:
+            # Look for (forall or (when at the current position
+            if effect[i] == '(':
+                # Peek at the keyword after the open paren
+                j = i + 1
+                while j < n and effect[j] == ' ':
+                    j += 1
+                word_end = j
+                while word_end < n and effect[word_end] not in (' ', ')'):
+                    word_end += 1
+                keyword = effect[j:word_end].lower()
+                if keyword in ('forall', 'when'):
+                    # Skip the entire balanced paren expression
+                    depth = 1
+                    k = i + 1
+                    while k < n and depth > 0:
+                        if effect[k] == '(':
+                            depth += 1
+                        elif effect[k] == ')':
+                            depth -= 1
+                        k += 1
+                    i = k
+                    continue
+            result.append(effect[i])
+            i += 1
+        # Collapse extra whitespace left by removed expressions
+        cleaned = re.sub(r'\s{2,}', ' ', ''.join(result)).strip()
+        # Remove empty (and) that may remain after stripping all sub-expressions
+        cleaned = re.sub(r'\(\s*and\s*\)', '(and)', cleaned)
+        return cleaned
+
     def generate_domain_pddl(self) -> str:
         """
         Generate PDDL domain file content.
@@ -572,9 +659,16 @@ class PDDLRepresentation:
         If a text cache exists (e.g., from LLM-based refinement), use that.
         Otherwise, generate from structured representation.
         """
-        # If we have a cached text version (e.g., from refinement), use it
+        # If we have a cached text version (e.g., from refinement), use it.
+        # Still strip forall/when if requirements are STRIPS-only.
         if self._domain_text_cache is not None and not self._cache_dirty:
-            return self._domain_text_cache
+            cached = self._domain_text_cache
+            req_values = {r.value for r in self.requirements}
+            if ":conditional-effects" not in req_values and (
+                'forall' in cached or 'when' in cached
+            ):
+                cached = self._strip_forall_when_from_domain_text(cached)
+            return cached
 
         # Otherwise generate from structured representation
         lines = [
@@ -590,8 +684,19 @@ class PDDLRepresentation:
         lines.append(f"  (:requirements {req_str})")
         lines.append("")
 
-        # Types (omitted - using STRIPS without typing)
-        # All objects use the base 'object' type
+        # Types block — emit when typing is required and non-root types exist
+        if PDDLRequirements.TYPING in self.requirements:
+            non_root = {
+                name: ot for name, ot in self.object_types.items()
+                if name != "object"
+            }
+            if non_root:
+                lines.append("  (:types")
+                for type_name, ot in sorted(non_root.items()):
+                    parent = ot.parent or "object"
+                    lines.append(f"    {type_name} - {parent}")
+                lines.append("  )")
+                lines.append("")
 
         # Predicates
         if self.predicates:
@@ -615,7 +720,17 @@ class PDDLRepresentation:
             comment = f"  ; LLM-generated: {action.description}" if action.description else "  ; LLM-generated action"
             all_actions.append((action, comment))
 
+        # Strip forall/when conditional effects when requirements are STRIPS-only.
+        # These are handled at runtime by PostDisplacementHook; the planner must
+        # not see them or it will reject the domain.
+        req_values = {r.value for r in self.requirements}
+        needs_strip = ":conditional-effects" not in req_values
+
         for action, comment in all_actions:
+            if needs_strip and ('forall' in action.effect or 'when' in action.effect):
+                stripped_effect = self._strip_forall_when(action.effect)
+                from dataclasses import replace as _dc_replace
+                action = _dc_replace(action, effect=stripped_effect)
             lines.append(comment)
             lines.append(action.to_pddl())
             lines.append("")
@@ -641,12 +756,23 @@ class PDDLRepresentation:
             ""
         ])
 
-        # Objects
+        # Objects — emit with type annotations when :typing is active
         if self.object_instances:
             lines.append("  (:objects")
-            for obj_name in sorted(self.object_instances.keys()):
-                obj = self.object_instances[obj_name]
-                lines.append(f"    {obj.to_pddl()}")
+            if PDDLRequirements.TYPING in self.requirements:
+                # Group by type: emit "obj1 obj2 - type" lines
+                from collections import defaultdict as _dd
+                by_type: dict = _dd(list)
+                for obj_name in sorted(self.object_instances.keys()):
+                    obj = self.object_instances[obj_name]
+                    by_type[obj.object_type].append(obj_name)
+                for type_name in sorted(by_type.keys()):
+                    names = " ".join(by_type[type_name])
+                    lines.append(f"    {names} - {type_name}")
+            else:
+                for obj_name in sorted(self.object_instances.keys()):
+                    obj = self.object_instances[obj_name]
+                    lines.append(f"    {obj.to_pddl()}")
             lines.append("  )")
             lines.append("")
 
@@ -848,28 +974,55 @@ class PDDLRepresentation:
                 "parameters": [("obj", "object")],
                 "precondition": "(and (graspable ?obj) (empty-hand))",
                 "effect": "(and (holding ?obj) (not (empty-hand)))",
-                "description": "Pick up a graspable object"
+                "description": (
+                    "Grasp ?obj and lift it into a held state. "
+                    "Primitive sequence: move_gripper_to_pose to the grasp contact point on ?obj "
+                    "→ close_gripper → retract_gripper to lift clear. "
+                    "Use pointing_guidance to describe the exact contact region "
+                    "(e.g. 'the body of the cup just below the rim where fingers can close around it'). "
+                    "Choose approach_direction based on object geometry and overhead clearance."
+                ),
             },
             {
                 "name": "place",
                 "parameters": [("obj", "object"), ("loc", "object")],
                 "precondition": "(and (holding ?obj) (supportable ?loc))",
                 "effect": "(and (on ?obj ?loc) (empty-hand) (not (holding ?obj)))",
-                "description": "Place held object on a surface"
+                "description": (
+                    "Set down the currently held ?obj onto surface ?loc. "
+                    "Primitive sequence: move_gripper_to_pose with is_place=true to a stable "
+                    "position above ?loc → open_gripper → retract_gripper. "
+                    "Use pointing_guidance to describe the target landing spot on ?loc "
+                    "(e.g. 'the flat open area on the table 10 cm to the left of the blue cup'). "
+                    "approach_direction should typically be top_down for placing."
+                ),
             },
             {
                 "name": "open",
                 "parameters": [("obj", "object")],
                 "precondition": "(and (openable ?obj) (not (opened ?obj)))",
                 "effect": "(opened ?obj)",
-                "description": "Open an openable object"
+                "description": (
+                    "Operate the opening mechanism of ?obj (door, drawer, lid, valve). "
+                    "Primitive sequence: move_gripper_to_pose to the handle/mechanism → "
+                    "close_gripper → push_pull with has_pivot=true or force_direction as appropriate. "
+                    "Use pointing_guidance to describe the handle or grip point "
+                    "(e.g. 'the drawer handle grip bar at its midpoint'). "
+                    "approach_direction is usually side for handles."
+                ),
             },
             {
                 "name": "close",
                 "parameters": [("obj", "object")],
                 "precondition": "(and (openable ?obj) (opened ?obj))",
                 "effect": "(not (opened ?obj))",
-                "description": "Close an opened object"
+                "description": (
+                    "Close an already-open ?obj (door, drawer, lid). "
+                    "Primitive sequence: move_gripper_to_pose to the closing mechanism → "
+                    "push_pull in the closing direction. "
+                    "Use pointing_guidance to describe the push/pull contact point. "
+                    "approach_direction is usually side for handles."
+                ),
             },
             {
                 "name": "pour",
@@ -971,6 +1124,11 @@ class PDDLRepresentation:
             pddl_text: PDDL domain text
             update_structured: If True, parse and update structured representation
         """
+        req_values = {r.value for r in self.requirements}
+        if ":conditional-effects" not in req_values and (
+            'forall' in pddl_text or 'when' in pddl_text
+        ):
+            pddl_text = self._strip_forall_when_from_domain_text(pddl_text)
         self._domain_text_cache = pddl_text
         self._cache_dirty = False
 

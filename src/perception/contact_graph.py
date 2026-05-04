@@ -116,6 +116,11 @@ class ContactGraph:
         support_tree: Maps each object ID to the list of object IDs it supports.
         stability_scores: Per-object [0,1] stability estimate.
         removal_consequences: Per-object consequence of removing that object.
+        room_available: LLM-assigned flag per surface object — True when the
+            surface appears to have room to receive a displaced object.  Defaults
+            to True for surfaces not mentioned by the LLM (conservative: assume
+            space exists; the executor grounds the actual placement pose at
+            runtime).
     """
 
     edges: List[ContactEdge] = field(default_factory=list)
@@ -123,6 +128,7 @@ class ContactGraph:
     stability_scores: Dict[str, float] = field(default_factory=dict)
     removal_consequences: Dict[str, RemovalConsequence] = field(default_factory=dict)
     object_aabbs: Dict[str, Tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+    room_available: Dict[str, bool] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +987,7 @@ def compute_contact_graph(
             support_tree={oid: [] for oid in obj_ids},
             stability_scores={oid: 1.0 for oid in obj_ids},
             removal_consequences={oid: "stable" for oid in obj_ids},
+            room_available={oid: True for oid in surface_ids},
         )
 
     # -----------------------------------------------------------------------
@@ -1055,7 +1062,9 @@ def compute_contact_graph(
 
     # Pass B: Phase-3 full classification.
     # Optionally replaced by LLM classifications when llm_client is provided.
-    llm_labels: Dict[Tuple[str, str], tuple] = {}  # sorted_key → (rel, directed_a, directed_b)
+    from .llm_contact_classifier import LLMContactResult
+    llm_result: Optional[LLMContactResult] = None
+    llm_labels: Dict[Tuple[str, str], tuple] = {}
     if llm_client is not None and color_image is not None and use_world:
         try:
             from .llm_contact_classifier import (
@@ -1063,15 +1072,18 @@ def compute_contact_graph(
                 classify_contacts_nl,
             )
             _classify_fn = classify_contacts_nl if llm_mode == "nl" else classify_contacts_with_llm
-            llm_labels = _classify_fn(
+            llm_result = _classify_fn(
                 objects=objects,
                 object_aabbs=obj_aabbs,
                 color_img=color_image,
                 obj_masks=obj_masks,
                 llm_client=llm_client,
+                surface_ids=surface_ids,
                 debug_image_out=llm_debug_image_out,
             )
-            logger.info("LLM classification returned %d pair labels", len(llm_labels))
+            llm_labels = llm_result.labels
+            logger.info("LLM classification returned %d pair labels, %d room assessments",
+                        len(llm_labels), len(llm_result.room_available))
         except Exception as exc:
             logger.error("LLM contact classification error — falling back to geometric: %s", exc)
 
@@ -1141,10 +1153,18 @@ def compute_contact_graph(
         " [LLM]" if llm_labels else "",
     )
 
+    # room_available — from LLM when available, else True for all surfaces.
+    room_available: Dict[str, bool] = {}
+    if llm_result is not None:
+        room_available = dict(llm_result.room_available)
+    if not room_available:
+        room_available = {oid: True for oid in surface_ids}
+
     return ContactGraph(
         edges=edges,
         support_tree=support_tree,
         stability_scores=stability_scores,
         removal_consequences=removal_consequences,
         object_aabbs=dict(obj_aabbs),
+        room_available=room_available,
     )

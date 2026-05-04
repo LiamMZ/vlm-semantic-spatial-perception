@@ -2,7 +2,7 @@
 Skill decomposer that turns symbolic actions into validated primitive calls.
 
 The decomposer pulls a world slice from the TaskOrchestrator (registry + snapshots),
-builds a prompt that includes primitive documentation, and asks Gemini to emit
+builds a prompt that includes primitive documentation, and asks an LLM to emit
 JSON aligned to the PrimitiveCall schema. Responses are validated against the
 primitive library before being returned to the caller.
 """
@@ -15,8 +15,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
-from google import genai
-from google.genai import types
+
+try:
+    from google import genai as _genai
+    from google.genai import types as _genai_types
+    _GENAI_AVAILABLE = True
+except ImportError:
+    _genai = None  # type: ignore
+    _genai_types = None  # type: ignore
+    _GENAI_AVAILABLE = False
+
+from src.llm_interface.base import GenerateConfig, ImagePart, LLMClient
 
 from src.primitives.skill_plan_types import (
     PrimitiveCall,
@@ -42,16 +51,16 @@ class SkillDecomposer:
 
     def __init__(
         self,
-        api_key: Optional[str],
-        model_name: str = "gemini-robotics-er-1.5-preview",
+        api_key: Optional[str] = None,
+        model_name: str = "gemini-2.0-flash",
         orchestrator: Optional[TaskOrchestrator] = None,
         primitive_catalog_path: Optional[Path] = None,
         prompts_config_path: Optional[Path] = None,
-        client: Optional[genai.Client] = None,
+        client: Optional[Any] = None,
         llm_config_kwargs: Optional[Dict[str, Any]] = None,
+        llm_client: Optional[LLMClient] = None,
     ):
-        self.model_name = model_name
-        self.client = client or genai.Client(api_key=api_key)
+        self._llm_client = llm_client
         self.orchestrator = orchestrator
 
         root = Path(__file__).resolve().parents[2]
@@ -71,17 +80,29 @@ class SkillDecomposer:
         else:
             self._perception_pool_dir = Path(self._state_dir) / "perception_pool"
 
-        # Models that support thinking (dynamic budget). Others get no ThinkingConfig.
-        _THINKING_MODELS = ("gemini-2.5",)
-        _supports_thinking = any(t in model_name for t in _THINKING_MODELS)
-        default_llm_config: Dict[str, Any] = {
-            "top_p": 0.8,
-            "max_output_tokens": 4096,
-            "response_mime_type": "application/json",
-        }
-        if _supports_thinking:
-            default_llm_config["thinking_config"] = types.ThinkingConfig(thinking_budget=-1)
-        self.llm_config_kwargs = {**default_llm_config, **(llm_config_kwargs or {})}
+        # Legacy Gemini client (used only when llm_client is not provided)
+        if llm_client is None:
+            if not _GENAI_AVAILABLE:
+                raise ImportError(
+                    "google-genai is required when llm_client is not provided. "
+                    "Install it or pass an llm_client."
+                )
+            self.model_name = model_name
+            self.client = client or _genai.Client(api_key=api_key)
+            _THINKING_MODELS = ("gemini-2.5",)
+            _supports_thinking = any(t in model_name for t in _THINKING_MODELS)
+            default_llm_config: Dict[str, Any] = {
+                "top_p": 0.8,
+                "max_output_tokens": 4096,
+                "response_mime_type": "application/json",
+            }
+            if _supports_thinking:
+                default_llm_config["thinking_config"] = _genai_types.ThinkingConfig(thinking_budget=-1)
+            self.llm_config_kwargs = {**default_llm_config, **(llm_config_kwargs or {})}
+        else:
+            self.model_name = ""
+            self.client = None
+            self.llm_config_kwargs = {}
 
     # --------------------------------------------------------------------- #
     # Public API
@@ -279,30 +300,15 @@ class SkillDecomposer:
 
         def _format_obj(obj: Dict[str, Any]) -> str:
             detection = detection_map.get(obj.get("object_id")) or {}
-            affordances = ", ".join(obj.get("affordances", []))
-            i_points = detection.get("interaction_points") or obj.get("interaction_points") or {}
-            ip_entries: List[str] = []
-            for name, point in sorted(i_points.items()):
-                snap = point.get("snapshot_id") or detection.get("snapshot_id") or obj.get("latest_observation")
-                norm_yx = None
-                pos2d = point.get("position_2d")
-                if isinstance(pos2d, (list, tuple)) and len(pos2d) >= 2:
-                    # position_2d from perception is normalized [y, x]
-                    norm_yx = [float(pos2d[0]), float(pos2d[1])]
-                if norm_yx:
-                    label = f"{name}@{snap}: yx_norm=[{norm_yx[0]:.1f}, {norm_yx[1]:.1f}]"
-                else:
-                    label = f"{name}@{snap}"
-                ip_entries.append(label)
-            ip_short = "; ".join(ip_entries)
             stale = obj.get("staleness_seconds")
             stale_note = f"{stale:.1f}s old" if stale is not None else "freshness: unknown"
+            pos3d = obj.get("position_3d")
+            pos_note = f" position_3d={[round(v, 3) for v in pos3d]}" if pos3d else ""
             return (
-                f"- {obj.get('object_type')} ({obj.get('object_id')}): "
-                f"affordances=[{affordances}] "
-                f"interaction_points=[{ip_short}] "
-                f"latest_snapshot={detection.get('snapshot_id') or obj.get('latest_observation')} "
-                f"{stale_note}"
+                f"- {obj.get('object_type')} ({obj.get('object_id')}):"
+                f"{pos_note}"
+                f" latest_snapshot={detection.get('snapshot_id') or obj.get('latest_observation')}"
+                f" {stale_note}"
             )
 
         object_section = "\n".join(_format_obj(o) for o in relevant[:10]) or "none"
@@ -310,9 +316,11 @@ class SkillDecomposer:
         # Use simple sequential replacement instead of str.format() to avoid
         # IndexError / KeyError when substituted values contain curly braces
         # (e.g. JSON dicts in object_section or perception_context).
+        action_description = self._resolve_action_description(action_name)
         substitutions = {
             "{primitive_catalog}": primitive_catalog.strip(),
             "{action_name}": action_name,
+            "{action_description}": action_description,
             "{parameters}": json.dumps(parameters, ensure_ascii=True),
             "{object_section}": object_section,
             "{last_snapshot_id}": str(snapshot_artifacts.snapshot_id),
@@ -327,25 +335,45 @@ class SkillDecomposer:
         self,
         prompt: str,
         temperature: float,
-        media_parts: Optional[List[types.Part]] = None,
+        media_parts: Optional[List[Any]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Send prompt (plus optional media) to Gemini and return raw text."""
+        """Send prompt (plus optional media) to the LLM and return raw text."""
+        if self._llm_client is not None:
+            config = GenerateConfig(
+                temperature=temperature,
+                top_p=0.8,
+                max_output_tokens=4096,
+                response_mime_type="application/json",
+                response_json_schema=response_schema,
+            )
+            contents: List[Any] = []
+            if media_parts:
+                contents.extend(media_parts)
+            contents.append(prompt)
+            response = self._llm_client.generate(
+                contents if len(contents) > 1 else prompt,
+                config=config,
+            )
+            print(f"  [SkillDecomposer] raw LLM response ({len(response.text)} chars): {response.text!r}")
+            return response.text
+
+        # Legacy Gemini path
         config_kwargs: Dict[str, Any] = {**self.llm_config_kwargs, "temperature": temperature}
         if response_schema:
             config_kwargs["response_json_schema"] = response_schema
 
-        config = types.GenerateContentConfig(**config_kwargs)
+        config_gemini = _genai_types.GenerateContentConfig(**config_kwargs)
 
-        contents: List[Any] = []
+        gemini_contents: List[Any] = []
         if media_parts:
-            contents.extend(media_parts)
-        contents.append(prompt)
+            gemini_contents.extend(media_parts)
+        gemini_contents.append(prompt)
 
         response = self.client.models.generate_content(
             model=self.model_name,
-            contents=contents,
-            config=config,
+            contents=gemini_contents,
+            config=config_gemini,
         )
         text = getattr(response, "text", None)
         if text is None:
@@ -455,6 +483,24 @@ class SkillDecomposer:
                         f"[{idx}] object '{ref_id}' has no interaction points in snapshot {detection.get('snapshot_id')}"
                     )
 
+        # pointing_guidance grounding is deferred to PrimitiveExecutor.prepare_plan
+        # so that Molmo runs at execution time against the freshest snapshot.
+        # Set point_label fallback now so the plan is valid even without a detector.
+        objects = world_state.get("registry", {}).get("objects", [])
+        indexed = {obj.get("object_id"): obj for obj in objects}
+        for idx, primitive in enumerate(plan.primitives):
+            if primitive.name != "move_gripper_to_pose":
+                continue
+            guidance = primitive.metadata.get("pointing_guidance")
+            if not guidance:
+                continue
+            ref_id = primitive.references.get("object_id")
+            if ref_id:
+                primitive.parameters.setdefault("point_label", ref_id)
+                plan.diagnostics.warnings.append(
+                    f"[{idx}] pointing_guidance deferred to execution time; point_label={ref_id!r} set as fallback"
+                )
+
         # Bubble object staleness into diagnostics
         for obj in world_state.get("relevant_objects", []):
             staleness = obj.get("staleness_seconds")
@@ -466,6 +512,36 @@ class SkillDecomposer:
     # --------------------------------------------------------------------- #
     # Utilities
     # --------------------------------------------------------------------- #
+    def _resolve_action_description(self, action_name: str) -> str:
+        """
+        Look up the human-readable description for a PDDL action.
+
+        Priority:
+          1. Live domain from orchestrator.task_analysis.action_context()
+             (covers both hardcoded clutter actions and LLM-generated ones)
+          2. Hardcoded _CLUTTER_ACTIONS fallback (when orchestrator is absent)
+          3. Empty string (graceful degradation)
+        """
+        # 1. Live domain
+        if self.orchestrator is not None:
+            task_analysis = getattr(self.orchestrator, "task_analysis", None)
+            if task_analysis is not None:
+                for action in task_analysis.action_context():
+                    if action.get("name") == action_name:
+                        desc = action.get("description", "")
+                        if desc:
+                            return desc
+
+        # 2. Hardcoded clutter actions fallback
+        from src.planning.clutter_module import _CLUTTER_ACTIONS
+        for action in _CLUTTER_ACTIONS:
+            if action.get("name") == action_name:
+                desc = action.get("description", "")
+                if desc:
+                    return desc
+
+        return ""
+
     def _format_perception_context(
         self,
         world_state: Dict[str, Any],
@@ -504,11 +580,13 @@ class SkillDecomposer:
             f"robot_state: provider={robot_provider}, stamp={robot_stamp}"
         )
 
-    def _build_media_parts(self, snapshot_artifacts: SnapshotArtifacts) -> List[types.Part]:
+    def _build_media_parts(self, snapshot_artifacts: SnapshotArtifacts) -> List[Any]:
         if not snapshot_artifacts.color_bytes:
             return []
+        if self._llm_client is not None:
+            return [ImagePart(data=snapshot_artifacts.color_bytes, mime_type="image/png")]
         return [
-            types.Part.from_bytes(
+            _genai_types.Part.from_bytes(
                 data=snapshot_artifacts.color_bytes,
                 mime_type="image/png",
             )
