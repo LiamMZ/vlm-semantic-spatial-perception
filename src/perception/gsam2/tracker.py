@@ -45,8 +45,13 @@ class GroundingDinoPredictor:
         )
 
         def _clean(label):
-            words = label.split()
-            return " ".join(w for i, w in enumerate(words) if i == 0 or w != words[i - 1])
+            seen: set = set()
+            result = []
+            for w in label.split():
+                if w not in seen:
+                    seen.add(w)
+                    result.append(w)
+            return " ".join(result)
 
         labels = [_clean(l) for l in results[0]["labels"]]
         return results[0]["boxes"], labels
@@ -88,10 +93,14 @@ class IncrementalObjectTracker:
         device="cuda",
         prompt_text="car.",
         detection_interval=20,
+        score_threshold=0.5,
+        overlap_iou_threshold=0.5,
     ):
         self.device = device
         self.detection_interval = detection_interval
         self.prompt_text = prompt_text
+        self.score_threshold = score_threshold
+        self.overlap_iou_threshold = overlap_iou_threshold
 
         self.grounding_predictor = GroundingDinoPredictor(model_id=grounding_model_id, device=device)
         self.sam2_segmentor = SAM2ImageSegmentor(
@@ -220,14 +229,50 @@ class IncrementalObjectTracker:
             self.sam2_segmentor.set_image(image_np)
             masks, scores, logits = self.sam2_segmentor.predict_masks_from_boxes(boxes)
 
+            # scores shape: (N,) — one SAM2 confidence score per detection
+            scores_np = scores[:, 0] if scores.ndim == 2 else scores
+
+            # 1. Score filter — drop detections below threshold
+            keep = [i for i, s in enumerate(scores_np) if float(s) >= self.score_threshold]
+
+            # 2. Overlap filter — when two masks overlap significantly keep the
+            #    higher-scoring one (NMS-style over mask IoU)
+            filtered: list[int] = []
+            for i in keep:
+                mask_i = masks[i].astype(bool)
+                dominated = False
+                for j in filtered:
+                    mask_j = masks[j].astype(bool)
+                    inter = (mask_i & mask_j).sum()
+                    union = (mask_i | mask_j).sum()
+                    iou = inter / union if union > 0 else 0.0
+                    if iou >= self.overlap_iou_threshold:
+                        # Keep whichever has the higher score
+                        if float(scores_np[i]) > float(scores_np[j]):
+                            filtered.remove(j)
+                        else:
+                            dominated = True
+                        break
+                if not dominated:
+                    filtered.append(i)
+
+            kept_masks  = masks[filtered]
+            kept_scores = scores_np[filtered]
+            kept_boxes  = boxes[filtered] if hasattr(boxes, '__getitem__') else torch.stack([boxes[i] for i in filtered])
+            kept_labels = [labels[i] for i in filtered]
+
             mask_dict = MaskDictionaryModel(
                 promote_type="mask", mask_name=f"mask_{self.total_frames:05d}.npy"
             )
+            mask_list = torch.tensor(kept_masks).to(self.device)
             mask_dict.add_new_frame_annotation(
-                mask_list=torch.tensor(masks).to(self.device),
-                box_list=torch.tensor(boxes),
-                label_list=labels,
+                mask_list=mask_list,
+                box_list=torch.tensor(kept_boxes) if not isinstance(kept_boxes, torch.Tensor) else kept_boxes,
+                label_list=kept_labels,
             )
+            # Store SAM2 scores into logit field for downstream use
+            for idx, obj_info in enumerate(mask_dict.labels.values()):
+                obj_info.logit = float(kept_scores[idx])
 
             self.objects_count = mask_dict.update_masks(
                 tracking_annotation_dict=self.last_mask_dict,

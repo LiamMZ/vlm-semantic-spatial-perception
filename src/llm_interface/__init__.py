@@ -22,6 +22,7 @@ from src.llm_interface.base import (
     ContentPart,
 )
 from src.llm_interface.google_genai import GoogleGenAIClient
+from src.llm_interface.openai_client import OpenAIClient
 from src.llm_interface.qwen3vl import Qwen3VLClient
 
 __all__ = [
@@ -31,5 +32,6 @@ __all__ = [
     "GenerateConfig",
     "ContentPart",
     "GoogleGenAIClient",
+    "OpenAIClient",
     "Qwen3VLClient",
 ]

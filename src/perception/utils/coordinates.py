@@ -118,7 +118,7 @@ def compute_3d_position(
         pixel_y, pixel_x = normalized_to_pixel(position_2d, (height, width))
 
         # Look up depth at this pixel
-        depth = depth_frame[pixel_y, pixel_x]
+        depth = float(np.ravel(depth_frame[pixel_y, pixel_x])[0])
 
         if depth <= 0 or np.isnan(depth):
             print(f"      Invalid depth at pixel ({pixel_y}, {pixel_x}): {depth}")

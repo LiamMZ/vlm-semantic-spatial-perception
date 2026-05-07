@@ -244,8 +244,9 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
     "move_gripper_to_pose": PrimitiveSchema(
         name="move_gripper_to_pose",
         optional_params=("target_pixel_yx", "target_position", "pivot_point",
-                         "preset_orientation", "is_place",
-                         "point_label", "is_top_down_grasp", "is_side_grasp"),
+                         "preset_orientation", "target_orientation", "is_place",
+                         "point_label", "is_top_down_grasp", "is_side_grasp",
+                         "speed_factor", "execute", "depth_offset_m"),
         allowed_frames=("base", "camera"),
         description=(
             "Move the gripper end-effector to a target pose. "
@@ -253,6 +254,8 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
             "target_position: [x, y, z] in base frame (set by executor after back-projection). "
             "preset_orientation: 'top_down' or 'side'. "
             "is_place: True when placing (adds z clearance). "
+            "speed_factor: execution speed multiplier (0.1–2.0). "
+            "execute: if False, plan but do not execute. "
             "Distinguished from navigate_to_pose (base/mobile platform motion)."
         ),
     ),
@@ -296,7 +299,7 @@ PRIMITIVE_LIBRARY: Dict[str, PrimitiveSchema] = {
     ),
     "retract_gripper": PrimitiveSchema(
         name="retract_gripper",
-        optional_params=("distance", "speed_factor"),
+        optional_params=("distance", "speed_factor", "execute"),
         allowed_frames=("base", "camera"),
         description="Return the arm to its home/neutral configuration.",
         param_validators={

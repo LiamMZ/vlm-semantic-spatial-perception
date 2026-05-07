@@ -68,9 +68,11 @@ class Action:
     is_llm_generated: bool = False
 
     def to_pddl(self) -> str:
-        """Convert to PDDL action definition (STRIPS format)."""
-        # Use STRIPS format without type annotations
-        params = " ".join([f"?{name}" for name, typ in self.parameters])
+        """Convert to PDDL action definition."""
+        params = " ".join([
+            f"?{name} - {typ}" if typ else f"?{name}"
+            for name, typ in self.parameters
+        ])
 
         return f"""  (:action {self.name}
     :parameters ({params})

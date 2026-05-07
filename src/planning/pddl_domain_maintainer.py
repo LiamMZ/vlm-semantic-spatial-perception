@@ -143,6 +143,11 @@ class PDDLDomainMaintainer:
         self.global_predicates: Set[str] = set()
         self.domain_version = 0
         self.last_update_observations = 0
+        # Sensing actions (check-*) and domain-module actions (displace, push-aside)
+        # are kept separately so _rebuild_pddl_from_analysis can restore them after
+        # repair_representation replaces action_schemas wholesale.
+        self._sensing_actions: List[Dict[str, Any]] = []
+        self._module_actions: List[Dict[str, Any]] = []
 
     async def build_representation(
         self,
@@ -306,8 +311,17 @@ class PDDLDomainMaintainer:
         )
 
         if layer == "actions":
+            repaired_actions = self._normalize_actions(payload.get("actions"))
+            # Merge any new check-* actions from the LLM repair into _sensing_actions.
+            existing_sensing_names = {a.get("name", "") for a in self._sensing_actions}
+            for a in repaired_actions:
+                if str(a.get("name", "")).startswith("check-") and a.get("name") not in existing_sensing_names:
+                    self._sensing_actions.append(a)
+                    existing_sensing_names.add(a.get("name", ""))
+            # Remove check-* from the main list — they live in _sensing_actions only
+            repaired_actions = [a for a in repaired_actions if not str(a.get("name", "")).startswith("check-")]
             self.task_analysis.action_schemas = self._normalize_action_schema_library(ActionSchemaLibrary(
-                actions=self._normalize_actions(payload.get("actions")),
+                actions=repaired_actions,
                 planning_notes=self._as_string_list(payload.get("repair_notes")),
             ))
         elif layer == "predicates":
@@ -326,6 +340,7 @@ class PDDLDomainMaintainer:
                 observed_objects=self.observed_objects,
                 observed_relationships=self.observed_relationships,
             )
+            self._absorb_sensing_actions_from_schemas()
             self.task_analysis.action_schemas = self._normalize_action_schema_library(
                 self.task_analysis.action_schemas
             )
@@ -353,6 +368,7 @@ class PDDLDomainMaintainer:
                 observed_objects=self.observed_objects,
                 observed_relationships=self.observed_relationships,
             )
+            self._absorb_sensing_actions_from_schemas()
             self.task_analysis.action_schemas = self._normalize_action_schema_library(
                 self.task_analysis.action_schemas
             )
@@ -444,6 +460,21 @@ class PDDLDomainMaintainer:
         self.task_analysis = artifact.to_task_analysis()
         self.goal_object_types = set(self.task_analysis.goal_objects)
         self._l5_artifact = artifact.l5  # stash for use in generate_pddl_files
+        # Stash sensing actions separately so _rebuild_pddl_from_analysis can
+        # restore them after repair_representation replaces action_schemas.
+        # Exclude contingency-only actions (check-improved-clearance) — their base
+        # predicates may not be in the domain vocabulary, which causes FD parse errors.
+        _SENSING_BLOCKLIST = frozenset({"check-improved-clearance"})
+        self._sensing_actions = [
+            a for a in artifact.l3.sensing_actions
+            if a.get("name", "") not in _SENSING_BLOCKLIST
+        ]
+        # Stash domain-module actions (displace, push-aside, etc.) so they survive
+        # repair_representation calls that replace action_schemas wholesale.
+        self._module_actions = [
+            a for a in artifact.l3.actions
+            if a.get("domain_module")
+        ]
         await self._initialize_domain_from_analysis()
         self.domain_version += 1
         return self.task_analysis
@@ -619,6 +650,12 @@ class PDDLDomainMaintainer:
         _ = inferred_arities
         return {"missing_predicates": missing_predicates, "invalid_actions": invalid_actions}
 
+    # Synonyms that should map to `holding` when `holding` is in the domain.
+    _HOLDING_SYNONYMS: frozenset = frozenset({
+        "in-gripper", "grasped", "gripped", "in-hand", "grabbed",
+        "in_gripper", "grasped_by", "held",
+    })
+
     async def set_goal_from_task_analysis(self) -> None:
         """Populate the PDDL goal from the staged analysis."""
 
@@ -635,8 +672,21 @@ class PDDLDomainMaintainer:
                 continue
             predicate, arguments, negated = parsed
             if predicate not in self.pddl.predicates:
-                await self.pddl.add_goal_formula_async(formula)
-                continue
+                # Remap grasp-goal synonyms to a canonical holding predicate.
+                all_synonyms = self._HOLDING_SYNONYMS | {"holding"}
+                if predicate in all_synonyms:
+                    canonical = next(
+                        (s for s in ("holding", "in-gripper") if s in self.pddl.predicates),
+                        None,
+                    )
+                    if canonical:
+                        predicate = canonical
+                    else:
+                        await self.pddl.add_goal_formula_async(formula)
+                        continue
+                else:
+                    await self.pddl.add_goal_formula_async(formula)
+                    continue
             await self.pddl.add_goal_literal_async(predicate, arguments, negated=negated)
 
     async def refine_domain_from_error(
@@ -793,6 +843,8 @@ class PDDLDomainMaintainer:
             if pred_name not in self.pddl.predicates:
                 await self.pddl.add_predicate_async(pred_name, [])
 
+        # Track names added from task_analysis to avoid duplicating sensing actions
+        _registered_action_names: Set[str] = set()
         for action in self.task_analysis.action_schemas.actions:
             name = sanitize_pddl_name(str(action.get("name", "")))
             if not name:
@@ -800,6 +852,46 @@ class PDDLDomainMaintainer:
             parameters = self._normalize_action_parameters(action.get("parameters") or [])
             precondition = sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
             precondition = self._strip_negative_preconditions(precondition)
+            self.pddl.add_llm_generated_action(
+                name=name,
+                parameters=parameters,
+                precondition=precondition,
+                effect=sanitize_pddl_formula(str(action.get("effect", "(and)")) or "(and)"),
+                description=str(action.get("description", "")).strip() or None,
+            )
+            _registered_action_names.add(name)
+
+        # Re-register sensing actions (check-*) and domain-module actions
+        # (displace, push-aside, etc.) that were stashed separately.
+        # repair_representation replaces action_schemas without including them,
+        # so they must be restored explicitly to keep the domain solvable.
+        # Module actions override any LLM-generated version with the same name.
+        for action in self._module_actions:
+            name = sanitize_pddl_name(str(action.get("name", "")))
+            if not name:
+                continue
+            if name in _registered_action_names:
+                # Remove the LLM version — canonical definition takes precedence
+                self.pddl.llm_generated_actions.pop(name, None)
+                self.pddl.predefined_actions.pop(name, None)
+                _registered_action_names.discard(name)
+            parameters = self._normalize_action_parameters(action.get("parameters") or [])
+            precondition = sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
+            self.pddl.add_llm_generated_action(
+                name=name,
+                parameters=parameters,
+                precondition=precondition,
+                effect=sanitize_pddl_formula(str(action.get("effect", "(and)")) or "(and)"),
+                description=str(action.get("description", "")).strip() or None,
+            )
+            _registered_action_names.add(name)
+
+        for action in self._sensing_actions:
+            name = sanitize_pddl_name(str(action.get("name", "")))
+            if not name or name in _registered_action_names:
+                continue
+            parameters = self._normalize_action_parameters(action.get("parameters") or [])
+            precondition = sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
             self.pddl.add_llm_generated_action(
                 name=name,
                 parameters=parameters,
@@ -821,6 +913,11 @@ class PDDLDomainMaintainer:
             grounded_predicates = (
                 self.task_analysis.grounding_summary.grounded_predicates or self.observed_predicate_strings
             )
+            # Enforce uniqueness for predicates where each object can have at most
+            # one support (e.g. "on", "object-at").  Duplicate support facts make
+            # the SAS+ init state inconsistent and cause FD to produce 0 operators.
+            _UNIQUE_ARG0: frozenset = frozenset({"on", "object-at", "at"})
+            _unique_arg0_seen: Dict[str, Set[str]] = {}  # pred_name -> {arg0_values}
             for predicate_str in grounded_predicates:
                 parsed = self._parse_predicate_instance(predicate_str)
                 if parsed is None:
@@ -830,7 +927,19 @@ class PDDLDomainMaintainer:
                     continue
                 if any(arg not in self.pddl.object_instances for arg in arguments):
                     continue
+                if not negated and predicate in _UNIQUE_ARG0 and len(arguments) >= 2:
+                    seen = _unique_arg0_seen.setdefault(predicate, set())
+                    if arguments[0] in seen:
+                        continue  # skip duplicate support fact for this object
+                    seen.add(arguments[0])
                 await self.pddl.add_initial_literal_async(predicate, arguments, negated=negated)
+
+        # Ensure every predicate referenced by any action (including sensing actions
+        # and DKB-injected ones added after the initial predicate loop) is in the
+        # domain vocabulary.  Missing predicates cause FD translate errors.
+        parity = await self.validate_and_fix_action_predicates()
+        if parity["missing_predicates"]:
+            print(f"  [rebuild] Auto-added {len(parity['missing_predicates'])} missing predicates: {parity['missing_predicates']}")
 
         await self.set_goal_from_task_analysis()
 
@@ -1237,26 +1346,69 @@ class PDDLDomainMaintainer:
             return "(and)"
         return text
 
+    # Predicate names that are clearly LLM hallucinations: single letters or
+    # common placeholder tokens that have no meaning in a robot-manipulation domain.
+    _BOGUS_PRED_RE = re.compile(r"\([a-zA-Z]\s+\?")  # e.g. (x ?obj) or (y ?a ?b)
+
+    def _scrub_bogus_predicates(self, formula: str) -> str:
+        """Remove single-letter or obviously-fake predicate atoms from a formula."""
+        if not formula or not self._BOGUS_PRED_RE.search(formula):
+            return formula
+        cleaned = re.sub(r"\([a-zA-Z]\s+\?[^)]*\)\s*", "", formula)
+        # Also remove bare zero-arg single-letter predicates like (x)
+        cleaned = re.sub(r"\([a-zA-Z]\)\s*", "", cleaned)
+        return cleaned.strip() or "(and)"
+
+    def _absorb_sensing_actions_from_schemas(self) -> None:
+        """Move any check-* actions in task_analysis.action_schemas into _sensing_actions.
+
+        LLM calls sometimes return check-* actions inside the main actions list.
+        Keeping them in _sensing_actions ensures they survive subsequent
+        repair_representation calls that replace action_schemas wholesale.
+        """
+        _SENSING_BLOCKLIST = frozenset({"check-improved-clearance"})
+        if self.task_analysis is None:
+            return
+        existing_names = {a.get("name", "") for a in self._sensing_actions}
+        primary: List[Dict[str, Any]] = []
+        for a in self.task_analysis.action_schemas.actions:
+            name = str(a.get("name", ""))
+            if name.startswith("check-"):
+                if name not in existing_names and name not in _SENSING_BLOCKLIST:
+                    self._sensing_actions.append(a)
+                    existing_names.add(name)
+            else:
+                primary.append(a)
+        self.task_analysis.action_schemas = ActionSchemaLibrary(
+            actions=primary,
+            planning_notes=list(self.task_analysis.action_schemas.planning_notes),
+        )
+
     def _normalize_action_schema_library(
         self,
         library: ActionSchemaLibrary,
     ) -> ActionSchemaLibrary:
         """Normalize actions into a solver-safe STRIPS subset."""
 
+        normalized = []
+        for action in library.actions:
+            if not isinstance(action, dict):
+                continue
+            pre = self._strip_negative_preconditions(
+                sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
+            )
+            eff = sanitize_pddl_formula(str(action.get("effect", "(and)")) or "(and)")
+            pre = self._scrub_bogus_predicates(pre)
+            eff = self._scrub_bogus_predicates(eff)
+            normalized.append({
+                "name": action.get("name", ""),
+                "parameters": self._as_string_list(action.get("parameters")),
+                "precondition": pre,
+                "effect": eff,
+                "description": str(action.get("description", "")).strip(),
+            })
         return ActionSchemaLibrary(
-            actions=[
-                {
-                    "name": action.get("name", ""),
-                    "parameters": self._as_string_list(action.get("parameters")),
-                    "precondition": self._strip_negative_preconditions(
-                        sanitize_pddl_formula(str(action.get("precondition", "(and)")) or "(and)")
-                    ),
-                    "effect": sanitize_pddl_formula(str(action.get("effect", "(and)")) or "(and)"),
-                    "description": str(action.get("description", "")).strip(),
-                }
-                for action in library.actions
-                if isinstance(action, dict)
-            ],
+            actions=normalized,
             planning_notes=list(library.planning_notes),
         )
 

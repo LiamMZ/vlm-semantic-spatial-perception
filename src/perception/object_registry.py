@@ -7,10 +7,15 @@ with thread safety for concurrent access.
 
 import time
 import threading
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .clearance import ClearanceProfile
+    from .contact_graph import ContactGraph
+    from .occlusion import OcclusionMap
 
 
 @dataclass
@@ -20,6 +25,8 @@ class InteractionPoint:
     position_2d: List[int]  # [y, x] in 0-1000 normalized scale
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters (if depth available)
     alternative_points: List[Dict[str, any]] = field(default_factory=list)
+    approach_orientation: Optional[str] = None  # "top_down", "side", or a 3-element list encoded as str
+    approach_vector: Optional[np.ndarray] = None  # raw unit vector from best_approach_dirs()[0] if available
 
 
 @dataclass
@@ -45,6 +52,7 @@ class DetectedObject:
     position_3d: Optional[np.ndarray] = None  # [x, y, z] in meters
     bounding_box_2d: Optional[List[int]] = None  # [y1, x1, y2, x2]
     timestamp: float = field(default_factory=time.time)
+    clearance_profile: Optional["ClearanceProfile"] = None
 
 
 class DetectedObjectRegistry:
@@ -66,6 +74,8 @@ class DetectedObjectRegistry:
         self._objects: Dict[str, DetectedObject] = {}
         self._predicates: Set[str] = set()  # Global predicate set for all objects
         self._lock = threading.RLock()  # Reentrant lock for nested access
+        self.contact_graph: Optional["ContactGraph"] = None  # updated each frame
+        self.occlusion_map: Optional["OcclusionMap"] = None  # updated each frame
 
     def add_object(self, obj: DetectedObject) -> None:
         """

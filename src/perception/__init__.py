@@ -16,7 +16,17 @@ from .object_registry import (
     InteractionPoint,
     DetectedObjectRegistry
 )
-from .gsam2_object_tracker import GSAM2ObjectTracker, GSAM2ContinuousObjectTracker
+try:
+    from .gsam2_object_tracker import GSAM2ObjectTracker, GSAM2ContinuousObjectTracker
+    from .molmo_point_detector import MolmoPointDetector
+    MolmoInteractionPointDetector = MolmoPointDetector  # backward-compat alias
+except ImportError:
+    pass  # optional heavy deps (supervision, torch, SAM2, transformers) not installed
+
+try:
+    from .clearance import GripperGeometry, ClearanceProfile
+except ImportError:
+    pass
 
 __all__ = [
     # Object tracking system (focused on detection & affordances)
@@ -30,4 +40,10 @@ __all__ = [
     # GSAM2-based tracking (RAM+ + GroundingDINO + SAM2)
     "GSAM2ObjectTracker",
     "GSAM2ContinuousObjectTracker",
+    # Molmo-based interaction point detection
+    "MolmoPointDetector",
+    "MolmoInteractionPointDetector",  # backward-compat alias
+    # Clearance / gripper geometry
+    "GripperGeometry",
+    "ClearanceProfile",
 ]
