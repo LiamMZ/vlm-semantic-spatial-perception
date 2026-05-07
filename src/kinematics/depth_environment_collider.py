@@ -52,8 +52,21 @@ logger = logging.getLogger(__name__)
 _DEPTH_MIN_M = 0.15
 _DEPTH_MAX_M = 2.0
 _DEPTH_STRIDE = 4
-_BPA_RADIUS_FACTOR = 3.0
+_BPA_RADIUS_FACTOR = 2.0       # reduced from 3.0 — tighter ball prevents gap-spanning fins
+_BPA_RADIUS_MAX_M = 0.04       # hard cap: ball never spans more than 4 cm
+_LONG_EDGE_FACTOR = 4.0        # triangles whose longest edge > factor × mean_spacing are artifacts
+_MIN_COMPONENT_TRIS = 20       # connected components smaller than this are noise islands
+_OUTLIER_NB_POINTS = 16        # statistical outlier removal neighbour count
+_OUTLIER_STD_RATIO = 1.5       # points beyond mean + ratio×std are removed
 _COLLISION_MARGIN_M = 0.005
+# Pixels within this many pixels of any object mask edge are excluded from the
+# background mesh.  Depth sensors bleed values behind objects at silhouette
+# edges; eroding the exclusion zone removes those leaked pixels before BPA.
+_MASK_ERODE_PX = 6
+# Background points whose depth exceeds the minimum object depth at the same
+# pixel (scaled by this factor) are occluded and removed.  1.0 = exact, values
+# slightly above 1.0 give a small tolerance for sensor noise.
+_OCCLUSION_DEPTH_FACTOR = 1.05
 
 # Label used for the body covering all non-object depth pixels
 BACKGROUND_ID = "__background__"
@@ -270,13 +283,14 @@ class DepthEnvironmentCollider:
         h, w = depth_m.shape
         results: Dict[str, bool] = {}
 
-        # Union of all object masks — pixels NOT in any mask become background
+        # Union of all object masks — used both for background exclusion and
+        # per-pixel minimum-depth computation for occlusion culling.
         union_mask = np.zeros((h, w), dtype=bool)
         for mask in masks.values():
             if mask.shape == (h, w):
                 union_mask |= mask.astype(bool)
 
-        # Build one body per detected object
+        # Build one body per detected object.
         for obj_id, mask in masks.items():
             if mask.shape != (h, w):
                 logger.warning("DepthEnvironmentCollider: mask shape mismatch for %s", obj_id)
@@ -286,8 +300,51 @@ class DepthEnvironmentCollider:
                                                pixel_mask=mask.astype(bool))
             results[obj_id] = self._build_body(pts, obj_id)
 
-        # Build background body from all non-object pixels
-        background_mask = ~union_mask
+        # Build background body with two levels of occlusion filtering so the
+        # mesh doesn't extend behind objects that are visible to the camera.
+        #
+        # 1. Erode the union mask before inverting: pixels within _MASK_ERODE_PX
+        #    of any object silhouette are excluded.  Depth sensors produce
+        #    bleed/interpolation artefacts at object edges; this removes them.
+        #
+        # 2. Ray-occlusion cull: for each background pixel, if its depth is
+        #    greater than _OCCLUSION_DEPTH_FACTOR × the minimum object depth at
+        #    that same pixel (or nearby), the point is behind an object and is
+        #    removed.  This catches pixels that are geometrically occluded but
+        #    not covered by the segmentation mask (e.g. shadow/bleed regions).
+        try:
+            from scipy.ndimage import binary_dilation, minimum_filter
+            erode_struct = np.ones(
+                (2 * _MASK_ERODE_PX + 1, 2 * _MASK_ERODE_PX + 1), dtype=bool
+            )
+            # Dilate the union mask so a wider border is excluded from background.
+            exclusion_mask = binary_dilation(union_mask, structure=erode_struct)
+
+            # Minimum object depth per pixel over a local neighbourhood — gives
+            # a conservative foreground depth reference for occlusion testing.
+            obj_depth = np.where(union_mask, depth_m, np.inf).astype(np.float32)
+            min_obj_depth = minimum_filter(obj_depth, size=2 * _MASK_ERODE_PX + 1)
+
+            background_mask = ~exclusion_mask
+            # Occluded pixel: background depth > factor × nearest object depth.
+            occluded = (
+                background_mask
+                & np.isfinite(min_obj_depth)
+                & (depth_m > _OCCLUSION_DEPTH_FACTOR * min_obj_depth)
+            )
+            background_mask &= ~occluded
+            n_culled = int(occluded.sum())
+            if n_culled:
+                logger.debug(
+                    "DepthEnvironmentCollider: background occlusion cull removed %d px", n_culled
+                )
+        except ImportError:
+            # scipy unavailable — fall back to simple mask inversion.
+            logger.warning(
+                "DepthEnvironmentCollider: scipy not available, skipping occlusion cull"
+            )
+            background_mask = ~union_mask
+
         pts_bg = self._depth_to_world_points(depth_m, intrinsics, T_base_cam,
                                               pixel_mask=background_mask)
         results[BACKGROUND_ID] = self._build_body(pts_bg, BACKGROUND_ID)
@@ -359,6 +416,16 @@ class DepthEnvironmentCollider:
     def _points_to_mesh(self, pts: np.ndarray) -> Optional[object]:
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts)
+
+        # Remove statistical outliers before reconstruction — eliminates isolated
+        # noise points at depth edges that BPA would otherwise bridge into phantom triangles.
+        pcd, _ = pcd.remove_statistical_outlier(
+            nb_neighbors=_OUTLIER_NB_POINTS,
+            std_ratio=_OUTLIER_STD_RATIO,
+        )
+        if len(pcd.points) < 10:
+            return None
+
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
         )
@@ -370,7 +437,8 @@ class DepthEnvironmentCollider:
         distances = pcd.compute_nearest_neighbor_distance()
         if len(distances) == 0:
             return None
-        radius = _BPA_RADIUS_FACTOR * float(np.mean(distances))
+        mean_spacing = float(np.mean(distances))
+        radius = min(_BPA_RADIUS_FACTOR * mean_spacing, _BPA_RADIUS_MAX_M)
 
         mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
             pcd,
@@ -381,6 +449,36 @@ class DepthEnvironmentCollider:
 
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_vertices()
+
+        # Remove triangles whose longest edge exceeds the artifact threshold.
+        # These are BPA fins that span depth discontinuities or large point gaps.
+        verts = np.asarray(mesh.vertices)
+        tris = np.asarray(mesh.triangles)
+        max_edge = _LONG_EDGE_FACTOR * mean_spacing
+        v0, v1, v2 = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+        longest = np.maximum(
+            np.linalg.norm(v1 - v0, axis=1),
+            np.maximum(np.linalg.norm(v2 - v1, axis=1), np.linalg.norm(v0 - v2, axis=1)),
+        )
+        remove = np.where(longest > max_edge)[0]
+        mesh.remove_triangles_by_index(remove.tolist())
+        mesh.remove_unreferenced_vertices()
+        if len(mesh.triangles) == 0:
+            return None
+
+        # Remove small disconnected components — noise islands left after edge filtering.
+        triangle_clusters, cluster_n_tris, _ = mesh.cluster_connected_triangles()
+        triangle_clusters = np.asarray(triangle_clusters)
+        cluster_n_tris = np.asarray(cluster_n_tris)
+        keep_clusters = set(int(i) for i, n in enumerate(cluster_n_tris) if n >= _MIN_COMPONENT_TRIS)
+        if not keep_clusters:
+            return None
+        remove_tris = np.where(~np.isin(triangle_clusters, list(keep_clusters)))[0]
+        mesh.remove_triangles_by_index(remove_tris.tolist())
+        mesh.remove_unreferenced_vertices()
+        if len(mesh.triangles) == 0:
+            return None
+
         return mesh
 
     def _mesh_to_pybullet(self, mesh) -> Optional[int]:

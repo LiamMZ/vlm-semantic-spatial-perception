@@ -60,6 +60,7 @@ dependencies = [
     "pynput>=1.7.6",
     "qpsolvers[quadprog]>=4.3.1",
     "ompl>=2.0.0",
+    "pytracik>=0.0.3",
 ]
 torch = [
   { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },

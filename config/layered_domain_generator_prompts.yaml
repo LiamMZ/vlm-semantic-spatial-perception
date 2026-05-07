@@ -154,7 +154,7 @@ l2_predicate_vocab_prompt: |
   <<VALIDATION_ERRORS>>
 
   Respond with valid JSON only — no prose, no markdown fences.
-  Output exactly three keys. Do NOT include `checked-*` in predicate_signatures:
+  Output exactly four keys. Do NOT include `checked-*` in predicate_signatures:
   {
     "predicate_signatures": [
       "(on ?obj - object ?surface - object)",
@@ -170,6 +170,13 @@ l2_predicate_vocab_prompt: |
       "hand-empty": "robot_state",
       "clear": "object_state",
       "object-graspable": "sensed"
+    },
+    "descriptions": {
+      "on": "True when ?obj is physically resting on the surface of ?surface.",
+      "holding": "True when the robot gripper is actively holding ?obj.",
+      "hand-empty": "True when the gripper is open and not holding any object.",
+      "clear": "True when no other object is resting on top of ?obj.",
+      "object-graspable": "True when ?obj can be grasped without collision — verified by a check-object-graspable sensing action."
     }
   }
 
@@ -302,13 +309,15 @@ l3_action_schema_prompt: |
         "name": "pick",
         "parameters": ["?obj - object", "?surface - object"],
         "precondition": "(and (hand-empty) (on ?obj ?surface) (object-graspable ?obj))",
-        "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)) (clear ?surface) (spatial-change-occurred))"
+        "effect": "(and (holding ?obj) (not (hand-empty)) (not (on ?obj ?surface)) (clear ?surface) (spatial-change-occurred))",
+        "description": "Grasp ?obj from ?surface and lift it into a held state. The gripper must be empty and ?obj must be graspable. Approach from above, close the gripper around the object body, then retract to lift clear of ?surface."
       },
       {
         "name": "place",
         "parameters": ["?obj - object", "?surface - object"],
         "precondition": "(and (holding ?obj) (clear ?surface))",
-        "effect": "(and (on ?obj ?surface) (hand-empty) (not (holding ?obj)) (not (clear ?surface)))"
+        "effect": "(and (on ?obj ?surface) (hand-empty) (not (holding ?obj)) (not (clear ?surface)))",
+        "description": "Lower the held ?obj onto ?surface and release the gripper. ?surface must be clear. Descend to the place contact point on ?surface, open the gripper, then retract."
       }
     ],
     "sensing_actions": [
@@ -316,7 +325,8 @@ l3_action_schema_prompt: |
         "name": "check-object-graspable",
         "parameters": ["?obj - object"],
         "precondition": "(and)",
-        "effect": "(checked-object-graspable ?obj)"
+        "effect": "(checked-object-graspable ?obj)",
+        "description": "Verify that ?obj is accessible and graspable from the current robot pose. Queries perception to check for obstructions around the grasp region."
       }
     ]
   }

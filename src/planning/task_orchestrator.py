@@ -1463,6 +1463,39 @@ class TaskOrchestrator:
 
         self.logger.info("%s", "=" * 70)
 
+        # Save L2 predicates and L3 actions as JSON alongside the PDDL files.
+        if self._last_layered_artifact is not None:
+            artifact = self._last_layered_artifact
+            output_dir_path = Path(paths["domain_path"]).parent
+
+            # predicates.json — L2 vocabulary with type classifications and descriptions
+            l2 = artifact.l2
+            predicates_payload = []
+            for sig in l2.predicate_signatures:
+                name = sig.strip("() ").split()[0] if sig.strip("() ") else sig
+                predicates_payload.append({
+                    "signature": sig,
+                    "type": l2.type_classifications.get(name, ""),
+                    "description": l2.descriptions.get(name, ""),
+                })
+            predicates_path = output_dir_path / "predicates.json"
+            with open(predicates_path, "w") as f:
+                json.dump({"predicates": predicates_payload}, f, indent=2)
+            self.logger.info("  • Predicates JSON: %s", predicates_path)
+
+            # actions.json — all L3 actions (primary + sensing) with descriptions
+            l3 = artifact.l3
+            actions_path = output_dir_path / "actions.json"
+            with open(actions_path, "w") as f:
+                json.dump({
+                    "actions": l3.actions,
+                    "sensing_actions": l3.sensing_actions,
+                }, f, indent=2)
+            self.logger.info("  • Actions JSON: %s", actions_path)
+
+            paths["predicates_path"] = str(predicates_path)
+            paths["actions_path"] = str(actions_path)
+
         return paths
 
     async def solve_and_plan(

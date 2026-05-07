@@ -48,6 +48,7 @@ from src.perception.clearance import GripperGeometry, compute_clearance_profile
 from src.perception.contact_graph import compute_contact_graph
 from src.perception.occlusion import CameraPose, ObservationRecord, compute_occlusion_map
 from src.perception.object_registry import DetectedObject, DetectedObjectRegistry
+from src.planning.clutter_module import ClutterGrounder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +70,58 @@ def _section(title: str) -> None:
 def _ok(msg: str)   -> None: print(f"  ✓  {msg}"); log.info("PASS: %s", msg)
 def _info(msg: str) -> None: print(f"  •  {msg}"); log.info("INFO: %s", msg)
 def _warn(msg: str) -> None: print(f"  ⚠  {msg}"); log.warning("WARN: %s", msg)
+
+def _log_predicates(registry: DetectedObjectRegistry, label: str = "") -> None:
+    """Ground and log all clutter predicates from the current registry state."""
+    tag = f" ({label})" if label else ""
+    _section(f"Predicate Summary{tag}")
+    grounder = ClutterGrounder(registry)
+    facts = grounder.ground_all()
+
+    true_facts = facts.get("true", [])
+    if true_facts:
+        _info(f"TRUE facts ({len(true_facts)}):")
+        for pred, args in sorted(true_facts):
+            _info(f"  ({pred} {' '.join(args)})")
+    else:
+        _info("TRUE facts: (none)")
+
+    # Log the sensed predicates that ClutterGrounder can evaluate directly
+    all_objects = registry.get_all_objects()
+    obj_ids = [o.object_id for o in all_objects]
+
+    _info(f"Sensed predicate evaluation ({len(obj_ids)} objects):")
+    for obj_id in sorted(obj_ids):
+        access_clear  = grounder.evaluate_access_clear(obj_id)
+        displaceable  = grounder.evaluate_displaceable(obj_id)
+        removal_safe  = grounder.evaluate_removal_safe(obj_id)
+        visible       = grounder.evaluate_visible(obj_id)
+        obj = registry.get_object(obj_id)
+        score = (obj.clearance_profile.graspability_score
+                 if obj and obj.clearance_profile else None)
+        score_str = f"  graspability={score:.2f}" if score is not None else ""
+        _info(
+            f"  {obj_id}:"
+            f"  access-clear={'T' if access_clear else 'F'}"
+            f"  displaceable={'T' if displaceable else 'F'}"
+            f"  removal-safe={'T' if removal_safe else 'F'}"
+            f"  visible={'T' if visible else 'F'}"
+            f"{score_str}"
+        )
+
+    # Binary: obstructs
+    obstructs_pairs = []
+    for blocker in obj_ids:
+        for target in obj_ids:
+            if blocker != target and grounder.evaluate_obstructs(blocker, target):
+                obstructs_pairs.append((blocker, target))
+    if obstructs_pairs:
+        _info(f"obstructs pairs ({len(obstructs_pairs)}):")
+        for blocker, target in sorted(obstructs_pairs):
+            _info(f"  (obstructs {blocker} {target})")
+    else:
+        _info("obstructs pairs: (none)")
+
 
 def _wait(gui: bool, prompt: str = "Press Enter to continue...") -> None:
     if gui:
@@ -587,6 +640,15 @@ def test_clearance(camera: RealSenseCamera, tracker, gui: bool,
         _warn("No clearance profiles computed")
         return False
 
+    # Attach locally-computed profiles back to registry objects so ClutterGrounder can read them.
+    for oid, profile in profiles.items():
+        obj = tracker.registry.get_object(oid)
+        if obj is not None:
+            obj.clearance_profile = profile
+            tracker.registry.update_object(oid, obj)
+
+    _log_predicates(tracker.registry, label="after clearance pass")
+
     if not gui:
         _ok("Clearance test complete (headless)")
         return True
@@ -719,6 +781,10 @@ def test_contact_graph(camera: RealSenseCamera, tracker, gui: bool,
     for oid, score in graph.stability_scores.items():
         _info(f"  {oid}: {score:.2f}")
 
+    # Store graph on registry so ClutterGrounder can evaluate stable-on, displaceable, etc.
+    tracker.registry.contact_graph = graph
+    _log_predicates(tracker.registry, label="after contact graph pass")
+
     if not gui:
         _ok("Contact graph test complete (headless)")
         return graph
@@ -838,6 +904,9 @@ def test_occlusion(camera: RealSenseCamera, tracker, n_frames: int, gui: bool) -
     _info("Visibility per object:")
     for oid, vis in occ_map.per_object_visibility.items():
         _info(f"  {oid}: {vis.visible_fraction:.0%}  occluders={vis.occluding_objects}")
+
+    tracker.registry.occlusion_map = occ_map
+    _log_predicates(tracker.registry, label="after occlusion pass")
 
     if not gui:
         _ok("Occlusion test complete (headless)")

@@ -52,15 +52,13 @@ logger = logging.getLogger(__name__)
 CORRIDOR_LENGTH: float = 0.30
 # Safety margin added around the gripper swept volume on each side (metres).
 CLEARANCE_MARGIN: float = 0.005
-# Neighbourhood search radius — objects further than this are ignored (metres).
-SEARCH_RADIUS: float = 1.0
 # Standoff from the AABB surface so the corridor does not overlap the target's
 # own point cloud, which would always produce a false self-collision.
 CORRIDOR_STANDOFF: float = 0.010
 
 # ---------------------------------------------------------------------------
 # Approach direction set  (spec §1.3 Phase 1)
-# 6 axis-aligned + 4 horizontal diagonals + 8 angled (45° elevation) = 18
+# 6 axis-aligned + 4 horizontal diagonals + 7 angled (45° elevation) = 17
 # ---------------------------------------------------------------------------
 
 _s2 = float(np.sqrt(2) / 2)   # sin/cos 45° ≈ 0.7071
@@ -86,7 +84,6 @@ _ANGLED_DIRS = np.array([
     [ 0.0,  1.0, -_s2],
     [-1.0,  0.0, -_s2],
     [ 0.0, -1.0, -_s2],
-    [ 1.0,  0.0,  _s2],
     [ 0.0,  1.0,  _s2],
     [-1.0,  0.0,  _s2],
     [ 0.0, -1.0,  _s2],
@@ -442,112 +439,6 @@ def _gripper_axes(approach_dir: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return grasp_axis, height_axis
 
 
-def _obb_aabb_intersect_sat(
-    obb_center: np.ndarray,
-    obb_axes: np.ndarray,      # (3, 3) rows are unit axes
-    obb_half: np.ndarray,      # (3,) half-extents
-    aabb_min: np.ndarray,      # (3,)
-    aabb_max: np.ndarray,      # (3,)
-) -> bool:
-    """Separating axis test between an OBB and an AABB.
-
-    Tests up to 15 candidate separating axes (3 OBB face normals + 3 AABB
-    face normals + 9 edge cross-products).  Returns True if they intersect.
-
-    Uses the support-function projection for both bodies so the test is
-    correct regardless of axis direction (no sign ambiguity).
-    """
-    aabb_center = (aabb_min + aabb_max) * 0.5
-    aabb_half   = (aabb_max - aabb_min) * 0.5
-
-    def _separated(axis: np.ndarray) -> bool:
-        n = float(np.linalg.norm(axis))
-        if n < 1e-10:
-            # Degenerate axis (parallel edges) — cannot separate on this axis
-            return False
-        ax = axis / n
-        # OBB support radius along ax
-        r_obb  = float(np.sum(obb_half  * np.abs(obb_axes  @ ax)))
-        # AABB support radius along ax
-        r_aabb = float(np.sum(aabb_half * np.abs(ax)))
-        # Signed distance between centers along ax
-        d = abs(float((aabb_center - obb_center) @ ax))
-        return d > r_obb + r_aabb
-
-    # 3 OBB face normals
-    for ax in obb_axes:
-        if _separated(ax):
-            return False
-    # 3 AABB face normals (world X, Y, Z)
-    for ax in np.eye(3):
-        if _separated(ax):
-            return False
-    # 9 edge cross-products
-    for obb_ax in obb_axes:
-        for i in range(3):
-            world_ax = np.zeros(3); world_ax[i] = 1.0
-            cross = np.cross(obb_ax, world_ax)
-            if _separated(cross):
-                return False
-    return True
-
-
-def _aabb_project(aabb_min: np.ndarray, aabb_max: np.ndarray,
-                  axis: np.ndarray) -> Tuple[float, float]:
-    """Return (min, max) scalar projection of an AABB onto a unit axis.
-
-    Uses the support-function form: project the center then add/subtract the
-    half-extent along the axis.  This is correct for any axis direction,
-    unlike a direct dot-product of min/max corners (which breaks when axis
-    components are negative).
-    """
-    center = (aabb_min + aabb_max) * 0.5
-    half   = (aabb_max - aabb_min) * 0.5
-    proj_c = float(center @ axis)
-    proj_r = float(np.sum(np.abs(half * axis)))
-    return proj_c - proj_r, proj_c + proj_r
-
-
-def _compute_intrusion(
-    obb_center: np.ndarray,
-    obb_axes: np.ndarray,      # (3, 3) rows: [approach, grasp, height]
-    obb_half: np.ndarray,      # (3,) half-extents along each axis
-    aabb_min: np.ndarray,
-    aabb_max: np.ndarray,
-    grasp_axis: np.ndarray,    # unit vector along which fingers close (= obb_axes[1])
-) -> float:
-    """Compute how much of the corridor width is consumed by an obstacle.
-
-    Measures the overlap between the obstacle AABB and the corridor OBB
-    projected onto the grasp axis, but only counts intrusion where the
-    obstacle actually overlaps the corridor in *all three* OBB axes.
-    An obstacle that only clips the bottom of the corridor (height axis)
-    but not the grasp-axis cross-section should not reduce clearance.
-
-    Returns the overlap length in metres along grasp_axis (0 if the
-    obstacle does not penetrate the grasp-axis cross-section).
-    """
-    # Check overlap on all three OBB axes first.  If the obstacle misses
-    # the corridor on any axis it cannot consume grasp-axis clearance.
-    for axis, half in zip(obb_axes, obb_half):
-        obs_min, obs_max = _aabb_project(aabb_min, aabb_max, axis)
-        corr_proj = float(obb_center @ axis)
-        if obs_max <= corr_proj - half or obs_min >= corr_proj + half:
-            return 0.0
-
-    # All three axes overlap — measure the grasp-axis component only.
-    obstacle_min, obstacle_max = _aabb_project(aabb_min, aabb_max, grasp_axis)
-    corridor_proj = float(obb_center @ grasp_axis)
-    corridor_half_w = obb_half[1]
-    corridor_min = corridor_proj - corridor_half_w
-    corridor_max = corridor_proj + corridor_half_w
-
-    overlap_min = max(obstacle_min, corridor_min)
-    overlap_max = min(obstacle_max, corridor_max)
-    if overlap_max <= overlap_min:
-        return 0.0
-    return overlap_max - overlap_min
-
 
 # ---------------------------------------------------------------------------
 # Depth / point-cloud helpers
@@ -584,9 +475,29 @@ def _cam_to_base(
     return rot.apply(pts_cam) + cam_position
 
 
-def _pts_aabb(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (min_corner, max_corner) AABB of a point cloud."""
-    return pts.min(axis=0), pts.max(axis=0)
+def _statistical_outlier_filter(pts: np.ndarray, k: int = 20, std_ratio: float = 2.0) -> np.ndarray:
+    """Remove statistical outliers from a point cloud.
+
+    For each point, computes the mean distance to its k nearest neighbours.
+    Points whose mean distance exceeds the global mean + std_ratio * std are
+    removed. This eliminates isolated sensor noise and depth-edge artifacts.
+
+    Args:
+        pts: (N, 3) point cloud.
+        k: Number of neighbours to consider.
+        std_ratio: Threshold multiplier on the standard deviation.
+
+    Returns:
+        Filtered (M, 3) point cloud with outliers removed.
+    """
+    if len(pts) <= k:
+        return pts
+    from scipy.spatial import cKDTree
+    tree = cKDTree(pts)
+    dists, _ = tree.query(pts, k=k + 1)  # k+1 because point queries itself
+    mean_dists = dists[:, 1:].mean(axis=1)  # exclude self (distance=0)
+    threshold = mean_dists.mean() + std_ratio * mean_dists.std()
+    return pts[mean_dists <= threshold]
 
 
 # ---------------------------------------------------------------------------
@@ -617,102 +528,68 @@ def _compute_single_corridor(
     target_center: np.ndarray,
     target_aabb_min: np.ndarray,
     target_aabb_max: np.ndarray,
-    target_aabb_radius: float,
     approach_dir: np.ndarray,
-    neighbor_aabbs: List[Tuple[str, np.ndarray, np.ndarray]],
+    obstacle_pts: np.ndarray,
     gripper: GripperGeometry,
-    neighbor_pts: Optional[Dict[str, np.ndarray]] = None,
+    obj_pts_map: Optional[Dict[str, np.ndarray]] = None,
 ) -> ApproachCorridor:
     """Compute clearance for one approach direction.
 
     Builds a gripper-sized OBB swept volume starting at the target object
-    surface and extending CORRIDOR_LENGTH in approach_dir.  Tests all
-    neighbour AABBs against this OBB with SAT; accumulates transverse
-    intrusions to derive remaining clearance.
+    surface and extending CORRIDOR_LENGTH in approach_dir. Collision is
+    decided by testing the filtered obstacle point cloud (all non-target
+    depth points) directly against the OBB — no AABBs involved.
 
     Args:
-        target_center: (3,) centroid of the target in world frame.
-        target_aabb_min/max: AABB of the target in world frame.
+        target_center: (3,) centroid of the target in world/camera frame.
+        target_aabb_min/max: Percentile-clipped AABB used only to position
+            corridor_start on the target surface.
         approach_dir: (3,) unit approach vector.
-        neighbor_aabbs: List of (id, min_corner, max_corner) for neighbours.
+        obstacle_pts: (N, 3) outlier-filtered cloud of all non-target points.
         gripper: GripperGeometry parameters.
-        neighbor_pts: Optional dict mapping obj_id → point cloud (N,3).  When
-            provided, an AABB SAT hit is confirmed by checking whether any
-            actual points fall inside the corridor OBB before counting as a
-            blocker.  This eliminates false positives from large/sparse AABBs.
+        obj_pts_map: Optional dict mapping obj_id → point cloud. Used only
+            to populate obstructing_objects for logging/planning hints — does
+            not affect the CLEAR/BLOCKED decision.
 
     Returns:
         ApproachCorridor for this direction.
     """
-    # Gravity-aligned gripper frame: grasp_axis horizontal, height_axis ≈ world up
     grasp_axis, height_axis = _gripper_axes(approach_dir)
 
-    # Half-extents of the OBB
     corridor_half_len = CORRIDOR_LENGTH / 2.0
-    corridor_half_w   = gripper.swept_width    # along grasp_axis
-    corridor_half_h   = gripper.swept_height   # along height_axis
+    corridor_half_w   = gripper.swept_width
+    corridor_half_h   = gripper.swept_height
 
-    # corridor_start: the point on the target AABB surface in approach_dir.
-    # Use the AABB support function: project center onto approach_dir then
-    # add the support radius (sum of half-extents * |dir_component|).
-    # This gives the correct surface distance for any approach direction,
-    # including diagonals where the naive (extents @ abs_dir)/2 over-estimates.
     target_aabb_half = (target_aabb_max - target_aabb_min) * 0.5
     extent_along_approach = float(np.sum(target_aabb_half * np.abs(approach_dir)))
     corridor_start  = target_center + approach_dir * (extent_along_approach + CORRIDOR_STANDOFF)
     corridor_center = corridor_start + approach_dir * corridor_half_len
 
-    obb_axes = np.stack([approach_dir, grasp_axis, height_axis], axis=0)  # (3, 3)
-    obb_half = np.array([corridor_half_len, corridor_half_w, corridor_half_h])
-
-    # Available transverse width starts at full corridor width
-    full_width = corridor_half_w * 2.0
-    min_clearance = full_width
-    obstructing: List[str] = []
-    obstructor_aabbs: List[Tuple[np.ndarray, np.ndarray]] = []
-
     dir_str = f"({approach_dir[0]:+.2f},{approach_dir[1]:+.2f},{approach_dir[2]:+.2f})"
 
-    for obj_id, nb_min, nb_max in neighbor_aabbs:
-        if not _obb_aabb_intersect_sat(corridor_center, obb_axes, obb_half, nb_min, nb_max):
-            continue
-        # Confirm with actual point cloud when available: AABB SAT can fire on
-        # the empty corner of a sparse or elongated AABB.  If no actual points
-        # fall inside the OBB the object is not truly in the way.
-        if neighbor_pts is not None and obj_id in neighbor_pts:
-            nb_pts = neighbor_pts[obj_id]
-            if len(nb_pts) > 0 and not _pts_in_obb_corridor(
-                nb_pts, corridor_center,
+    blocked = (
+        len(obstacle_pts) > 0
+        and _pts_in_obb_corridor(
+            obstacle_pts, corridor_center,
+            approach_dir, grasp_axis, height_axis,
+            corridor_half_len, corridor_half_w, corridor_half_h,
+        )
+    )
+
+    # Identify which named objects contributed blocking points — informational only.
+    obstructing: List[str] = []
+    if blocked and obj_pts_map:
+        for obj_id, pts in obj_pts_map.items():
+            if len(pts) > 0 and _pts_in_obb_corridor(
+                pts, corridor_center,
                 approach_dir, grasp_axis, height_axis,
                 corridor_half_len, corridor_half_w, corridor_half_h,
             ):
-                logger.debug(
-                    "  corridor %s: SAT hit %s rejected — no actual points inside OBB",
-                    dir_str, obj_id,
-                )
-                continue
-        obstructing.append(obj_id)
-        obstructor_aabbs.append((nb_min.copy(), nb_max.copy()))
-        intrusion = _compute_intrusion(
-            corridor_center, obb_axes, obb_half,
-            nb_min, nb_max, grasp_axis,
-        )
-        remaining = full_width - intrusion
-        min_clearance = min(min_clearance, remaining)
-        logger.debug(
-            "  corridor %s: SAT hit %s  intrusion=%.1fmm  remaining=%.1fmm",
-            dir_str, obj_id, intrusion * 1000, remaining * 1000,
-        )
+                obstructing.append(obj_id)
 
-    grasp_compatible = min_clearance >= gripper.min_clearance_required
-    if grasp_compatible:
-        status = "GRASP_OK"
-    elif obstructing and min_clearance < full_width:
-        status = f"BLOCKED — stage 2 (grasp-axis intrusion by {obstructing}, clearance {min_clearance*1000:.1f}mm < required {gripper.min_clearance_required*1000:.1f}mm)"
-    elif obstructing:
-        status = f"BLOCKED — stage 1 (SAT intersection with {obstructing}, but zero grasp-axis intrusion — obstacle overlaps height axis only)"
-    else:
-        status = "BLOCKED — no obstructors (min_clearance below required from the start)"
+    grasp_compatible = not blocked
+    min_clearance    = 0.0 if blocked else gripper.swept_width * 2.0
+    status = "GRASP_OK" if grasp_compatible else f"BLOCKED by points in OBB (named: {obstructing or 'unknown'})"
     logger.info("corridor %s: %s", dir_str, status)
 
     return ApproachCorridor(
@@ -726,7 +603,7 @@ def _compute_single_corridor(
         height_axis=height_axis.copy(),
         half_width=corridor_half_w,
         half_height=corridor_half_h,
-        obstructor_aabbs=obstructor_aabbs,
+        obstructor_aabbs=[],
     )
 
 
@@ -766,10 +643,6 @@ def _compute_graspability(
 # ---------------------------------------------------------------------------
 
 
-_SURFACE_TYPE_KEYWORDS: frozenset = frozenset({
-    "table", "counter", "shelf", "desk", "tray", "bench", "surface", "floor"
-})
-
 
 def compute_clearance_profile(
     target_mask: np.ndarray,
@@ -780,48 +653,35 @@ def compute_clearance_profile(
     workspace_radius: float = 1.5,
     camera_quaternion_xyzw: Optional[np.ndarray] = None,
     cam_position: Optional[np.ndarray] = None,
-    # Legacy compatibility: scalar aperture is promoted to GripperGeometry
     gripper_aperture_m: Optional[float] = None,
     object_types: Optional[Dict[str, str]] = None,
 ) -> ClearanceProfile:
     """Compute the clearance profile for one object.
 
     Builds a gripper-width OBB swept volume in each approach direction that
-    falls within ±100° of the object→camera vector (the observable hemisphere),
-    and checks it against every neighbouring object's AABB using the Separating
-    Axis Theorem.  Directions outside the observed region are skipped — they
-    point at surfaces the camera cannot see and the robot cannot reliably reach.
-    Derives transverse clearance, grasp compatibility, and a graspability score.
+    falls within ±100° of the object→camera vector (the observable hemisphere).
+    Collision is decided by testing the full outlier-filtered obstacle point
+    cloud (all non-target depth points) directly against each OBB — no AABBs
+    are used, so undetected or partially-segmented objects still block corridors.
 
     Args:
         target_mask: (H, W) bool mask of the target object (from SAM2).
         depth_frame: (H, W) float32 depth image in metres.
         camera_intrinsics: Object with fx, fy, ppx/cx, ppy/cy attributes.
         all_masks: Dict mapping other object IDs to their (H, W) bool masks.
+            Used only to label which named objects caused a blockage.
         gripper: GripperGeometry with finger_width, max_aperture, depth.
-            Defaults to GripperGeometry() (12 mm fingers, 85 mm aperture, 60 mm depth).
-        workspace_radius: Not used for OBB checks but kept for API compat.
+            Defaults to GripperGeometry() (20 mm fingers, 85 mm aperture, 60 mm depth).
+        workspace_radius: Kept for API compatibility, unused.
         camera_quaternion_xyzw: (4,) camera orientation as xyzw quaternion.
-            Required to transform points into base frame for world-axis directions.
         cam_position: (3,) camera origin in base frame.
-        gripper_aperture_m: Legacy scalar — if gripper is None and this is
-            provided, a GripperGeometry is constructed with max_aperture set
-            to this value.
+        gripper_aperture_m: Legacy scalar — promotes to GripperGeometry if
+            gripper is None.
+        object_types: Kept for API compatibility, unused.
 
     Returns:
-        ClearanceProfile with 18 approach corridors and scalar summaries.
-
-    Example:
-        gripper = GripperGeometry(finger_width=0.012, max_aperture=0.085, depth=0.06)
-        profile = compute_clearance_profile(
-            target_mask=obj_mask,
-            depth_frame=depth_m,
-            camera_intrinsics=intr,
-            all_masks={"cup_1": cup_mask, "table_2": table_mask},
-            gripper=gripper,
-        )
+        ClearanceProfile with approach corridors and scalar summaries.
     """
-    # Resolve gripper geometry
     if gripper is None:
         if gripper_aperture_m is not None:
             gripper = GripperGeometry(max_aperture=float(gripper_aperture_m))
@@ -840,12 +700,14 @@ def compute_clearance_profile(
     if len(target_pts) == 0:
         return ClearanceProfile()
 
-    # --- Obstacle point clouds per neighbouring object ---
+    # --- Obstacle point cloud: every non-target depth pixel, outlier-filtered ---
     obstacle_mask = ~target_mask & (depth_frame > 0) & np.isfinite(depth_frame)
-    obstacle_pts_full = _depth_to_pointcloud(
+    obstacle_pts_raw = _depth_to_pointcloud(
         np.where(obstacle_mask, depth_frame, 0.0), fx, fy, cx, cy
     )
+    obstacle_pts = _statistical_outlier_filter(obstacle_pts_raw) if len(obstacle_pts_raw) > 0 else obstacle_pts_raw
 
+    # --- Per-object clouds for labelling obstructing_objects (informational) ---
     obj_pts_map: Dict[str, np.ndarray] = {}
     if all_masks:
         for obj_id, mask in all_masks.items():
@@ -860,88 +722,44 @@ def compute_clearance_profile(
     # --- Optional: transform all clouds to robot base frame ---
     _do_base_transform = cam_position is not None and camera_quaternion_xyzw is not None
     if _do_base_transform:
-        target_pts = _cam_to_base(target_pts, cam_position, camera_quaternion_xyzw)  # type: ignore[arg-type]
-        obstacle_pts_full = _cam_to_base(obstacle_pts_full, cam_position, camera_quaternion_xyzw)  # type: ignore[arg-type]
-        obj_pts_map = {
+        target_pts   = _cam_to_base(target_pts,   cam_position, camera_quaternion_xyzw)  # type: ignore[arg-type]
+        obstacle_pts = _cam_to_base(obstacle_pts, cam_position, camera_quaternion_xyzw)  # type: ignore[arg-type]
+        obj_pts_map  = {
             oid: _cam_to_base(pts, cam_position, camera_quaternion_xyzw)  # type: ignore[arg-type]
             for oid, pts in obj_pts_map.items()
         }
 
-    # --- Compute target AABB ---
-    # Depth cameras only observe the near-facing surface of an object — the
-    # point cloud is the visible face only.  Mask-edge pixels that bleed onto
-    # the background can project far behind the object in world frame, so we
-    # use tight percentiles (5th–95th) to reject those outliers.  The resulting
-    # AABB spans only what was actually observed.
+    # --- Target AABB (percentile-clipped) — used only to position corridor_start ---
     target_aabb_min = np.percentile(target_pts, 5,  axis=0)
     target_aabb_max = np.percentile(target_pts, 95, axis=0)
     target_center   = target_pts.mean(axis=0)
-    # Half-diagonal of the robust AABB — used to reject self-collision hits
-    target_aabb_radius = float(np.linalg.norm(target_aabb_max - target_aabb_min)) / 2.0
 
-    # Neighbour point clouds filtered by SEARCH_RADIUS and bleed-through check.
-    # Bleed-through: SAM2 masks sometimes bleed onto adjacent objects so their
-    # depth pixels overlap in 3D.  We detect this by checking whether the
-    # *median* nearest distance between neighbour and target points is below
-    # BLEED_THROUGH_DIST.  Using the median (50th percentile) means only
-    # neighbours whose point clouds substantially overlap the target (i.e. mask
-    # bleed, not just physical proximity) are excluded.  The previous 5th-
-    # percentile threshold incorrectly excluded objects that were simply close
-    # to the target in space, causing corridors to appear CLEAR when blocked.
-    BLEED_THROUGH_DIST: float = 0.008  # metres — median closer than this = mask overlap
-    _tgt_sample = target_pts[::max(1, len(target_pts) // 500)]  # up to 500 pts
+    # --- World-frame Z-range filter (only when base transform was applied) ---
+    # Mask-bleed from SAM2 can assign floor/cable pixels to a neighbour's mask,
+    # making objects at a completely different height appear to block table-level
+    # approach corridors.  After transforming to base frame (Z = world height),
+    # clip the obstacle cloud and each named object's cloud to the target's Z
+    # band ± a corridor-height margin so floor objects cannot obstruct table objects.
+    if _do_base_transform:
+        _Z_MARGIN = CORRIDOR_LENGTH  # generous: full corridor depth above/below target
+        _z_lo = float(target_aabb_min[2]) - _Z_MARGIN
+        _z_hi = float(target_aabb_max[2]) + _Z_MARGIN
+        if len(obstacle_pts) > 0:
+            _z_valid = (obstacle_pts[:, 2] >= _z_lo) & (obstacle_pts[:, 2] <= _z_hi)
+            obstacle_pts = obstacle_pts[_z_valid]
+        obj_pts_map = {
+            oid: pts[(pts[:, 2] >= _z_lo) & (pts[:, 2] <= _z_hi)]
+            for oid, pts in obj_pts_map.items()
+        }
 
-    neighbor_aabbs: List[Tuple[str, np.ndarray, np.ndarray]] = []
-    neighbor_aabbs_vis: List[Tuple[np.ndarray, np.ndarray]] = []
-    for obj_id, pts in obj_pts_map.items():
-        # Skip support surfaces — their large AABBs span the table top and
-        # generate false corridor blockages for any object resting on them.
-        if object_types is not None:
-            otype = object_types.get(obj_id, "").lower()
-            if any(kw in otype for kw in _SURFACE_TYPE_KEYWORDS):
-                logger.debug("  skipped neighbour %s (surface type '%s')", obj_id, otype)
-                continue
-
-        nb_min, nb_max = _pts_aabb(pts)
-        nb_center = (nb_min + nb_max) / 2.0
-        if float(np.linalg.norm(nb_center - target_center)) > SEARCH_RADIUS:
-            continue
-        # Point-cloud bleed-through check: sample neighbour pts and find the
-        # minimum distance to any target point.  Use broadcasting on a small
-        # sample to keep this O(1) in practice.
-        nb_sample = pts[::max(1, len(pts) // 200)]  # up to 200 pts
-        dists = np.linalg.norm(
-            nb_sample[:, None, :] - _tgt_sample[None, :, :], axis=2
-        ).min(axis=1)
-        if float(np.percentile(dists, 50)) < BLEED_THROUGH_DIST:
-            logger.debug(
-                "  skipped neighbour %s (bleed-through: median_dist=%.1fmm < %.1fmm)",
-                obj_id, float(np.percentile(dists, 50)) * 1000, BLEED_THROUGH_DIST * 1000,
-            )
-            continue
-        neighbor_aabbs.append((obj_id, nb_min, nb_max))
-        nb_min_vis = np.percentile(pts, 5,  axis=0)
-        nb_max_vis = np.percentile(pts, 95, axis=0)
-        neighbor_aabbs_vis.append((nb_min_vis, nb_max_vis))
-    logger.debug("compute_clearance_profile: %d neighbours in search radius", len(neighbor_aabbs))
-
-    # --- Filter directions to the observable hemisphere ±100° from camera ---
-    # The camera can only observe surfaces facing toward it, so approach
-    # directions pointing more than 100° away from the object→camera vector
-    # are outside the observed region and should not be evaluated.
-    # cos(100°) ≈ -0.174 — directions with dot product below this are culled.
+    # --- Filter approach directions to the observable hemisphere ±100° from camera ---
     _COS_LIMIT = float(np.cos(np.deg2rad(100.0)))
     if cam_position is not None:
-        # Use world-frame cam_position if base transform was applied, else
-        # transform cam_position to the same frame as target_center.
-        if _do_base_transform:
-            cam_pos_world = np.asarray(cam_position, dtype=float)
-        else:
-            cam_pos_world = np.asarray(cam_position, dtype=float)
+        cam_pos_world = np.asarray(cam_position, dtype=float)
         toward_cam = cam_pos_world - target_center
         toward_cam_norm = float(np.linalg.norm(toward_cam))
         if toward_cam_norm > 1e-6:
-            toward_cam = toward_cam / toward_cam_norm
+            toward_cam /= toward_cam_norm
             active_dirs = _APPROACH_DIRS[(_APPROACH_DIRS @ toward_cam) >= _COS_LIMIT]
         else:
             active_dirs = _APPROACH_DIRS
@@ -955,11 +773,10 @@ def compute_clearance_profile(
             target_center=target_center,
             target_aabb_min=target_aabb_min,
             target_aabb_max=target_aabb_max,
-            target_aabb_radius=target_aabb_radius,
             approach_dir=approach_dir,
-            neighbor_aabbs=neighbor_aabbs,
+            obstacle_pts=obstacle_pts,
             gripper=gripper,
-            neighbor_pts=obj_pts_map,
+            obj_pts_map=obj_pts_map,
         )
         corridors.append(corridor)
 
@@ -1016,9 +833,9 @@ def compute_clearance_profile(
         centroid=target_center,
         ray_dirs=_APPROACH_DIRS.copy(),
         ray_lengths_m=ray_lengths,
-        obstacle_pts=obstacle_pts_full.copy() if len(obstacle_pts_full) > 0 else None,
+        obstacle_pts=obstacle_pts.copy() if len(obstacle_pts) > 0 else None,
         target_pts=target_pts.copy() if len(target_pts) > 0 else None,
         target_aabb_min=target_aabb_min.copy(),
         target_aabb_max=target_aabb_max.copy(),
-        neighbor_aabbs=neighbor_aabbs_vis,
+        neighbor_aabbs=[],
     )

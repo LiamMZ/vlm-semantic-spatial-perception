@@ -2261,6 +2261,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytracik"
+version = "0.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", marker = "sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c3/30/e14813249054ee0458347982cbe2f9a58eefc2fc7171ed9e2b01e816adb8/pytracik-0.0.3.tar.gz", hash = "sha256:ed4ac2bc59c22c2e8b6793e65adc84059393d53285f0a76825eb5901cb001e09", size = 74937, upload-time = "2026-03-08T16:52:47.396Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/5c/3df50a600aae33284dde78d20850f72ad607d0ccb6c6ae4c8ace2bc4c177/pytracik-0.0.3-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:7c08ae092b140bec81dcc629b6357b66ec17ccf52d4e58673f92bbb0fd05ff97", size = 998285, upload-time = "2026-03-08T16:52:36.092Z" },
+]
+
+[[package]]
 name = "pytz"
 version = "2025.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3070,6 +3082,7 @@ dependencies = [
     { name = "pytest-asyncio", marker = "sys_platform == 'linux'" },
     { name = "pytest-cov", marker = "sys_platform == 'linux'" },
     { name = "python-dotenv", marker = "sys_platform == 'linux'" },
+    { name = "pytracik", marker = "sys_platform == 'linux'" },
     { name = "pyyaml", marker = "sys_platform == 'linux'" },
     { name = "qpsolvers", extra = ["quadprog"], marker = "sys_platform == 'linux'" },
     { name = "ram", marker = "sys_platform == 'linux'" },
@@ -3128,6 +3141,7 @@ requires-dist = [
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=4.1.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "pytracik", specifier = ">=0.0.3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qpsolvers", extras = ["quadprog"], specifier = ">=4.3.1" },
     { name = "ram", git = "https://github.com/xinyu1205/recognize-anything.git" },

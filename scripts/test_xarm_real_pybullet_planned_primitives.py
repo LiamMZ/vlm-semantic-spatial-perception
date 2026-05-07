@@ -32,6 +32,7 @@ from src.kinematics.xarm_pybullet_interface import XArmPybulletInterface
 from src.kinematics.xarm_pybullet_planned_primitives import (
     XArmPybulletPlannedPrimitives,
 )
+from src.kinematics.xarm_robot_adapter import XArmRobotAdapter
 
 _HOME_JOINTS_DEG = [-8.1, -75.3, -24.9, 88.0, -7.6, 116.2, -34.9]
 _DEFAULT_ROBOT_IP = "192.168.1.224"
@@ -39,119 +40,10 @@ _DEFAULT_SAFE_SPEED_FACTOR = 0.25
 _DEFAULT_SAFE_JOINT_SPEED = 0.12
 _DEFAULT_SAFE_JOINT_ACCEL = 0.25
 _DEFAULT_SAFE_MAX_JOINT_STEP = 0.03
-_GRIPPER_OPEN = 850
-_GRIPPER_CLOSED = 0
 _STEP_NAMES = ("move", "push", "pull", "pivot_pull", "twist", "retract")
 
-
-class RawXArmRobotAdapter:
-    """Small real-xArm adapter for `XArmPybulletPlannedPrimitives`.
-
-    Args:
-        robot_ip: xArm controller IP address.
-
-    Example:
-        >>> robot = RawXArmRobotAdapter("192.168.1.224")
-        >>> robot.get_robot_joint_state()
-        >>> robot.disconnect()
-    """
-
-    def __init__(self, robot_ip: str) -> None:
-        try:
-            from xarm.wrapper import XArmAPI
-        except ImportError as exc:
-            raise RuntimeError("xarm SDK is not available") from exc
-
-        self.robot_ip = robot_ip
-        self.arm = XArmAPI(robot_ip, is_radian=True)
-        self.arm_lock = threading.Lock()
-        self.current_joints: Optional[np.ndarray] = None
-
-        self.arm.connect()
-        self.arm.clean_error()
-        self.arm.clean_warn()
-        self.arm.motion_enable(enable=True)
-        self.arm.set_mode(0)
-        self.arm.set_state(0)
-
-    def get_robot_joint_state(self) -> Optional[np.ndarray]:
-        """Return current robot joints in radians."""
-        with self.arm_lock:
-            code, angles = self.arm.get_servo_angle(is_radian=True)
-        if code != 0 or angles is None:
-            print(f"Failed to read xArm joints; code={code}")
-            return None
-        self.set_current_joint_state(angles)
-        return self.current_joints.copy()
-
-    def set_current_joint_state(self, joint_positions: Any) -> None:
-        """Cache the latest known real xArm joint state."""
-        self.current_joints = np.asarray(joint_positions, dtype=float).reshape(-1)[:7]
-
-    def set_robot_joint_angles(
-        self,
-        joint_angles: List[float],
-        wait: bool = True,
-        speed: float = _DEFAULT_SAFE_JOINT_SPEED,
-        acc: float = _DEFAULT_SAFE_JOINT_ACCEL,
-    ) -> bool:
-        """Move the real xArm to a joint target in radians."""
-        with self.arm_lock:
-            # Only reset controller state on blocking (last) waypoints to avoid
-            # interrupting the motion pipeline mid-trajectory.
-            if wait:
-                self.arm.set_mode(0)
-                self.arm.set_state(0)
-            code = self.arm.set_servo_angle(
-                angle=list(joint_angles),
-                speed=speed,
-                mvacc=acc,
-                wait=wait,
-                is_radian=True,
-            )
-        if code == 0:
-            self.set_current_joint_state(joint_angles)
-            return True
-        print(f"set_servo_angle failed; code={code}")
-        return False
-
-    def open_gripper(self, wait: bool = True, **_: Any) -> bool:
-        """Open the xArm gripper."""
-        return self._set_gripper(_GRIPPER_OPEN, wait=wait)
-
-    def close_gripper(self, wait: bool = True, **_: Any) -> bool:
-        """Close the xArm gripper."""
-        return self._set_gripper(_GRIPPER_CLOSED, wait=wait)
-
-    def disconnect(self) -> None:
-        """Disconnect from the xArm controller."""
-        try:
-            self.arm.set_state(0)
-        finally:
-            self.arm.disconnect()
-
-    def _set_gripper(self, position: int, wait: bool = True) -> bool:
-        with self.arm_lock:
-            if hasattr(self.arm, "set_gripper_mode"):
-                self.arm.set_gripper_mode(0)
-            if hasattr(self.arm, "set_gripper_enable"):
-                self.arm.set_gripper_enable(True)
-            if hasattr(self.arm, "clean_gripper_error"):
-                self.arm.clean_gripper_error()
-            if hasattr(self.arm, "set_gripper_speed"):
-                self.arm.set_gripper_speed(2000)
-            if hasattr(self.arm, "set_gripper_position"):
-                code = self.arm.set_gripper_position(
-                    position,
-                    wait=wait,
-                    auto_enable=True,
-                )
-                return code == 0
-            if position == _GRIPPER_OPEN and hasattr(self.arm, "open_lite6_gripper"):
-                return self.arm.open_lite6_gripper() == 0
-            if position == _GRIPPER_CLOSED and hasattr(self.arm, "close_lite6_gripper"):
-                return self.arm.close_lite6_gripper() == 0
-        return False
+# Backwards-compatible alias
+RawXArmRobotAdapter = XArmRobotAdapter
 
 
 def _run_step(

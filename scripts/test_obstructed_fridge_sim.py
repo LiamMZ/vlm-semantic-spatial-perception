@@ -254,6 +254,17 @@ async def run(args: argparse.Namespace) -> int:
     # create_env hardcodes camera_depths=False; RobocasaCamera renders depth
     # on demand via sim.render(depth=True) when get_depth() is called.
     obs = env.reset()
+
+    # Tilt the wrist ~15° upward so the eye-in-hand camera faces more
+    # toward the fridge interior rather than straight ahead.
+    # Action [3:6] is EEF delta orientation (axis-angle); positive Y rotates
+    # the wrist upward (pitch up from the robot's perspective).
+    _WRIST_TILT_RAD = np.deg2rad(15.0)
+    _wrist_action = np.zeros(getattr(env, "action_dim", 12))
+    _wrist_action[4] = -_WRIST_TILT_RAD  # EEF delta pitch (Y-axis)
+    for _ in range(5):  # apply over several steps so the controller tracks it
+        obs, *_ = env.step(_wrist_action)
+
     _tock("env_create", t0)
 
     ep_meta  = env.get_ep_meta()
@@ -373,14 +384,14 @@ async def run(args: argparse.Namespace) -> int:
         gripper=GripperGeometry(),
         logger=log.getChild("GSAM2Tracker"),
         debug_save_dir=debug_dir,
+        use_molmo=True,
     )
     orchestrator.tracker = gsam2_tracker
-    gsam2_tracker.on_detection_complete = orchestrator._on_detection_callback
 
     def _sim_frame_provider():
-        color      = sim_camera.capture_frame()
-        depth      = sim_camera.get_depth()
-        intrinsics = sim_camera.get_camera_intrinsics()
+        color       = sim_camera.capture_frame()
+        depth       = sim_camera.get_depth()
+        intrinsics  = sim_camera.get_camera_intrinsics()
         robot_state = robot_iface.get_robot_state()
         return color, depth, intrinsics, robot_state
 
@@ -388,7 +399,9 @@ async def run(args: argparse.Namespace) -> int:
     _tock("model_load", t0)
     _ok(f"GSAM2 tracker loaded on {device}")
 
-    # Wire up primitives now that we have a registry
+    # Wire up primitives now that the registry exists, then point the
+    # orchestrator config at sim_primitives to keep the robot interface
+    # consistent with test_clutter_planning_realsense_robot.py.
     sim_primitives = RobocasaPrimitives(
         env=env,
         registry=orchestrator.tracker.registry,
@@ -396,6 +409,7 @@ async def run(args: argparse.Namespace) -> int:
         step_sleep=args.step_sleep,
         verbose=args.verbose,
     )
+    orchestrator.config.robot = sim_primitives
 
     # -----------------------------------------------------------------------
     _section(f"6 / Perception Pass ({args.frames} sim frames)")
@@ -508,123 +522,182 @@ async def run(args: argparse.Namespace) -> int:
     _ok(f"Perception pass complete — {len(detected_ids)} objects")
 
     # -----------------------------------------------------------------------
-    _section("7 / Task Request + PDDL Generation")
+    _section("7 / Task Request + PDDL Generation (L1–L5)")
     # -----------------------------------------------------------------------
+    solver_result = None
     if args.no_plan or llm_client is None:
         _info("Planning", "skipped (--no-plan or no LLM client)")
     else:
         t0 = _tick()
         try:
-            # Capture a frame for context
             ctx_frame = sim_camera.capture_frame()
-            task_analysis = await orchestrator.process_task_request(
-                task_str, environment_image=ctx_frame
-            )
-            _ok(f"Task analysed: {task_analysis.abstract_goal.summary}")
+            await orchestrator.process_task_request(task_str, environment_image=ctx_frame)
+            _ok("Task analysis complete")
         except Exception as exc:
             log.exception("process_task_request failed: %s", exc)
-            _tock("task_request", t0)
+            _tock("pddl_generation", t0)
             await orchestrator.save_state()
             env.close()
             return 1
-        _tock("task_request", t0)
+        _tock("pddl_generation", t0)
 
-        t0 = _tick()
-        try:
-            pddl_paths = await orchestrator.generate_pddl_files(
-                output_dir=OUTPUT_DIR / "pddl",
-                set_goals=True,
-            )
-            _tock("pddl_generation", t0)
-            domain_path  = pddl_paths.get("domain_path")
-            problem_path = pddl_paths.get("problem_path")
-            if domain_path:
-                _ok(f"Domain  → {domain_path}")
-            if problem_path:
-                _ok(f"Problem → {problem_path}")
-
-            if domain_path and Path(domain_path).exists():
-                _section("Generated PDDL Domain")
-                print(Path(domain_path).read_text())
-            if problem_path and Path(problem_path).exists():
-                _section("Generated PDDL Problem")
-                print(Path(problem_path).read_text())
-
-        except Exception as exc:
-            _tock("pddl_generation", t0)
-            log.exception("PDDL generation failed: %s", exc)
+        pddl_dir = OUTPUT_DIR / "pddl"
+        for pattern, label in [("*_domain.pddl", "Domain"), ("*_problem.pddl", "Problem")]:
+            matches = sorted(pddl_dir.glob(pattern)) if pddl_dir.exists() else []
+            if matches:
+                _section(f"Generated PDDL {label}")
+                print(matches[-1].read_text())
 
         # -----------------------------------------------------------------------
         _section("8 / Planning")
         # -----------------------------------------------------------------------
         t0 = _tick()
         try:
-            result = await orchestrator.solve_and_plan_with_refinement(
-                output_dir=OUTPUT_DIR / "pddl",
+            solver_result = await orchestrator.solve_and_plan_with_refinement(
+                output_dir=pddl_dir,
                 wait_for_objects=False,
             )
             _tock("planning", t0)
 
-            if result.success:
-                _ok(f"Plan found ({result.plan_length} steps)")
-                for i, step in enumerate(result.plan, 1):
-                    _info(f"  {i:2d}.", step)
+            if solver_result and solver_result.success:
+                _ok(f"Plan found — {solver_result.plan_length} steps")
+                for i, step in enumerate(solver_result.plan, 1):
+                    _info(f"  {i}", step)
             else:
-                _warn(f"No plan found: {result.error_message}")
-        except Exception as exc:
+                err = (getattr(solver_result, "error_message", "unknown")
+                       if solver_result else "no result")
+                _warn(f"Planning failed: {err}")
+        except Exception:
+            log.exception("Solving failed")
             _tock("planning", t0)
-            log.exception("Planning failed: %s", exc)
-            result = None
 
         # -----------------------------------------------------------------------
-        _section("9 / Execution (via RobocasaPrimitives)")
+        _section("9 / Execution (via RobocasaPrimitives + ConditionalTaskExecutor)")
         # -----------------------------------------------------------------------
-        if args.execute and result is not None and result.success:
-            _info("Executing plan in sim...")
-            t0 = _tick()
+        if args.execute and solver_result and solver_result.success and solver_result.plan:
+            from src.planning.conditional_task_executor import ConditionalTaskExecutor
+            from src.planning.clutter_module import PostDisplacementHook
             from src.primitives.skill_decomposer import SkillDecomposer
             from src.primitives.primitive_executor import PrimitiveExecutor
 
             pool_dir = Path(config.perception_pool_dir or OUTPUT_DIR / "perception_pool")
-            executor = PrimitiveExecutor(
+            prim_executor = PrimitiveExecutor(
                 primitives=sim_primitives,
                 perception_pool_dir=pool_dir,
                 logger=log.getChild("PrimitiveExecutor"),
-            )
-            decomposer = SkillDecomposer(
-                llm_client=llm_client,
-                logger=log.getChild("SkillDecomposer"),
+                orchestrator=orchestrator,
             )
 
-            world_state = orchestrator.get_world_state_snapshot()
+            cam_intrinsics = sim_camera.get_camera_intrinsics()
+            cam_state      = robot_iface.get_robot_state()
+            cam_pos = np.array(cam_state["camera"]["position"]) if cam_state and "camera" in cam_state else None
+            cam_rot = None
+            if cam_state and "camera" in cam_state:
+                from scipy.spatial.transform import Rotation as _R
+                cam_rot = _R.from_quat(cam_state["camera"]["quaternion_xyzw"])
 
-            for symbolic_action in result.plan:
-                _info(f"  action", symbolic_action)
-                try:
-                    skill_plan = await decomposer.decompose(
-                        symbolic_action=symbolic_action,
-                        world_state=world_state,
-                    )
-                    exec_result = executor.execute_plan(skill_plan, world_state)
-                    _ok(f"  executed: {exec_result.executed}")
-                    # Step sim a few times after each action for physics to settle
-                    for _ in range(10):
-                        obs, _, done, _ = env.step(np.zeros(env.action_dim))
-                        sim_camera.update(obs)
-                        robot_iface.update(obs)
-                    if done:
+            post_hook = PostDisplacementHook(
+                registry=registry,
+                camera_intrinsics=cam_intrinsics,
+                cam_position=cam_pos,
+                cam_rotation=cam_rot,
+                logger=log.getChild("PostDisplacementHook"),
+            )
+
+            decomposer = None
+            if llm_client is not None:
+                decomposer = SkillDecomposer(llm_client=llm_client, orchestrator=orchestrator)
+            else:
+                _warn("LLM client not available — skill decomposition disabled")
+
+            def execute_fn(action_str: str) -> bool:
+                tokens      = action_str.strip("() ").split()
+                action_name = tokens[0] if tokens else action_str
+                param_ids   = tokens[1:] if len(tokens) > 1 else []
+                params      = {"objects": param_ids, "action_str": action_str}
+
+                if decomposer is not None:
+                    try:
+                        skill_plan = decomposer.plan(action_name, params)
+                        _ok(f"    Decomposed → {[p.name for p in skill_plan.primitives]}")
+                        for w in (skill_plan.diagnostics.warnings or []):
+                            _warn(f"    {w}")
+                        if skill_plan.primitives:
+                            fresh_snapshot_id = orchestrator.capture_fresh_snapshot_sync(
+                                reason=f"pre-execution:{action_name}"
+                            )
+                            world_state_for_exec = {"state_dir": str(orchestrator.config.state_dir)}
+                            if fresh_snapshot_id:
+                                world_state_for_exec["last_snapshot_id"] = fresh_snapshot_id
+                            result = prim_executor.execute_plan(
+                                skill_plan,
+                                world_state=world_state_for_exec,
+                            )
+                            # Step sim after each primitive action to let physics settle
+                            for _ in range(10):
+                                obs, _, done, _ = env.step(np.zeros(env.action_dim))
+                                sim_camera.update(obs)
+                                robot_iface.update(obs)
+                                sim_primitives.update(obs)
+                            return result.executed
+                        _warn("    Decomposer returned no primitives — skipping action")
+                    except Exception as exc:
+                        _warn(f"    Decomposition failed for '{action_name}': {exc}")
+                        log.exception("Decomposition error")
+
+                _warn(f"    No executor for '{action_name}' — skipping")
+                return True
+
+            async def _replan() -> List[str]:
+                _info("Replanning: fresh perception pass...")
+                await orchestrator.start_detection()
+                replan_deadline = time.monotonic() + 20.0
+                while time.monotonic() < replan_deadline:
+                    await asyncio.sleep(0.5)
+                    _step_sim(np.zeros(env.action_dim))
+                    if orchestrator.tracker.registry.get_all_objects():
                         break
-                except Exception as exc:
-                    _warn(f"  execution failed for '{symbolic_action}': {exc}")
-                    log.exception("Primitive execution error")
+                await orchestrator.stop_detection()
+                ctx = sim_camera.capture_frame()
+                await orchestrator.process_task_request(task_str, environment_image=ctx)
+                res = await orchestrator.solve_and_plan_with_refinement(
+                    output_dir=pddl_dir, wait_for_objects=False
+                )
+                return res.plan if res and res.success else []
 
+            t0 = _tick()
+            cond_executor = ConditionalTaskExecutor(
+                registry=registry,
+                execute_action=execute_fn,
+                replan_fn=_replan,
+                max_replan=getattr(orchestrator.config, "max_refinement_attempts", 2),
+                post_displacement_hook=post_hook,
+                logger=log.getChild("ConditionalExecutor"),
+            )
+
+            cond_result = await cond_executor.execute(solver_result.plan)
             _tock("execution", t0)
-            # Check task success
+
+            if cond_result.success:
+                _ok(f"Execution complete — {len(cond_result.steps)} steps, "
+                    f"{cond_result.replan_count} replan(s)")
+            else:
+                _warn(f"Execution failed: {cond_result.error}")
+
+            _section("Step-by-step trace")
+            for step in cond_result.steps:
+                pred_tag     = (f"  [{'TRUE' if step.predicate_value else 'FALSE'}]"
+                                if step.predicate_value is not None else "")
+                recovery_tag = f"  → {step.recovery_action}" if step.recovery_triggered else ""
+                _info(f"  {'✓' if step.success else '✗'} {step.action}{pred_tag}{recovery_tag}",
+                      step.notes or "")
+
             success = env._check_success()
             if success:
-                _ok("Task SUCCESS — target_item is on the counter!")
+                _ok("Task SUCCESS — target item retrieved!")
             else:
                 _warn("Task not yet complete after plan execution")
+
         elif args.execute:
             _warn("Execution requested but no plan available")
 

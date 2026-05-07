@@ -30,11 +30,24 @@ class SnapshotCameraPose:
 
 
 @dataclass
+class ExecutedPrimitive:
+    """Record of a single executed primitive step."""
+
+    index: int
+    name: str
+    parameters: Dict[str, Any]
+    references: Dict[str, Any]
+    success: bool
+    result: Any
+
+
+@dataclass
 class PrimitiveExecutionResult:
     """Return payload for executor runs."""
 
     executed: bool
     primitive_results: List[Any] = field(default_factory=list)
+    executed_primitives: List[ExecutedPrimitive] = field(default_factory=list)
 
 
 class PrimitiveExecutor:
@@ -74,6 +87,7 @@ class PrimitiveExecutor:
             raise RuntimeError("Primitives interface is required for execution (dry_run=False).")
 
         primitive_results: List[Any] = []
+        executed_primitives: List[ExecutedPrimitive] = []
         for idx, primitive in enumerate(translated_plan.primitives):
             self.logger.info(
                 "Executing primitive [%d/%d]: %s with parameters %s",
@@ -91,13 +105,58 @@ class PrimitiveExecutor:
             method = getattr(self.primitives, primitive.name, None)
             if not callable(method):
                 raise AttributeError(f"Primitives interface missing primitive '{primitive.name}'")
-            self.logger.debug("Calling primitive method '%s' with parameters: %s", primitive.name, primitive.parameters)
-            raw_result = method(**primitive.parameters)
+            # Inject references.object_id as a kwarg so move_gripper_to_pose
+            # can build ignore_labels and mask the target object out of collision
+            # checking.  It lands in **_kwargs so primitives that don't use it
+            # are unaffected.
+            call_params = dict(primitive.parameters)
+            ref_obj_id = primitive.references.get("object_id")
+            if ref_obj_id:
+                call_params.setdefault("object_id", ref_obj_id)
+            self.logger.debug("Calling primitive method '%s' with parameters: %s", primitive.name, call_params)
+            success = True
+            try:
+                raw_result = method(**call_params)
+            except Exception as exc:
+                success = False
+                raw_result = str(exc)
+                self.logger.error("Primitive '%s' raised: %s", primitive.name, exc)
             result = self._json_safe(raw_result)
             primitive_results.append(result)
-            time.sleep(0.5)  # Small delay to avoid overwhelming the primitives interface
 
-        return PrimitiveExecutionResult(executed=True, primitive_results=primitive_results)
+            record = ExecutedPrimitive(
+                index=idx,
+                name=primitive.name,
+                parameters=dict(primitive.parameters),
+                references=dict(primitive.references),
+                success=success,
+                result=result,
+            )
+            executed_primitives.append(record)
+
+            # Print running executed-primitives log after each step.
+            summary_lines = [
+                f"  [{i}] {'OK' if r.success else 'FAIL'} {r.name}"
+                + (f" → obj={r.references.get('object_id')}" if r.references.get("object_id") else "")
+                for i, r in enumerate(executed_primitives)
+            ]
+            self.logger.info(
+                "Executed primitives so far (%d/%d):\n%s",
+                len(executed_primitives),
+                len(translated_plan.primitives),
+                "\n".join(summary_lines),
+            )
+
+            if success:
+                time.sleep(0.5)  # Small delay to avoid overwhelming the primitives interface
+            else:
+                break
+
+        return PrimitiveExecutionResult(
+            executed=True,
+            primitive_results=primitive_results,
+            executed_primitives=executed_primitives,
+        )
 
     def prepare_plan(
         self,

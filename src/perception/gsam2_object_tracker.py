@@ -201,6 +201,11 @@ class GSAM2ObjectTracker:
         self._tagger = OpenAITagger(api_key=openai_api_key, model=tagger_model)
         self.logger.info("OpenAI tagger loaded.")
 
+        if self._molmo is not None:
+            self.logger.info("Loading Molmo2-4B…")
+            self._molmo.load()
+            self.logger.info("Molmo2-4B loaded.")
+
         self._current_prompt: str = "object."
         self._frame_count: int = 0
         self._extra_tags: List[str] = []

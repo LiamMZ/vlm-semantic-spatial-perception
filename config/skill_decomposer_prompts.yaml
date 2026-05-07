@@ -9,8 +9,11 @@ template: |
 
   Action intent:
   - name: {action_name}
+  - pddl_parameters: {action_parameters}
+  - runtime_arguments: {parameters}
   - description: {action_description}
-  - parameters: {parameters}
+
+  {role_assignments}
 
   Relevant world state:
   {object_section}

@@ -146,7 +146,10 @@ class SkillDecomposer:
             snapshot_artifacts,
             prompts["template"],
         )
-        media_parts = self._build_media_parts(snapshot_artifacts)
+        media_parts = self._build_media_parts(
+            snapshot_artifacts,
+            detections=world_state.get("latest_detections") or [],
+        )
         response_text = self._call_llm(
             prompt,
             temperature=temperature,
@@ -316,12 +319,15 @@ class SkillDecomposer:
         # Use simple sequential replacement instead of str.format() to avoid
         # IndexError / KeyError when substituted values contain curly braces
         # (e.g. JSON dicts in object_section or perception_context).
-        action_description = self._resolve_action_description(action_name)
+        action_schema = self._resolve_action_schema(action_name)
+        role_assignments = self._resolve_role_assignments(action_name, parameters, action_schema)
         substitutions = {
             "{primitive_catalog}": primitive_catalog.strip(),
             "{action_name}": action_name,
-            "{action_description}": action_description,
+            "{action_parameters}": action_schema["parameters"],
+            "{action_description}": action_schema["description"],
             "{parameters}": json.dumps(parameters, ensure_ascii=True),
+            "{role_assignments}": role_assignments,
             "{object_section}": object_section,
             "{last_snapshot_id}": str(snapshot_artifacts.snapshot_id),
             "{perception_context}": perception_context,
@@ -512,35 +518,86 @@ class SkillDecomposer:
     # --------------------------------------------------------------------- #
     # Utilities
     # --------------------------------------------------------------------- #
-    def _resolve_action_description(self, action_name: str) -> str:
-        """
-        Look up the human-readable description for a PDDL action.
+    def _resolve_role_assignments(
+        self,
+        action_name: str,
+        parameters: Dict[str, Any],
+        action_schema: Dict[str, str],
+    ) -> str:
+        """Map positional runtime arguments to their PDDL parameter role names.
 
+        Parses the PDDL parameter signature (e.g. "(?blocker - object ?target - object)")
+        and zips it against the ordered object IDs in parameters["objects"] so the LLM
+        receives an unambiguous role→ID mapping rather than a bare positional list.
+
+        Returns a human-readable block like:
+            ?blocker = red_cup_mug_4  ← THIS is the object to physically move
+            ?target  = rubber_duck_7  ← this is the goal object being unblocked
+        or an empty string when no objects are present.
+        """
+        objects: List[str] = parameters.get("objects") or []
+        if not objects:
+            return ""
+
+        # Parse variable names from the PDDL signature string.
+        # Handles both "(?var - type ...)" and plain "?var ?var2" forms.
+        import re
+        sig = action_schema.get("parameters", "")
+        var_names = re.findall(r"\?(\w+)", sig)
+
+        lines: List[str] = ["Explicit role assignments for this invocation:"]
+        for i, obj_id in enumerate(objects):
+            role = f"?{var_names[i]}" if i < len(var_names) else f"?arg{i}"
+            # Add a short inline hint for the two roles the LLM most often confuses.
+            hint = ""
+            if "blocker" in role:
+                hint = "  ← THIS is the object to physically move/push aside"
+            elif "target" in role:
+                hint = "  ← this is the goal object being unblocked (do NOT move it)"
+            elif i == 0 and action_name in ("displace", "push-aside", "clear-obstruction"):
+                hint = "  ← THIS is the object to physically move"
+            lines.append(f"  {role} = {obj_id}{hint}")
+
+        return "\n".join(lines)
+
+    def _resolve_action_schema(self, action_name: str) -> Dict[str, str]:
+        """
+        Look up description and parameter signature for a PDDL action.
+
+        Returns a dict with keys 'description' and 'parameters' (both strings).
         Priority:
           1. Live domain from orchestrator.task_analysis.action_context()
              (covers both hardcoded clutter actions and LLM-generated ones)
           2. Hardcoded _CLUTTER_ACTIONS fallback (when orchestrator is absent)
-          3. Empty string (graceful degradation)
+          3. Empty strings (graceful degradation)
         """
+        def _extract(action: Dict) -> Dict[str, str]:
+            desc = action.get("description", "")
+            params = action.get("parameters", "")
+            # L3 actions store parameters as a list of "?var - type" strings
+            if isinstance(params, list):
+                params = "(" + " ".join(params) + ")"
+            return {"description": desc, "parameters": str(params)}
+
         # 1. Live domain
         if self.orchestrator is not None:
             task_analysis = getattr(self.orchestrator, "task_analysis", None)
             if task_analysis is not None:
                 for action in task_analysis.action_context():
                     if action.get("name") == action_name:
-                        desc = action.get("description", "")
-                        if desc:
-                            return desc
+                        result = _extract(action)
+                        if result["description"] or result["parameters"]:
+                            return result
 
         # 2. Hardcoded clutter actions fallback
         from src.planning.clutter_module import _CLUTTER_ACTIONS
         for action in _CLUTTER_ACTIONS:
             if action.get("name") == action_name:
-                desc = action.get("description", "")
-                if desc:
-                    return desc
+                result = _extract(action)
+                if result["description"] or result["parameters"]:
+                    return result
 
-        return ""
+        return {"description": "", "parameters": ""}
 
     def _format_perception_context(
         self,
@@ -580,17 +637,101 @@ class SkillDecomposer:
             f"robot_state: provider={robot_provider}, stamp={robot_stamp}"
         )
 
-    def _build_media_parts(self, snapshot_artifacts: SnapshotArtifacts) -> List[Any]:
+    def _build_media_parts(
+        self,
+        snapshot_artifacts: SnapshotArtifacts,
+        detections: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Any]:
         if not snapshot_artifacts.color_bytes:
             return []
+        image_bytes = self._build_labeled_image(snapshot_artifacts.color_bytes, detections or [])
         if self._llm_client is not None:
-            return [ImagePart(data=snapshot_artifacts.color_bytes, mime_type="image/png")]
+            return [ImagePart(data=image_bytes, mime_type="image/png")]
         return [
             _genai_types.Part.from_bytes(
-                data=snapshot_artifacts.color_bytes,
+                data=image_bytes,
                 mime_type="image/png",
             )
         ]
+
+    def _build_labeled_image(
+        self,
+        color_bytes: bytes,
+        detections: List[Dict[str, Any]],
+    ) -> bytes:
+        """Annotate the RGB snapshot with bounding boxes and object ID labels.
+
+        Each detected object gets a coloured box and a filled-background label
+        showing its object_id so the LLM can reference objects by name.
+        Returns the annotated image as PNG bytes; falls back to the original
+        bytes on any rendering error.
+        """
+        import io
+        import hashlib
+        from PIL import Image, ImageDraw, ImageFont
+
+        try:
+            img = Image.open(io.BytesIO(color_bytes)).convert("RGB")
+            draw = ImageDraw.Draw(img, "RGBA")
+            font_size = max(14, img.width // 50)
+            try:
+                font = ImageFont.load_default(size=font_size)
+            except TypeError:
+                font = ImageFont.load_default()
+
+            # Assign a distinct colour per object from a fixed palette.
+            _PALETTE = [
+                (255, 80, 80),
+                (80, 200, 80),
+                (80, 160, 255),
+                (255, 200, 40),
+                (200, 80, 255),
+                (40, 220, 220),
+                (255, 140, 0),
+                (180, 255, 80),
+            ]
+
+            for det in detections:
+                bbox = det.get("bounding_box_2d")
+                obj_id: str = det.get("object_id") or det.get("object_type") or "?"
+                if not bbox or len(bbox) < 4:
+                    continue
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                if x1 >= x2 or y1 >= y2:
+                    continue
+
+                # Deterministic colour from object_id hash so it's stable across calls.
+                colour_idx = int(hashlib.md5(obj_id.encode()).hexdigest(), 16) % len(_PALETTE)
+                colour = _PALETTE[colour_idx]
+                fill_rgba = colour + (40,)   # semi-transparent fill
+                border_rgba = colour + (220,)
+
+                draw.rectangle([x1, y1, x2, y2], outline=border_rgba, width=3, fill=fill_rgba)
+
+                # Measure text so we can size the background pill.
+                label = obj_id
+                try:
+                    bbox_txt = font.getbbox(label)
+                    tw, th = bbox_txt[2] - bbox_txt[0], bbox_txt[3] - bbox_txt[1]
+                except Exception:
+                    tw, th = len(label) * font_size // 2, font_size
+
+                pad = 4
+                lx = x1
+                ly = max(0, y1 - th - pad * 2)
+                draw.rectangle(
+                    [lx, ly, lx + tw + pad * 2, ly + th + pad * 2],
+                    fill=colour + (220,),
+                )
+                draw.text((lx + pad, ly + pad), label, fill=(255, 255, 255), font=font)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("_build_labeled_image failed: %s", exc)
+            return color_bytes
 
     def _load_snapshot_detections(self, snapshot_id: Optional[str]) -> List[Dict[str, Any]]:
         """

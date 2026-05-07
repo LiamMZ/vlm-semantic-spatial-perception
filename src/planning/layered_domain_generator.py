@@ -712,6 +712,7 @@ class LayeredDomainGenerator:
                 sensed_predicates=sensed_predicates,
                 checked_variants=[],
                 type_classifications=type_classifications,
+                descriptions=data.get("descriptions", {}),
             )
         except Exception as e:
             print(f"  [L2] Parse error: {e}\n  raw output: {text!r}")

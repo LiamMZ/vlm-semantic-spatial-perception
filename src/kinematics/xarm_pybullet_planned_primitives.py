@@ -20,7 +20,7 @@ _HOME_JOINTS_DEG = [-8.1, -75.3, -24.9, 88.0, -7.6, 116.2, -34.9]
 _HOME_JOINTS = np.deg2rad(_HOME_JOINTS_DEG).tolist()
 _DEFAULT_POSITION_TOLERANCE_M = 0.07
 _DEFAULT_ORIENTATION_TOLERANCE_RAD = 0.6
-_DEFAULT_SAFE_SPEED_FACTOR = 0.25
+_DEFAULT_SAFE_SPEED_FACTOR = 0.5
 _DEFAULT_SAFE_JOINT_SPEED = 0.5
 _DEFAULT_SAFE_JOINT_ACCEL = 0.25
 
@@ -86,6 +86,15 @@ class XArmPybulletPlannedPrimitives:
             return None, None
         return self._planner.get_camera_transform()
 
+    def get_robot_state(self):
+        """Return a robot state dict with live joints and camera transform.
+
+        Syncs real xArm joint state into PyBullet first so the camera
+        transform reflects the current hardware pose.
+        """
+        self._sync_planner_to_real_robot()
+        return self._planner.get_robot_state()
+
     def convert_cam_pose_to_base(
         self,
         position: Any,
@@ -141,6 +150,11 @@ class XArmPybulletPlannedPrimitives:
             >>> primitives.move_gripper_to_pose([0.35, 0.0, 0.30], execute=False)
         """
         del is_top_down_grasp
+        # Resolve target object ID for collision masking — the object being
+        # approached should not be treated as an obstacle during planning.
+        target_object_id: Optional[str] = _kwargs.get("object_id") or point_label
+        ignore_labels = {target_object_id} if target_object_id else None
+
         if target_position is None and point_label is not None:
             target_position = self._resolve_point_label(point_label)
         if target_position is None:
@@ -152,8 +166,9 @@ class XArmPybulletPlannedPrimitives:
         if is_place:
             pos[2] += 0.04
 
+        use_side = (preset_orientation == "side") or is_side_grasp
+        seed_name = "side" if use_side else "top_down"
         if target_orientation is None:
-            use_side = (preset_orientation == "side") or is_side_grasp
             target_orientation = [-0.6894, 0.0305, -0.7237, 0.0033] if use_side else [-0.9983, 0.0314, 0.0438, 0.0223]
 
         current_joints = self._planner.get_robot_joint_state()
@@ -166,29 +181,45 @@ class XArmPybulletPlannedPrimitives:
             max_joint_step=max_joint_step,
             position_tolerance=_DEFAULT_POSITION_TOLERANCE_M,
             orientation_tolerance_rad=_DEFAULT_ORIENTATION_TOLERANCE_RAD,
+            ignore_labels=ignore_labels,
         )
-        if (not success or trajectory is None) and target_orientation is not None:
-            self._logger.warning(
-                "move_gripper_to_pose orientation-constrained plan failed; "
-                "retrying position-only. target=%s orientation=%s current_tcp=%s",
-                pos,
-                target_orientation,
-                None if current_tcp is None else current_tcp[0].tolist(),
+
+        if not success or trajectory is None:
+            self._logger.info(
+                "Default orientation failed — running antipodal grasp sampler (seed=%s)", seed_name
             )
-            success, trajectory, dt = self._planner.move_to_pose(
-                target_position=pos,
-                target_orientation=None,
-                planning_dt=planning_dt,
-                execute=False,
-                max_joint_step=max_joint_step,
-                position_tolerance=_DEFAULT_POSITION_TOLERANCE_M,
+            clearance_profile = _kwargs.get("clearance_profile", None)
+            from src.grasp_planner import GraspPlanner
+            candidate = GraspPlanner(self._planner).plan(
+                np.asarray(pos),
+                seed_orientation=seed_name,
+                clearance_profile=clearance_profile,
+                ignore_labels=ignore_labels,
             )
+            if candidate is not None:
+                self._logger.info(
+                    "GraspPlanner selected orientation angle=%.1f° seed=%s manipulability=%.4f",
+                    np.degrees(candidate.approach_angle_rad),
+                    candidate.seed_orientation,
+                    candidate.manipulability,
+                )
+                target_orientation = candidate.orientation.tolist()
+                success, trajectory, dt = self._planner.move_to_pose(
+                    target_position=pos,
+                    target_orientation=target_orientation,
+                    planning_dt=planning_dt,
+                    execute=False,
+                    max_joint_step=max_joint_step,
+                    position_tolerance=_DEFAULT_POSITION_TOLERANCE_M,
+                    orientation_tolerance_rad=_DEFAULT_ORIENTATION_TOLERANCE_RAD,
+                    ignore_labels=ignore_labels,
+                )
+
         if not success or trajectory is None:
             self._logger.warning(
                 "move_gripper_to_pose failed. target=%s orientation=%s "
                 "current_joints=%s current_tcp=%s",
-                pos,
-                target_orientation,
+                pos, target_orientation,
                 None if current_joints is None else current_joints.tolist(),
                 None if current_tcp is None else current_tcp[0].tolist(),
             )
@@ -327,20 +358,81 @@ class XArmPybulletPlannedPrimitives:
         hinge_location: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Compatibility primitive that dispatches to push, pull, or pivot-pull."""
-        del surface_label, hinge_location
+        """Compatibility primitive that dispatches to push, pull, or pivot-pull.
+
+        force_direction semantics:
+          "perpendicular" — press into the surface (down for table objects); button press/release
+          "parallel"      — slide laterally across the surface toward the object, computed from
+                            the object's position relative to the current TCP
+          anything else   — treated as a named base-frame axis passed directly to push()
+        """
+        del hinge_location
         if has_pivot:
+            self._logger.info(
+                "push_pull: surface=%s  mode=pivot-pull", surface_label
+            )
             result = self.pivot_pull(**kwargs)
+
         elif force_direction == "perpendicular":
-            result = self.push(distance=0.05 if is_button else 0.08, force_direction="down", **kwargs)
+            dist = 0.05 if is_button else 0.08
+            self._logger.info(
+                "push_pull: surface=%s  mode=push  direction=down  distance=%.3fm%s",
+                surface_label, dist, "  (button)" if is_button else "",
+            )
+            result = self.push(distance=dist, force_direction="down", **kwargs)
+
         elif force_direction == "parallel":
-            result = self.pull(distance=0.08, force_direction="forward", **kwargs)
+            # Compute push direction from object position relative to current TCP
+            # so the gripper slides toward (and past) the object rather than
+            # moving in a fixed base-frame axis.
+            push_vec = self._lateral_push_direction(surface_label)
+            if push_vec is not None:
+                vec_str = f"[{push_vec[0]:.2f}, {push_vec[1]:.2f}, {push_vec[2]:.2f}]"
+                self._logger.info(
+                    "push_pull: surface=%s  mode=push  direction=lateral%s  distance=0.080m",
+                    surface_label, f"({vec_str})",
+                )
+                result = self._cartesian_delta_motion(
+                    direction=push_vec,
+                    distance=0.08,
+                    label=f"push_pull lateral ({surface_label})",
+                    speed_factor=kwargs.get("speed_factor", _DEFAULT_SAFE_SPEED_FACTOR),
+                    execute=kwargs.get("execute", True),
+                )
+            else:
+                # No registry position — fall back to +X push
+                self._logger.info(
+                    "push_pull: surface=%s  mode=push  direction=forward(fallback)  distance=0.080m",
+                    surface_label,
+                )
+                result = self.push(distance=0.08, force_direction="forward", **kwargs)
+
         else:
+            self._logger.info(
+                "push_pull: surface=%s  mode=push  direction=%s  distance=0.080m",
+                surface_label, force_direction,
+            )
             result = self.push(distance=0.08, force_direction=force_direction, **kwargs)
 
         if is_button and result.get("success") and kwargs.get("execute", True):
             self.pull(distance=0.03, force_direction="down", **kwargs)
         return result
+
+    def _lateral_push_direction(self, surface_label: str) -> Optional[np.ndarray]:
+        """Return a unit vector from the current TCP toward the object in XY."""
+        tcp = self._planner.get_robot_tcp_pose() if self._planner else None
+        if tcp is None:
+            return None
+        tcp_pos = tcp[0]
+        obj_pos = self._resolve_point_label(surface_label)
+        if obj_pos is None:
+            return None
+        delta = np.asarray(obj_pos, float) - np.asarray(tcp_pos, float)
+        delta[2] = 0.0  # lateral only — ignore Z
+        norm = float(np.linalg.norm(delta))
+        if norm < 1e-6:
+            return None
+        return delta / norm
 
     def twist(
         self,
@@ -368,12 +460,14 @@ class XArmPybulletPlannedPrimitives:
         """Open the real xArm gripper."""
         self._gripper_open = True
         ok = self._robot.open_gripper(**kwargs)
+        self._planner.open_gripper()
         return {"success": bool(ok)}
 
     def close_gripper(self, **kwargs: Any) -> Dict[str, Any]:
         """Close the real xArm gripper."""
         self._gripper_open = False
         ok = self._robot.close_gripper(**kwargs)
+        self._planner.close_gripper()
         return {"success": bool(ok)}
 
     def retract_gripper(
@@ -570,6 +664,10 @@ class XArmPybulletPlannedPrimitives:
         if joints is None:
             return False
         self._planner.set_current_joint_state(joints)
+        if self._gripper_open:
+            self._planner.open_gripper()
+        else:
+            self._planner.close_gripper()
         self._planner.get_robot_tcp_pose()
         return True
 

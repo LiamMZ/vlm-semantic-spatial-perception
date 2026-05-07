@@ -120,8 +120,12 @@ class MolmoPointDetector:
         self._exec_device = None
 
     # ------------------------------------------------------------------
-    # Lazy model loading
+    # Model loading
     # ------------------------------------------------------------------
+
+    def load(self) -> None:
+        """Eagerly load the model and processor. Safe to call multiple times."""
+        self._ensure_loaded()
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:

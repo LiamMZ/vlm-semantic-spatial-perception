@@ -191,30 +191,24 @@ def _init_output_dir() -> None:
 # ---------------------------------------------------------------------------
 
 def connect_xarm(robot_ip: str) -> Optional[Any]:
-    """Connect to the xArm via RawXArmRobotAdapter. Returns adapter or None."""
+    """Connect to the xArm via XArmRobotAdapter. Returns adapter or None."""
     _section("Connecting to xArm")
     try:
-        # Import inline to avoid hard dependency when xarm SDK is absent
-        import sys as _sys
-        import importlib.util as _util
-        _spec = _util.spec_from_file_location(
-            "test_xarm_real_pybullet_planned_primitives",
-            Path(__file__).parent / "test_xarm_real_pybullet_planned_primitives.py",
-        )
-        _mod = _util.module_from_spec(_spec)  # type: ignore[arg-type]
-        _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-        RawXArmRobotAdapter = _mod.RawXArmRobotAdapter
+        from src.kinematics.xarm_robot_adapter import XArmRobotAdapter
     except Exception as exc:
-        _warn(f"RawXArmRobotAdapter not importable ({exc}) — robot execution disabled")
+        _warn(f"XArmRobotAdapter not importable ({exc}) — robot execution disabled")
         return None
 
     try:
-        adapter = RawXArmRobotAdapter(robot_ip)
+        adapter = XArmRobotAdapter(robot_ip)
+        _ok(f"xArm SDK connected at {robot_ip}")
+        code, angles = adapter.arm.get_servo_angle(is_radian=True)
+        _info("get_servo_angle raw", f"code={code}  angles={angles}")
         joints = adapter.get_robot_joint_state()
         if joints is not None:
-            _ok(f"xArm connected at {robot_ip}  joints={np.round(joints, 3).tolist()}")
+            _ok(f"Joint state read  joints={np.round(joints, 3).tolist()}")
         else:
-            _warn("Connected but could not read joint state")
+            _warn(f"Connected but get_robot_joint_state returned None (code={code})")
         return adapter
     except Exception as exc:
         _warn(f"xArm connection failed ({exc}) — running without execution")
@@ -269,9 +263,11 @@ def _build_pick_plan(
     obj_id: str,
     pos: np.ndarray,
     speed_factor: float,
+    clearance_profile: Optional[Any] = None,
 ) -> SkillPlan:
     """Approach → descend → close → retract."""
     approach = (pos + np.array([0.0, 0.0, _APPROACH_HEIGHT])).tolist()
+    cp = {"clearance_profile": clearance_profile} if clearance_profile is not None else {}
     return SkillPlan(
         action_name="pick",
         primitives=[
@@ -281,12 +277,14 @@ def _build_pick_plan(
                 "preset_orientation": "top_down",
                 "speed_factor": speed_factor,
                 "execute": True,
+                **cp,
             }, references={"object_id": obj_id}),
             PrimitiveCall("move_gripper_to_pose", {
                 "target_position": pos.tolist(),
                 "preset_orientation": "top_down",
                 "speed_factor": speed_factor * 0.6,
                 "execute": True,
+                **cp,
             }, references={"object_id": obj_id}),
             PrimitiveCall("close_gripper", {}),
             PrimitiveCall("move_gripper_to_pose", {
@@ -341,9 +339,11 @@ def _build_displace_plan(
     obj_id: str,
     pos: np.ndarray,
     speed_factor: float,
+    clearance_profile: Optional[Any] = None,
 ) -> SkillPlan:
     """Approach → descend → close → retract (arm home) → open (drop clear)."""
     approach = (pos + np.array([0.0, 0.0, _APPROACH_HEIGHT])).tolist()
+    cp = {"clearance_profile": clearance_profile} if clearance_profile is not None else {}
     return SkillPlan(
         action_name="displace",
         primitives=[
@@ -353,12 +353,14 @@ def _build_displace_plan(
                 "preset_orientation": "top_down",
                 "speed_factor": speed_factor,
                 "execute": True,
+                **cp,
             }, references={"object_id": obj_id}),
             PrimitiveCall("move_gripper_to_pose", {
                 "target_position": pos.tolist(),
                 "preset_orientation": "top_down",
                 "speed_factor": speed_factor * 0.6,
                 "execute": True,
+                **cp,
             }, references={"object_id": obj_id}),
             PrimitiveCall("close_gripper", {}),
             PrimitiveCall("move_gripper_to_pose", {
@@ -414,7 +416,9 @@ def build_action_executor(
                 if pos is None:
                     _warn(f"pick: no position for {obj_id}")
                     return False
-                plan = _build_pick_plan(obj_id, pos, speed_factor)
+                obj = registry.get_object(obj_id)
+                cp = getattr(obj, "clearance_profile", None) if obj is not None else None
+                plan = _build_pick_plan(obj_id, pos, speed_factor, clearance_profile=cp)
 
             elif action_name == "place" and len(params) >= 2:
                 obj_id, surface_id = params[0], params[1]
@@ -430,7 +434,9 @@ def build_action_executor(
                 if pos is None:
                     _warn(f"{action_name}: no position for {obj_id}")
                     return False
-                plan = _build_displace_plan(obj_id, pos, speed_factor)
+                obj = registry.get_object(obj_id)
+                cp = getattr(obj, "clearance_profile", None) if obj is not None else None
+                plan = _build_displace_plan(obj_id, pos, speed_factor, clearance_profile=cp)
 
             else:
                 _warn(f"    No executor for '{action_name}' — skipping")
@@ -604,10 +610,20 @@ async def run(args: argparse.Namespace) -> int:
             pybullet_iface.set_current_joint_state(live_joints)
             cam_pos, cam_rot = pybullet_iface.get_camera_transform()
             _ok(f"FK synced from live joints  camera_pos={cam_pos.round(3).tolist() if cam_pos is not None else 'N/A'}")
+            _info("Joint config (rad)", np.round(live_joints, 4).tolist())
+            _info("Joint config (deg)", np.round(np.rad2deg(live_joints), 2).tolist())
 
     # Swap the default ContinuousObjectTracker for GSAM2 before any detection starts.
     _section("Loading GSAM2 tracker")
     t0 = _tick()
+    # Use primitives as the robot interface for the tracker and orchestrator so
+    # get_camera_transform() syncs live joints from the real robot before running
+    # FK, rather than using pybullet_iface's cached _joints which only updates
+    # at planned-trajectory endpoints and can lag the actual arm position.
+    # Fall back to pybullet_iface in dry-run mode (no real robot).
+    _robot_interface_for_perception = primitives if primitives is not None else pybullet_iface
+    orchestrator.config.robot = _robot_interface_for_perception
+
     gsam2_tracker = GSAM2ContinuousObjectTracker(
         sam2_ckpt_path=sam2_ckpt,
         device=device,
@@ -615,7 +631,7 @@ async def run(args: argparse.Namespace) -> int:
         on_detection_complete=orchestrator._on_detection_callback,
         llm_client=llm_client if args.llm else None,
         llm_mode=args.llm_mode,
-        robot=pybullet_iface,
+        robot=_robot_interface_for_perception,
         gripper=GripperGeometry(),
         logger=log.getChild("GSAM2Tracker"),
         debug_save_dir=OUTPUT_DIR / "debug_frames",
@@ -952,7 +968,7 @@ def main() -> None:
                         default=os.getenv("ROBOT_IP", DEFAULT_ROBOT_IP),
                         help=f"xArm IP (default: {DEFAULT_ROBOT_IP} or $ROBOT_IP)")
     parser.add_argument(
-        "--speed-factor", type=float, default=0.25,
+        "--speed-factor", type=float, default=0.7,
         help="Trajectory speed multiplier 0–1 for all arm moves (default: 0.25)",
     )
     parser.add_argument("--llm", action="store_true",

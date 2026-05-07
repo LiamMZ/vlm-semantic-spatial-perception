@@ -199,6 +199,8 @@ class L2PredicateArtifact:
     checked_variants: List[str] = field(default_factory=list)
     # Maps predicate name → type classification string (robot_state|object_state|sensed|external|checked)
     type_classifications: Dict[str, str] = field(default_factory=dict)
+    # Maps predicate name → natural-language description
+    descriptions: Dict[str, str] = field(default_factory=dict)
     generation_attempts: int = 1
     validation_errors: List[str] = field(default_factory=list)
 

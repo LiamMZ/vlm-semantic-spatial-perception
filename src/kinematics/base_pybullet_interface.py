@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -94,6 +94,11 @@ class BasePybulletInterface:
         # Set to 1 to skip link_base (index 0) whose geometry is embedded in the
         # floor plane because the robot is physically bolted to the ground.
         self._floor_check_start_link: int = 1
+        # Last link index (exclusive) for floor-plane collision checks.
+        # Wrist, end-effector, and gripper links legitimately approach the table
+        # surface, so exclude them from floor checks to avoid false collisions.
+        # Subclasses should set this to the first wrist/eef link index.
+        self._floor_check_end_link: int = n_arm_joints - 1
         # Last arm link index (inclusive) for self-collision checking.
         # Links beyond this index belong to the end-effector / gripper /
         # camera assembly and have constant geometry — no need to self-check them.
@@ -248,6 +253,8 @@ class BasePybulletInterface:
         """Set the simulated joint state."""
         arr = np.asarray(joint_positions, dtype=float).flatten()
         self._joints = arr[: len(self._movable_joints)]
+        if self._use_gui:
+            self._apply_joints_to_sim()
 
     def get_robot_joint_state(self) -> Optional[np.ndarray]:
         """Return current simulated joint positions (radians)."""
@@ -394,55 +401,114 @@ class BasePybulletInterface:
         """Register a DepthEnvironmentCollider for trajectory collision checking."""
         self._collider = collider
 
+    def _get_tracik_solver(self):
+        """Lazily initialise and cache a TracIK solver for this robot."""
+        if getattr(self, "_tracik_solver", None) is None:
+            try:
+                from trac_ik import TracIK
+                self._tracik_solver = TracIK(
+                    base_link_name=self.base_link_name,
+                    tip_link_name=self.tcp_link_name,
+                    urdf_path=self.urdf_path,
+                )
+                logger.info("TracIK solver initialised (%s → %s)",
+                            self.base_link_name, self.tcp_link_name)
+            except Exception as exc:
+                logger.warning("TracIK unavailable (%s)", exc)
+                self._tracik_solver = None
+        return self._tracik_solver
+
     def _ik_solve(
         self,
         target_pos: np.ndarray,
         target_quat: Optional[np.ndarray],
         position_tolerance: float,
         orientation_tolerance_rad: float,
+        collision_check_fn: Optional[Any] = None,
     ) -> Optional[np.ndarray]:
-        """Run PyBullet IK and validate the result against pose tolerances.
+        """Solve IK with TracIK (multiple random-seed restarts).
+
+        Each seed is checked for collisions via collision_check_fn; the best
+        collision-free solution by position error is returned. Falls back to
+        the best colliding solution if no collision-free one is found.
 
         Returns the goal joint configuration (dof,) or None on failure.
         """
-        tcp_idx = self._get_link_index(self.tcp_link_name)
-        if tcp_idx is None:
-            logger.warning("TCP link '%s' not found in URDF", self.tcp_link_name)
+        solver = self._get_tracik_solver()
+        if solver is None:
+            logger.warning("IK solver unavailable")
             return None
 
-        self._apply_joints_to_sim()
-        if target_quat is None:
-            ik_solution = p.calculateInverseKinematics(
-                bodyUniqueId=self._robot_id,
-                endEffectorLinkIndex=tcp_idx,
-                targetPosition=target_pos.tolist(),
-                maxNumIterations=200,
-                residualThreshold=1e-5,
-                physicsClientId=self._physics_client,
-            )
-        else:
-            ik_solution = p.calculateInverseKinematics(
-                bodyUniqueId=self._robot_id,
-                endEffectorLinkIndex=tcp_idx,
-                targetPosition=target_pos.tolist(),
-                targetOrientation=target_quat.tolist(),
-                maxNumIterations=200,
-                residualThreshold=1e-5,
-                physicsClientId=self._physics_client,
-            )
+        dof = len(self._joints)
+        limits = self._get_joint_limits()
+        arm_lower = np.array([lo for lo, _ in limits])
+        arm_upper = np.array([hi for _, hi in limits])
 
-        if not ik_solution:
+        # Convert xyzw quaternion → rotation matrix for TracIK.
+        if target_quat is not None:
+            target_rotmat = Rotation.from_quat(target_quat).as_matrix()
+        else:
+            target_rotmat = None
+
+        best_joints: Optional[np.ndarray] = None
+        best_error = float("inf")
+        fallback_joints: Optional[np.ndarray] = None
+        fallback_error = float("inf")
+
+        seeds = [self._joints.copy()] + [
+            np.random.uniform(arm_lower, arm_upper) for _ in range(7)
+        ]
+        for seed in seeds:
+            if target_rotmat is not None:
+                sol = solver.ik(target_pos, target_rotmat, seed_jnt_values=seed)
+            else:
+                # Position-only: try all orientations by randomising rotation seed.
+                rand_rot = Rotation.random().as_matrix()
+                sol = solver.ik(target_pos, rand_rot, seed_jnt_values=seed)
+            if sol is None:
+                continue
+
+            # Evaluate FK error using PyBullet.
+            saved = self._joints.copy()
+            self._joints = sol[:dof]
+            reached = self.get_robot_tcp_pose()
+            self._joints = saved
+            if reached is None:
+                continue
+
+            err = float(np.linalg.norm(reached[0] - target_pos))
+            joint_disp = float(np.linalg.norm(sol[:dof] - self._joints))
+            score = err + 0.05 * joint_disp
+            collision_free = collision_check_fn is None or collision_check_fn(sol[:dof])
+            if collision_free and score < best_error:
+                best_error = score
+                best_joints = sol[:dof].copy()
+            elif not collision_free and score < fallback_error:
+                fallback_error = score
+                fallback_joints = sol[:dof].copy()
+
+        self._apply_joints_to_sim()
+
+        if best_joints is None and fallback_joints is not None:
+            collision_detail = self._describe_collision(fallback_joints)
+            logger.warning(
+                "IK: no collision-free solution found across %d seeds — "
+                "best solution (pos_err=%.4f) is in collision%s",
+                len(seeds), fallback_error,
+                f" [{collision_detail}]" if collision_detail else "",
+            )
+            best_joints = fallback_joints
+
+        if best_joints is None:
             logger.warning("IK solver returned no solution")
             return None
 
-        goal_joints = np.asarray(ik_solution[: len(self._joints)], dtype=float)
-
+        # Final tolerance validation.
         saved = self._joints.copy()
-        try:
-            self._joints = goal_joints
-            reached = self.get_robot_tcp_pose()
-        finally:
-            self._joints = saved
+        self._joints = best_joints
+        reached = self.get_robot_tcp_pose()
+        self._joints = saved
+        self._apply_joints_to_sim()
 
         if reached is None:
             return None
@@ -464,7 +530,7 @@ class BasePybulletInterface:
                 )
                 return None
 
-        return goal_joints
+        return best_joints
 
     def _is_state_valid(
         self,
@@ -508,10 +574,11 @@ class BasePybulletInterface:
                 ):
                     return False
 
-        # Robot vs floor plane — skip base-mounted links (their geometry
-        # straddles the floor in the URDF since the robot is bolted down).
+        # Robot vs floor plane — only check upper arm links.
+        # Base link is excluded (bolted to floor); wrist/eef/gripper links are
+        # excluded because they legitimately approach the table surface.
         if floor_body is not None:
-            for link_idx in range(self._floor_check_start_link, n_links):
+            for link_idx in range(self._floor_check_start_link, self._floor_check_end_link):
                 if p.getClosestPoints(
                     bodyA=rid, bodyB=floor_body,
                     distance=collision_margin,
@@ -536,8 +603,99 @@ class BasePybulletInterface:
 
         return True
 
-    def _build_collision_bodies(self) -> Tuple[List[int], Optional[int]]:
+    def _describe_collision(self, joints: np.ndarray, margin: float = 0.005) -> str:
+        """Return a short string naming what the robot is colliding with.
+
+        Applies joints to the sim, then checks each collision body individually
+        so the caller can log which mesh(es) are responsible.  Returns an empty
+        string when no collider is attached or nothing is found.
+        """
+        client = self._physics_client
+        rid    = self._robot_id
+        if client is None or rid is None:
+            return ""
+
+        import pybullet as _p
+        n_links = _p.getNumJoints(rid, physicsClientId=client)
+        for j, joint_idx in enumerate(self._movable_joints):
+            if j < len(joints):
+                _p.resetJointState(rid, joint_idx, float(joints[j]), physicsClientId=client)
+
+        culprits: List[str] = []
+
+        # Depth-mesh environment bodies.
+        if self._collider is not None:
+            for label, body_id in self._collider._bodies.items():
+                for link_idx in range(-1, n_links):
+                    pts = _p.getClosestPoints(
+                        bodyA=rid, bodyB=body_id,
+                        distance=margin,
+                        linkIndexA=link_idx,
+                        physicsClientId=client,
+                    )
+                    if pts:
+                        min_dist = min(pt[8] for pt in pts)
+                        try:
+                            link_info = _p.getJointInfo(rid, link_idx, physicsClientId=client)
+                            link_name = link_info[1].decode() if link_idx >= 0 else "base"
+                        except Exception:
+                            link_name = str(link_idx)
+                        culprits.append(
+                            f"mesh:{label} @ link:{link_name} dist={min_dist*1000:.1f}mm"
+                        )
+                        break
+
+        # Floor plane.
+        if self._floor_body_id is not None:
+            for link_idx in range(self._floor_check_start_link, self._floor_check_end_link):
+                pts = _p.getClosestPoints(
+                    bodyA=rid, bodyB=self._floor_body_id,
+                    distance=margin,
+                    linkIndexA=link_idx,
+                    physicsClientId=client,
+                )
+                if pts:
+                    min_dist = min(pt[8] for pt in pts)
+                    try:
+                        link_info = _p.getJointInfo(rid, link_idx, physicsClientId=client)
+                        link_name = link_info[1].decode()
+                    except Exception:
+                        link_name = str(link_idx)
+                    culprits.append(f"floor @ link:{link_name} dist={min_dist*1000:.1f}mm")
+                    break
+
+        # Self-collision.
+        end = self._arm_self_collision_end_link
+        for link_a in range(-1, end):
+            for link_b in range(link_a + 2, end + 1):
+                pts = _p.getClosestPoints(
+                    bodyA=rid, bodyB=rid,
+                    distance=0.0,
+                    linkIndexA=link_a, linkIndexB=link_b,
+                    physicsClientId=client,
+                )
+                if pts:
+                    min_dist = min(pt[8] for pt in pts)
+                    try:
+                        na = _p.getJointInfo(rid, link_a, physicsClientId=client)[1].decode() if link_a >= 0 else "base"
+                        nb = _p.getJointInfo(rid, link_b, physicsClientId=client)[1].decode()
+                    except Exception:
+                        na, nb = str(link_a), str(link_b)
+                    culprits.append(f"self:{na}↔{nb} dist={min_dist*1000:.1f}mm")
+                    break
+
+        return ", ".join(culprits)
+
+    def _build_collision_bodies(
+        self, ignore_labels: Optional[Set[str]] = None
+    ) -> Tuple[List[int], Optional[int]]:
         """Collect PyBullet body IDs for planning collision checks.
+
+        Args:
+            ignore_labels: Object labels (or BACKGROUND_ID) whose mesh bodies
+                should be excluded from collision checking.  Pass the target
+                object's ID here when planning a grasp so the planner is free
+                to approach the object without treating it as an obstacle.
 
         Returns:
             (env_bodies, floor_body) — env_bodies are depth-mesh obstacle bodies;
@@ -545,7 +703,10 @@ class BasePybulletInterface:
         """
         env_bodies: List[int] = []
         if self._collider is not None:
-            env_bodies.extend(self._collider._bodies.values())
+            for label, body_id in self._collider._bodies.items():
+                if ignore_labels and label in ignore_labels:
+                    continue
+                env_bodies.append(body_id)
         return env_bodies, self._floor_body_id
 
     def plan_joint_trajectory_to_pose(
@@ -557,6 +718,7 @@ class BasePybulletInterface:
         planning_time: float = 5.0,
         collision_margin: float = 0.005,
         interpolate_n: int = 64,
+        ignore_labels: Optional[Set[str]] = None,
     ) -> Optional[np.ndarray]:
         """Plan a collision-free joint-space trajectory to a target TCP pose.
 
@@ -598,13 +760,30 @@ class BasePybulletInterface:
         start_joints = self._joints.copy()
         dof = len(start_joints)
 
-        goal_joints = self._ik_solve(target_pos, target_quat, position_tolerance, orientation_tolerance_rad)
+        # Snapshot ALL movable joint positions (including gripper/camera joints
+        # outside self._joints) so we can fully restore them after IK restarts
+        # which may leave non-arm joints in arbitrary states.
+        full_joint_snapshot = [
+            p.getJointState(self._robot_id, idx, physicsClientId=self._physics_client)[0]
+            for idx in self._movable_joints
+        ]
+
+        env_bodies, floor_body = self._build_collision_bodies(ignore_labels=ignore_labels)
+        n_links = p.getNumJoints(self._robot_id, physicsClientId=self._physics_client)
+
+        def _ik_collision_check(joints: np.ndarray) -> bool:
+            return self._is_state_valid(joints, env_bodies, floor_body, collision_margin, n_links)
+
+        goal_joints = self._ik_solve(
+            target_pos, target_quat, position_tolerance, orientation_tolerance_rad,
+            collision_check_fn=_ik_collision_check,
+        )
         if goal_joints is None:
             return None
 
-        # IK validation temporarily sets self._joints = goal_joints and calls
-        # _apply_joints_to_sim for FK — restore PyBullet to start before OMPL.
-        self._apply_joints_to_sim()
+        # Restore ALL movable joints to pre-IK state before OMPL collision checks.
+        for idx, val in zip(self._movable_joints, full_joint_snapshot):
+            p.resetJointState(self._robot_id, idx, float(val), physicsClientId=self._physics_client)
 
         if not OMPL_AVAILABLE:
             logger.warning("OMPL not available — using linear interpolation (no collision checking)")
@@ -621,7 +800,7 @@ class BasePybulletInterface:
 
         si = ob.SpaceInformation(space)
         n_links = p.getNumJoints(self._robot_id, physicsClientId=self._physics_client)
-        env_bodies, floor_body = self._build_collision_bodies()
+        env_bodies, floor_body = self._build_collision_bodies(ignore_labels=ignore_labels)
 
         # Capture mutable state needed inside the checker subclass.
         saved_joints = start_joints.copy()
@@ -630,17 +809,9 @@ class BasePybulletInterface:
         class _ValidityChecker(ob.StateValidityChecker):
             def isValid(self, state):  # noqa: N802
                 joints = np.array([state[i] for i in range(dof)])
-                valid = interface._is_state_valid(
+                return interface._is_state_valid(
                     joints, env_bodies, floor_body, collision_margin, n_links,
                 )
-                # Restore joint state so FK queries remain consistent between checks.
-                for j, ji in enumerate(interface._movable_joints):
-                    if j < len(saved_joints):
-                        p.resetJointState(
-                            interface._robot_id, ji, float(saved_joints[j]),
-                            physicsClientId=interface._physics_client,
-                        )
-                return valid
 
         checker = _ValidityChecker(si)
         si.setStateValidityChecker(checker)
@@ -662,8 +833,9 @@ class BasePybulletInterface:
 
         pdef = ob.ProblemDefinition(si)
         pdef.setStartAndGoalStates(start_state, goal_state)
+        pdef.setOptimizationObjective(ob.PathLengthOptimizationObjective(si))
 
-        planner = og.RRTConnect(si)
+        planner = og.BITstar(si)
         planner.setProblemDefinition(pdef)
         planner.setup()
 
@@ -672,8 +844,11 @@ class BasePybulletInterface:
             logger.warning("OMPL failed to find a path within %.1f s", planning_time)
             return None
 
-        # Simplify and interpolate to a fixed number of waypoints.
         path = pdef.getSolutionPath()
+        simplifier = og.PathSimplifier(si)
+        # Shortcut redundant waypoints, then smooth, then densify for execution.
+        simplifier.simplifyMax(path)
+        simplifier.smoothBSpline(path, maxSteps=5)
         path.interpolate(interpolate_n)
 
         n_states = path.getStateCount()
@@ -683,9 +858,11 @@ class BasePybulletInterface:
             for i in range(dof):
                 trajectory[s, i] = state[i]
 
+        trajectory = _clamp_waypoint_steps(trajectory, max_joint_step=np.pi / 8)
+
         logger.info(
-            "OMPL RRTConnect: path found (%d waypoints, %.1f s budget)",
-            n_states, planning_time,
+            "OMPL BITstar: path found (%d waypoints, %.1f s budget)",
+            trajectory.shape[0], planning_time,
         )
         return trajectory
 
@@ -714,6 +891,7 @@ class BasePybulletInterface:
         planning_time: float = 5.0,
         collision_margin: float = 0.005,
         interpolate_n: int = 64,
+        ignore_labels: Optional[Set[str]] = None,
         **_ignored: Any,
     ) -> Tuple[bool, Optional[np.ndarray], Optional[float]]:
         """
@@ -733,6 +911,7 @@ class BasePybulletInterface:
             planning_time=planning_time,
             collision_margin=collision_margin,
             interpolate_n=interpolate_n,
+            ignore_labels=ignore_labels,
         )
         if trajectory is None:
             return False, None, None
@@ -836,6 +1015,23 @@ class BasePybulletInterface:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _clamp_waypoint_steps(
+    trajectory: np.ndarray, max_joint_step: float
+) -> np.ndarray:
+    """Re-interpolate waypoints so no joint moves more than max_joint_step per step."""
+    out = [trajectory[0]]
+    for wp in trajectory[1:]:
+        gap = np.max(np.abs(wp - out[-1]))
+        if gap <= max_joint_step:
+            out.append(wp)
+        else:
+            n = int(np.ceil(gap / max_joint_step))
+            prev = out[-1]
+            for t in np.linspace(0.0, 1.0, n + 1)[1:]:
+                out.append(prev + t * (wp - prev))
+    return np.array(out, dtype=float)
+
 
 def _build_T(pos: np.ndarray, orn_xyzw: np.ndarray) -> np.ndarray:
     """Build 4x4 homogeneous transform from position and xyzw quaternion."""
